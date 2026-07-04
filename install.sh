@@ -13,6 +13,7 @@ CACHE_DIR="/opt/hyper-host/cache"
 DNS_DIR="/etc/bind/hyper-host-zones"
 CONF_DIR="/etc/hyper-host"
 CONTROL_BIN="/usr/local/sbin/hyper-host-ctl"
+HYPER_BIN="/usr/local/bin/hyper"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -116,6 +117,7 @@ log "Копирование файлов панели..."
 rsync -a --delete "$PROJECT_DIR/src/" "$PANEL_DIR/"
 rsync -a --delete "$PROJECT_DIR/templates/" "$BASE_DIR/templates/"
 install -m 0755 "$PROJECT_DIR/scripts/hhctl" "$CONTROL_BIN"
+install -m 0755 "$PROJECT_DIR/scripts/hyper" "$HYPER_BIN"
 
 log "Создание конфигурации HYPER-HOST..."
 cat > "$CONF_DIR/hyper-host.conf" <<EOCONF
@@ -186,6 +188,7 @@ chmod 0660 "$BASE_DIR/data/hyperhost.sqlite"-* 2>/dev/null || true
 log "Настройка sudo для панели..."
 cat > /etc/sudoers.d/hyper-host <<EOSUDO
 www-data ALL=(root) NOPASSWD: ${CONTROL_BIN} *
+www-data ALL=(root) NOPASSWD: ${HYPER_BIN} *
 EOSUDO
 chmod 0440 /etc/sudoers.d/hyper-host
 visudo -cf /etc/sudoers.d/hyper-host >/dev/null || fail "Ошибка sudoers-конфига"
@@ -305,8 +308,9 @@ mkdir -p "$BOTS_DIR/.pm2"
 safe_chown_tree hyperbot:www-data "$BOTS_DIR"
 chmod 2775 "$BOTS_DIR" "$BOTS_DIR/.pm2" 2>/dev/null || true
 if command -v pm2 >/dev/null 2>&1; then
-  sudo -u hyperbot -H env HOME="$BOTS_DIR" PM2_HOME="$BOTS_DIR/.pm2" PATH="/usr/local/bin:/usr/bin:/bin" pm2 startup systemd -u hyperbot --hp "$BOTS_DIR" >/dev/null 2>&1 || true
-  sudo -u hyperbot -H env HOME="$BOTS_DIR" PM2_HOME="$BOTS_DIR/.pm2" PATH="/usr/local/bin:/usr/bin:/bin" pm2 save >/dev/null 2>&1 || true
+  sudo -u hyperbot -H env HOME="$BOTS_DIR" PM2_HOME="$BOTS_DIR/.pm2" PATH="/usr/local/bin:/usr/bin:/bin" pm2 ping >/dev/null 2>&1 || true
+  sudo -u hyperbot -H env HOME="$BOTS_DIR" PM2_HOME="$BOTS_DIR/.pm2" PATH="/usr/local/bin:/usr/bin:/bin" pm2 save --force >/dev/null 2>&1 || sudo -u hyperbot -H env HOME="$BOTS_DIR" PM2_HOME="$BOTS_DIR/.pm2" PATH="/usr/local/bin:/usr/bin:/bin" pm2 save >/dev/null 2>&1 || true
+  "$CONTROL_BIN" pm2-persist >/dev/null 2>&1 || warn "PM2 autostart не включился автоматически. Проверь вручную: sudo hyper-host-ctl pm2-persist"
 fi
 
 log "Настройка DNS сервиса bind9..."

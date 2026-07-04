@@ -1,0 +1,319 @@
+#!/usr/bin/env bash
+set -Eeo pipefail
+
+CTL="/usr/local/sbin/hyper-host-ctl"
+REPO_URL="https://github.com/memes4u1337/hyper-hosting-panel.git"
+REPO_DIR="/root/hyper-hosting-panel"
+DEV_HANDLE="@memes4u1337"
+PANEL="HYPER-HOST"
+
+[[ -x "$CTL" ]] || { echo "[hyper] Не найден $CTL. Сначала установи HYPER-HOST: sudo bash install.sh" >&2; exit 2; }
+
+say() { printf '\033[1;36m%s\033[0m\n' "$*"; }
+warn() { printf '\033[1;33m%s\033[0m\n' "$*"; }
+err() { printf '\033[1;31m%s\033[0m\n' "$*" >&2; exit 1; }
+
+json_pretty() {
+  python3 -m json.tool 2>/dev/null || cat
+}
+
+human_bytes_py='''
+import sys
+n=float(sys.argv[1]) if len(sys.argv)>1 and sys.argv[1] else 0
+for u in ["B","KB","MB","GB","TB"]:
+    if n < 1024 or u == "TB":
+        print((f"{n:.0f} {u}" if u=="B" else f"{n:.1f} {u}")); break
+    n/=1024
+'''
+hbytes() { python3 -c "$human_bytes_py" "${1:-0}" 2>/dev/null || echo "${1:-0} B"; }
+
+cmd_dev() {
+  cat <<EOF
+🚀 $PANEL
+Разработчик: $DEV_HANDLE
+Powered by: memes4u1337
+GitHub: $REPO_URL
+Команда помощи: sudo hyper help
+EOF
+}
+
+cmd_stats() {
+  local json
+  json="$($CTL stats-json 2>/dev/null || echo '{}')"
+  JSON="$json" python3 - <<'PY'
+import os,json
+j=json.loads(os.environ.get('JSON','{}') or '{}')
+def hb(n):
+    try: n=float(n)
+    except Exception: n=0
+    for u in ['B','KB','MB','GB','TB']:
+        if n < 1024 or u == 'TB':
+            return (f'{n:.0f} {u}' if u=='B' else f'{n:.1f} {u}')
+        n/=1024
+svc=j.get('services',{}) or {}; p=j.get('paths',{}) or {}
+print('🚀 HYPER-HOST — SERVER STATS')
+print('────────────────────────────')
+print(f"IP панели:       {j.get('server_ip','')}")
+print(f"Домен панели:    {j.get('panel_domain','')}")
+print(f"CPU:             {j.get('cpu_model','unknown')}")
+print(f"Ядер:            {j.get('cpu_cores',0)}")
+print(f"Load:            {j.get('load1',0):.2f} / {j.get('load5',0):.2f} / {j.get('load15',0):.2f}")
+print(f"Uptime:          {j.get('uptime','unknown')}")
+print(f"RAM:             {hb(j.get('mem_used',0))} / {hb(j.get('mem_total',0))} свободно {hb(j.get('mem_available',0))}")
+print(f"Disk:            {hb(j.get('disk_used',0))} / {hb(j.get('disk_total',0))} свободно {hb(j.get('disk_free',0))}")
+print(f"PM2:             {j.get('pm2_version','') or 'not installed'}")
+print('')
+print('Сервисы:')
+for k in ['nginx','mariadb','php_fpm','vsftpd','bind9']:
+    print(f"  {k:<10} {svc.get(k,'unknown')}")
+print('')
+print('Пути:')
+for k in ['panel','sites','bots','ftp','backups','phpmyadmin']:
+    if p.get(k): print(f"  {k:<10} {p.get(k)}")
+PY
+}
+
+cmd_bots() {
+  local json
+  json="$($CTL bot-list-json 2>/dev/null || echo '[]')"
+  JSON="$json" python3 - <<'PY'
+import os,json
+try: data=json.loads(os.environ.get('JSON','[]') or '[]')
+except Exception: data=[]
+def hb(n):
+    try: n=float(n)
+    except Exception: n=0
+    for u in ['B','KB','MB','GB','TB']:
+        if n < 1024 or u == 'TB': return f'{n:.1f} {u}' if u!='B' else f'{n:.0f} {u}'
+        n/=1024
+print('🤖 HYPER-HOST — BOTS')
+print('────────────────────')
+if not data:
+    print('Ботов в PM2 пока нет.')
+    raise SystemExit
+print(f"{'NAME':<24} {'STATUS':<12} {'CPU':<7} {'RAM':<12} {'RESTARTS':<8} PATH")
+for b in data:
+    print(f"{b.get('name',''):<24} {b.get('status',''):<12} {str(b.get('cpu',0)):<7} {hb(b.get('memory',0)):<12} {str(b.get('restarts',0)):<8} {b.get('cwd','')}")
+PY
+}
+
+cmd_sites() {
+  local json
+  json="$($CTL sync-json 2>/dev/null || echo '{}')"
+  JSON="$json" python3 - <<'PY'
+import os,json
+j=json.loads(os.environ.get('JSON','{}') or '{}')
+sites=j.get('sites',[]) or []; folders=j.get('folders',[]) or []
+print('🌐 HYPER-HOST — SITES')
+print('─────────────────────')
+if not sites and not folders:
+    print('Сайтов/папок пока нет.'); raise SystemExit
+if sites:
+    print(f"{'DOMAIN':<32} {'SSL':<8} ROOT")
+    for s in sites:
+        print(f"{s.get('domain',''):<32} {('yes' if s.get('ssl_enabled') else 'no'):<8} {s.get('root_path','')}")
+if folders:
+    print('\nПапки без nginx-домена:')
+    for f in folders: print(f"  {f.get('name','')} -> {f.get('path','')}")
+PY
+}
+
+cmd_ftp() {
+  local json
+  json="$($CTL sync-json 2>/dev/null || echo '{}')"
+  JSON="$json" python3 - <<'PY'
+import os,json
+j=json.loads(os.environ.get('JSON','{}') or '{}')
+items=j.get('ftp',[]) or []
+print('📁 HYPER-HOST — FTP')
+print('──────────────────')
+if not items:
+    print('FTP-пользователей пока нет.'); raise SystemExit
+print(f"{'USER':<28} {'HOST':<18} HOME")
+for x in items:
+    print(f"{x.get('username',''):<28} {x.get('host',''):<18} {x.get('target_path','')}")
+PY
+}
+
+cmd_dbs() {
+  local json
+  json="$($CTL sync-json 2>/dev/null || echo '{}')"
+  JSON="$json" python3 - <<'PY'
+import os,json
+j=json.loads(os.environ.get('JSON','{}') or '{}')
+items=j.get('databases',[]) or []
+print('🗄️ HYPER-HOST — DATABASES')
+print('────────────────────────')
+if not items:
+    print('Баз данных панели пока нет.'); raise SystemExit
+print(f"{'DB':<32} {'USER':<32} REMOTE")
+for x in items:
+    print(f"{x.get('db_name',''):<32} {x.get('db_user',''):<32} {('yes' if x.get('remote_allowed') else 'no')}")
+PY
+}
+
+cmd_ssl() {
+  local sub="${1:-status}"; shift || true
+  case "$sub" in
+    status|list)
+      local json
+      json="$($CTL ssl-status-json 2>/dev/null || echo '[]')"
+      JSON="$json" python3 - <<'PY'
+import os,json
+try: data=json.loads(os.environ.get('JSON','[]') or '[]')
+except Exception: data=[]
+print('🔐 HYPER-HOST — SSL')
+print('──────────────────')
+if not data:
+    print('Сертификатов пока нет.'); raise SystemExit
+print(f"{'DOMAIN':<36} {'DAYS':<8} STATUS")
+for x in data:
+    print(f"{x.get('domain',''):<36} {str(x.get('days_left','')):<8} {x.get('status','')}")
+PY
+      ;;
+    check) [[ -n "${1:-}" ]] || err "Используй: sudo hyper ssl check DOMAIN"; $CTL ssl-check-json "$1" | json_pretty ;;
+    fix) [[ -n "${1:-}" ]] || err "Используй: sudo hyper ssl fix DOMAIN"; $CTL ssl-fix-site "$1" ;;
+    issue|create) [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper ssl issue DOMAIN EMAIL"; $CTL ssl-site "$1" "$2" ;;
+    renew) $CTL ssl-renew-all ;;
+    *) err "SSL команды: sudo hyper ssl status | check DOMAIN | fix DOMAIN | issue DOMAIN EMAIL | renew" ;;
+  esac
+}
+
+cmd_bot() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    list|status|'') cmd_bots ;;
+    start|stop|restart|logs|kill-conflicts|fix|status-one)
+      [[ -n "${1:-}" ]] || err "Используй: sudo hyper bot $sub NAME"
+      local action="$sub"; [[ "$action" == "fix" ]] && action="kill-conflicts"; [[ "$action" == "status-one" ]] && action="status"
+      $CTL bot "$action" "$1"
+      ;;
+    delete)
+      [[ -n "${1:-}" ]] || err "Используй: sudo hyper bot delete NAME [--delete-files]"
+      if [[ "${2:-}" == "--delete-files" ]]; then $CTL bot-delete "$1" --delete-files; else $CTL bot-delete "$1" --keep-files; fi
+      ;;
+    create)
+      [[ -n "${1:-}" && -n "${2:-}" && -n "${3:-}" ]] || err "Используй: sudo hyper bot create NAME python|node|php|custom MAIN_FILE [MEM_MB]"
+      $CTL bot-create "$@"
+      ;;
+    doctor) $CTL bot-doctor ;;
+    persist|24) $CTL pm2-persist ;;
+    *) err "Bot команды: list, start NAME, stop NAME, restart NAME, logs NAME, fix NAME, delete NAME [--delete-files], create NAME runtime main, doctor, persist" ;;
+  esac
+}
+
+cmd_status() {
+  cmd_dev
+  echo
+  cmd_stats
+  echo
+  cmd_bots
+}
+
+cmd_update() {
+  [[ "${EUID}" -eq 0 ]] || err "Запусти: sudo hyper update"
+  cd /root
+  if [[ ! -d "$REPO_DIR/.git" ]]; then
+    git clone "$REPO_URL" "$REPO_DIR"
+  fi
+  cd "$REPO_DIR"
+  git fetch origin main
+  git checkout main
+  git reset --hard origin/main
+  git clean -fd
+  chmod +x install.sh uninstall.sh scripts/hhctl scripts/hyper 2>/dev/null || true
+  bash install.sh
+  $CTL repair
+  $CTL pm2-persist
+  $CTL sync-json >/dev/null 2>&1 || true
+  nginx -t
+  systemctl reload nginx
+  systemctl restart vsftpd 2>/dev/null || true
+  say "Обновление HYPER-HOST из GitHub завершено."
+}
+
+cmd_backup() {
+  local sub="${1:-list}"; shift || true
+  case "$sub" in
+    list) $CTL backup-list-json | json_pretty ;;
+    run) $CTL backup-run "${1:-all}" ;;
+    schedule) [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper backup schedule NAME '0 3 * * *' [all|sites|bots|db|panel]"; $CTL backup-schedule "$1" "$2" "${3:-all}" ;;
+    delete-schedule) [[ -n "${1:-}" ]] || err "Используй: sudo hyper backup delete-schedule NAME"; $CTL backup-delete-schedule "$1" ;;
+    *) err "Backup команды: list, run [target], schedule NAME 'cron' [target], delete-schedule NAME" ;;
+  esac
+}
+
+cmd_php() { $CTL php-list-json | json_pretty; }
+cmd_repair() { $CTL repair; }
+cmd_doctor() { $CTL bot-doctor; }
+cmd_sync() { $CTL sync-json | json_pretty; }
+cmd_raw() { $CTL "$@"; }
+
+cmd_help() {
+  cat <<'EOF'
+🚀 HYPER-HOST CLI
+Разработчик: @memes4u1337
+
+Основные команды:
+  sudo hyper dev                     кто разработчик
+  sudo hyper stats                   вся информация о сервере
+  sudo hyper status                  dev + stats + bots
+  sudo hyper bots                    список ботов и статус
+  sudo hyper sites                   список сайтов
+  sudo hyper ssl status              список SSL сертификатов
+  sudo hyper ftp                     FTP-пользователи
+  sudo hyper dbs                     базы данных
+  sudo hyper php                     PHP-FPM версии
+  sudo hyper repair                  починить права/FTP/PM2/Nginx
+  sudo hyper update                  обновить панель из GitHub
+  sudo hyper help                    помощь
+
+Боты:
+  sudo hyper bot list
+  sudo hyper bot create NAME python bot.py 512
+  sudo hyper bot start NAME
+  sudo hyper bot stop NAME
+  sudo hyper bot restart NAME
+  sudo hyper bot logs NAME
+  sudo hyper bot fix NAME            убрать локальные дубли / TelegramConflict
+  sudo hyper bot delete NAME
+  sudo hyper bot delete NAME --delete-files
+  sudo hyper bot persist             включить 24/7 автозапуск через systemd
+  sudo hyper bot doctor
+
+SSL:
+  sudo hyper ssl check DOMAIN
+  sudo hyper ssl fix DOMAIN
+  sudo hyper ssl issue DOMAIN EMAIL
+  sudo hyper ssl renew
+
+Сайты/низкий уровень:
+  sudo hyper raw add-site DOMAIN [ALIASES]
+  sudo hyper raw delete-site DOMAIN [--delete-files]
+  sudo hyper raw create-ftp USER PASS
+  sudo hyper raw create-db DB USER PASS [0|1]
+  sudo hyper raw site-logs DOMAIN error 200
+
+EOF
+}
+
+case "${1:-help}" in
+  dev) shift; cmd_dev "$@" ;;
+  stats) shift; cmd_stats "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  bots) shift; cmd_bots "$@" ;;
+  bot) shift; cmd_bot "$@" ;;
+  sites) shift; cmd_sites "$@" ;;
+  ftp) shift; cmd_ftp "$@" ;;
+  db|dbs|databases) shift; cmd_dbs "$@" ;;
+  ssl) shift; cmd_ssl "$@" ;;
+  backup|backups) shift; cmd_backup "$@" ;;
+  php) shift; cmd_php "$@" ;;
+  repair) shift; cmd_repair "$@" ;;
+  doctor) shift; cmd_doctor "$@" ;;
+  sync) shift; cmd_sync "$@" ;;
+  update) shift; cmd_update "$@" ;;
+  raw) shift; cmd_raw "$@" ;;
+  help|-h|--help|'') cmd_help ;;
+  *) err "Неизвестная команда: $1. Помощь: sudo hyper help" ;;
+esac

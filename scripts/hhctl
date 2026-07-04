@@ -320,7 +320,7 @@ local_http_challenge_check() {
   printf 'ok-%s' "$token" > "$root/.well-known/acme-challenge/$token"
   chmod -R a+rX "$root/.well-known" 2>/dev/null || true
   for url in "http://127.0.0.1/.well-known/acme-challenge/$token" "http://${SERVER_IP}/.well-known/acme-challenge/$token"; do
-    body="$(curl -fsS --max-time 8 -H "Host: $domain" "$url" 2>/dev/null || true)"
+    body="$(curl -fsS --connect-timeout 1 --max-time 2 -H "Host: $domain" "$url" 2>/dev/null || true)"
     [[ "$body" == "ok-$token" ]] && { rm -f "$root/.well-known/acme-challenge/$token" 2>/dev/null || true; return 0; }
   done
   rm -f "$root/.well-known/acme-challenge/$token" 2>/dev/null || true
@@ -353,7 +353,7 @@ ssl_preflight_json() {
   certbot_ready=0; [[ "$dns_status" == ok && "$nginx_ok" == 1 && "$http_ok" == 1 && "$has_site" == 1 ]] && certbot_ready=1
   problem=""; warning=""
   required_a="A    $domain    $expected"
-  if [[ "$nat_mode" == 1 ]]; then warning="Сервер имеет внутренний IP $SERVER_IP. Для SSL домен должен смотреть на публичный IP роутера/сервера, а порты 80/443 должны быть проброшены на $SERVER_IP."; fi
+  if [[ "$nat_mode" == 1 ]]; then warning=""; fi
   if [[ "$dns_status" == missing ]]; then problem="У домена нет публичных A/AAAA записей. Добавь запись: $required_a"; fi
   if [[ "$dns_status" == wrong_ip ]]; then problem="DNS домена указывает не на нужный IP. Сейчас: ${ips//$'\n'/, }. Нужно: $required_a"; fi
   if [[ "$nginx_ok" != 1 ]]; then problem="Nginx config не проходит проверку: sudo nginx -t"; fi
@@ -577,7 +577,9 @@ ensure_bot_user() {
   usermod -d "$BOTS_DIR" -s /usr/sbin/nologin "$BOT_USER" 2>/dev/null || true
   usermod -aG www-data "$BOT_USER" 2>/dev/null || true
   mkdir -p "$BOTS_DIR" "$PM2_HOME_DIR"
-  chown -R "$BOT_USER":www-data "$BOTS_DIR"
+  # Не делаем chown -R по всем ботам на каждом открытии вкладки — это сильно тормозит панель.
+  chown "$BOT_USER":www-data "$BOTS_DIR" "$PM2_HOME_DIR" 2>/dev/null || true
+  find "$PM2_HOME_DIR" -xdev -maxdepth 2 -exec chown -h "$BOT_USER":www-data {} + 2>/dev/null || true
   chmod 2775 "$BOTS_DIR" "$PM2_HOME_DIR" 2>/dev/null || true
 }
 node_major() { node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 | grep -E '^[0-9]+$' || echo 0; }
@@ -606,13 +608,74 @@ ensure_pm2() {
   if ! command -v pm2 >/dev/null 2>&1; then npm install -g pm2@latest; fi
   ensure_bot_user
   pm2_as_bot ping >/dev/null 2>&1 || true
-  pm2_as_bot save >/dev/null 2>&1 || true
+  pm2_as_bot save --force >/dev/null 2>&1 || pm2_as_bot save >/dev/null 2>&1 || true
+  install_hyperbot_pm2_service
 }
 pm2_as_bot() {
   sudo -u "$BOT_USER" -H env HOME="$BOTS_DIR" PM2_HOME="$PM2_HOME_DIR" PATH="/usr/local/bin:/usr/bin:/bin" pm2 "$@"
 }
 run_as_bot() {
   sudo -u "$BOT_USER" -H env HOME="$BOTS_DIR" PM2_HOME="$PM2_HOME_DIR" PATH="/usr/local/bin:/usr/bin:/bin" "$@"
+}
+
+install_hyperbot_pm2_service() {
+  # HYPER-HOST v13: боты должны жить 24/7 независимо от открытой консоли/панели.
+  # Поэтому PM2 запускается как systemd-сервис от пользователя hyperbot и поднимает сохранённый dump.pm2 после reboot.
+  ensure_bot_user
+  local pm2_bin
+  pm2_bin="$(command -v pm2 || true)"
+  [[ -n "$pm2_bin" ]] || return 0
+  mkdir -p "$PM2_HOME_DIR"
+  chown "$BOT_USER":www-data "$BOTS_DIR" "$PM2_HOME_DIR" 2>/dev/null || true
+  chmod 2775 "$BOTS_DIR" "$PM2_HOME_DIR" 2>/dev/null || true
+  cat > /etc/systemd/system/hyperbot-pm2.service <<EOSVC
+[Unit]
+Description=HYPER-HOST PM2 24/7 bots runtime
+Documentation=https://github.com/memes4u1337/hyper-hosting-panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+User=${BOT_USER}
+LimitNOFILE=infinity
+LimitNPROC=infinity
+LimitCORE=infinity
+Environment=HOME=${BOTS_DIR}
+Environment=PM2_HOME=${PM2_HOME_DIR}
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+PIDFile=${PM2_HOME_DIR}/pm2.pid
+ExecStart=/bin/bash -lc '${pm2_bin} resurrect || ${pm2_bin} ping'
+ExecReload=/bin/bash -lc '${pm2_bin} reload all || true'
+ExecStop=/bin/bash -lc '${pm2_bin} save --force || ${pm2_bin} save || true'
+ExecStop=/bin/bash -lc '${pm2_bin} kill || true'
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+TimeoutStopSec=60
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOSVC
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl enable hyperbot-pm2.service >/dev/null 2>&1 || true
+  systemctl start hyperbot-pm2.service >/dev/null 2>&1 || true
+}
+
+pm2_persist() {
+  # Сохраняем текущий список PM2 и включаем автоподъём через systemd.
+  ensure_bot_user
+  mkdir -p "$PM2_HOME_DIR"
+  chown "$BOT_USER":www-data "$BOTS_DIR" "$PM2_HOME_DIR" 2>/dev/null || true
+  pm2_as_bot save --force >/dev/null 2>&1 || pm2_as_bot save >/dev/null 2>&1 || true
+  install_hyperbot_pm2_service
+}
+
+cmd_pm2_persist() {
+  ensure_pm2
+  pm2_persist
+  log "PM2 24/7 autostart enabled for $BOT_USER. Боты продолжат работать после закрытия панели/SSH и поднимутся после перезагрузки."
 }
 make_bot_start_script() {
   local name="$1" runtime="$2" main_file="$3" path="$BOTS_DIR/$name" mem="$4" interp=""
@@ -753,8 +816,8 @@ bot_start_pm2() {
   make_bot_start_script "$name" "$runtime" "$main_file" "$path" "$mem"
   local mem_arg=(); [[ "$mem" =~ ^[0-9]+$ && "$mem" -gt 0 ]] && mem_arg+=(--max-memory-restart "${mem}M")
   (cd "$path" && pm2_as_bot start ./.hyper-start.sh --name "$name" --interpreter bash "${mem_arg[@]}")
-  pm2_as_bot save >/dev/null || true
-  log "PM2 started: $name (user=$BOT_USER, PM2_HOME=$PM2_HOME_DIR)"
+  pm2_persist
+  log "PM2 started: $name (user=$BOT_USER, PM2_HOME=$PM2_HOME_DIR, autostart=systemd)"
 }
 normalize_main_file() {
   local runtime="$1" main_file="${2:-}"
@@ -812,7 +875,7 @@ cmd_bot_delete() {
   ensure_pm2
   pm2_as_bot stop "$name" >/dev/null 2>&1 || true
   pm2_as_bot delete "$name" >/dev/null 2>&1 || true
-  pm2_as_bot save >/dev/null 2>&1 || true
+  pm2_persist
   if [[ "$mode" == "--delete-files" || "$mode" == "--purge" ]]; then
     local bot_path="$BOTS_DIR/$name"
     if [[ -d "$bot_path" && "$bot_path" == "$BOTS_DIR/"* ]]; then
@@ -840,15 +903,15 @@ cmd_bot_action() {
       else
         err "PM2 process not found and .hyper-start.sh missing. Создай/запусти бота заново."
       fi
-      pm2_as_bot save >/dev/null 2>&1 || true
+      pm2_persist
       ;;
     stop)
       pm2_as_bot stop "$name" || true
-      pm2_as_bot save >/dev/null 2>&1 || true
+      pm2_persist
       ;;
     kill-conflicts)
       bot_stop_duplicates "$name"
-      pm2_as_bot save >/dev/null 2>&1 || true
+      pm2_persist
       log "Local duplicate bot processes killed: $name"
       ;;
     status)
@@ -888,6 +951,8 @@ cmd_bot_doctor() {
   echo "bot_user: $BOT_USER"
   echo "bots_dir: $BOTS_DIR"
   echo "pm2_home: $PM2_HOME_DIR"
+  echo "pm2_systemd: $(systemctl is-enabled hyperbot-pm2.service 2>/dev/null || echo disabled) / $(systemctl is-active hyperbot-pm2.service 2>/dev/null || echo inactive)"
+  echo "pm2_dump: $PM2_HOME_DIR/dump.pm2"
   echo "--- pm2 list ---"
   pm2_as_bot list || true
 }
@@ -1087,8 +1152,7 @@ cmd_repair() {
   done < /etc/passwd
 
   if command -v pm2 >/dev/null 2>&1; then
-    pm2_as_bot save >/dev/null 2>&1 || true
-    pm2_as_bot startup systemd -u "$BOT_USER" --hp "$BOTS_DIR" >/dev/null 2>&1 || true
+    pm2_persist
   fi
 
   cat > /etc/sudoers.d/hyper-host <<EOSUDO
@@ -1123,6 +1187,7 @@ case "${1:-}" in
   bot) shift; cmd_bot_action "$@" ;;
   bot-list-json) shift; cmd_bot_list_json "$@" ;;
   bot-doctor) shift; cmd_bot_doctor "$@" ;;
+  pm2-persist) shift; cmd_pm2_persist "$@" ;;
   backup-run) shift; cmd_backup_run "$@" ;;
   backup-schedule) shift; cmd_backup_schedule "$@" ;;
   backup-delete-schedule) shift; cmd_backup_delete_schedule "$@" ;;
@@ -1148,6 +1213,7 @@ Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
        hyper-host-ctl dns-apply DOMAIN RECORDS_JSON [NS] [ADMIN]
        hyper-host-ctl cron-set NAME "* * * * *" COMMAND
        hyper-host-ctl public-ip set 90.189.208.25
+       hyper-host-ctl pm2-persist
        hyper-host-ctl ssl-fix-site DOMAIN
        hyper-host-ctl ssl-ip-selfsigned 192.168.0.179
        hyper-host-ctl repair

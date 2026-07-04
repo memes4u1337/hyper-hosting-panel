@@ -56,12 +56,13 @@ function handle_post(string $action): void
                 $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM sites WHERE id=?'); $st->execute([$id]); $site=$st->fetch(); if(!$site) throw new RuntimeException('Сайт не найден');
                 hh_clear_cache();
                 $res=run_ctl(['ssl-fix-site',$site['domain']],120); if($res['code']!==0) throw new RuntimeException($res['output']);
+                hh_clear_cache();
                 flash('ACME challenge для SSL исправлен. Теперь снова проверь DNS/SSL.', 'success'); redirect('/?page=ssl');
             }
             case 'ssl_site': {
                 $id=(int)($_POST['id']??0); $email=trim((string)($_POST['email']??'')); if(!filter_var($email,FILTER_VALIDATE_EMAIL)) throw new RuntimeException('Укажи нормальный email');
                 $st=db()->prepare('SELECT * FROM sites WHERE id=?'); $st->execute([$id]); $s=$st->fetch(); if(!$s) throw new RuntimeException('Сайт не найден');
-                $res=run_ctl(['ssl-site',$s['domain'],$email],300); if($res['code']!==0) throw new RuntimeException($res['output']); db()->prepare('UPDATE sites SET ssl_enabled=1 WHERE id=?')->execute([$id]); add_event('ssl','Выпущен SSL: '.$s['domain']); flash('SSL выпущен','success'); redirect('/?page=ssl');
+                $res=run_ctl(['ssl-site',$s['domain'],$email],300); if($res['code']!==0) throw new RuntimeException($res['output']); hh_clear_cache(); db()->prepare('UPDATE sites SET ssl_enabled=1 WHERE id=?')->execute([$id]); add_event('ssl','Выпущен SSL: '.$s['domain']); flash('SSL выпущен','success'); redirect('/?page=ssl');
             }
             case 'create_folder': {
                 $name=trim((string)($_POST['name']??'')); if(!is_valid_folder_name($name)) throw new RuntimeException('Неверное имя папки');
@@ -109,6 +110,7 @@ function handle_post(string $action): void
                     $res=run_ctl(['bot-deploy',$name,$runtime,$main,$botTmp,$envTmp,$reqTmp,(string)$mem],900);
                 }
                 if($res['code']!==0) throw new RuntimeException($res['output']);
+                hh_clear_cache();
                 $path=rtrim((string)app_config('bots_dir'),'/').'/'.$name;
                 upsert_bot_row_v5($name,$runtime,$path,$main,$mem,$proc);
                 add_event('bot','Создан/обновлён PM2 бот: '.$name);
@@ -116,7 +118,10 @@ function handle_post(string $action): void
                 redirect('/?page=bots');
             }
             case 'bot_action': {
-                $id=(int)($_POST['id']??0); $act=(string)($_POST['bot_action']??''); $st=db()->prepare('SELECT * FROM bots WHERE id=?'); $st->execute([$id]); $b=$st->fetch(); if(!$b) throw new RuntimeException('Бот не найден'); $res=($act==='install')?run_ctl(['bot-install-requirements',$b['name'],$b['runtime']],600):run_ctl(['bot',$act,$b['name']],120); if($res['code']!==0) throw new RuntimeException($res['output']); flash('Команда выполнена: '.$act,'success'); redirect('/?page=bots');
+                $id=(int)($_POST['id']??0); $act=(string)($_POST['bot_action']??''); $st=db()->prepare('SELECT * FROM bots WHERE id=?'); $st->execute([$id]); $b=$st->fetch(); if(!$b) throw new RuntimeException('Бот не найден'); $res=($act==='install')?run_ctl(['bot-install-requirements',$b['name'],$b['runtime']],600):run_ctl(['bot',$act,$b['name']],120); if($res['code']!==0) throw new RuntimeException($res['output']); hh_clear_cache(); flash('Команда выполнена: '.$act.'. PM2 сохранён для 24/7 работы.','success'); redirect('/?page=bots');
+            }
+            case 'pm2_persist': {
+                $res=run_ctl(['pm2-persist'],180); if($res['code']!==0) throw new RuntimeException($res['output']); hh_clear_cache(); flash('PM2 24/7 включён: боты продолжат работать после выхода из панели, закрытия SSH и перезагрузки сервера.','success'); redirect('/?page=bots');
             }
             case 'delete_bot': {
                 $id=(int)($_POST['id']??0);
@@ -128,6 +133,7 @@ function handle_post(string $action): void
                 }
                 $mode=$deleteFiles?'--delete-files':'--keep-files';
                 $res=run_ctl(['bot-delete',$b['name'],$mode],180); if($res['code']!==0) throw new RuntimeException($res['output']);
+                hh_clear_cache();
                 db()->prepare('DELETE FROM bots WHERE id=?')->execute([$id]);
                 add_event('bot', $deleteFiles ? 'Удалён бот с файлами: '.$b['name'] : 'Удалён бот из PM2, файлы сохранены: '.$b['name']);
                 flash($deleteFiles ? 'Бот удалён из PM2 и файлы удалены с сервера' : 'Бот удалён из PM2, файлы оставлены на сервере','success');
@@ -144,8 +150,8 @@ function handle_post(string $action): void
             case 'add_dns_record': { $zone=(int)($_POST['zone_id']??0); $type=strtoupper(trim((string)($_POST['type']??'A'))); $name=trim((string)($_POST['name']??'@')); $value=trim((string)($_POST['value']??'')); $ttl=(int)($_POST['ttl']??3600); if($value==='') throw new RuntimeException('Значение DNS записи пустое'); db()->prepare('INSERT INTO dns_records(zone_id,type,name,value,ttl) VALUES(?,?,?,?,?)')->execute([$zone,$type,$name,$value,$ttl]); $z=db()->prepare('SELECT domain FROM dns_zones WHERE id=?'); $z->execute([$zone]); $zr=$z->fetch(); if($zr) dns_apply_zone((string)$zr['domain']); redirect('/?page=dns'); }
             case 'delete_dns_record': { $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT z.domain FROM dns_records r JOIN dns_zones z ON z.id=r.zone_id WHERE r.id=?'); $st->execute([$id]); $z=$st->fetch(); db()->prepare('DELETE FROM dns_records WHERE id=?')->execute([$id]); if($z) dns_apply_zone((string)$z['domain']); redirect('/?page=dns'); }
             case 'delete_dns_zone': { $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM dns_zones WHERE id=?'); $st->execute([$id]); $z=$st->fetch(); if($z){ run_ctl(['dns-delete',$z['domain']],60); db()->prepare('DELETE FROM dns_zones WHERE id=?')->execute([$id]); } redirect('/?page=dns'); }
-            case 'ssl_renew_all': { $res=run_ctl(['ssl-renew-all'],300); if($res['code']!==0) throw new RuntimeException($res['output']); flash('SSL автопродление проверено','success'); redirect('/?page=ssl'); }
-            case 'save_public_ip': { $ip=trim((string)($_POST['public_ip']??'')); if($ip!=='' && !filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) throw new RuntimeException('Неверный публичный IPv4'); $res=$ip===''?run_ctl(['public-ip','clear'],60):run_ctl(['public-ip','set',$ip],60); if($res['code']!==0) throw new RuntimeException($res['output']); setting_set('public_ip_override',$ip); flash($ip===''?'Публичный IP сброшен':'Публичный IP сохранён: '.$ip,'success'); redirect('/?page=ssl'); }
+            case 'ssl_renew_all': { hh_clear_cache(); $res=run_ctl(['ssl-renew-all'],300); if($res['code']!==0) throw new RuntimeException($res['output']); hh_clear_cache(); flash('SSL автопродление проверено','success'); redirect('/?page=ssl'); }
+            case 'save_public_ip': { $ip=trim((string)($_POST['public_ip']??'')); if($ip!=='' && !filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) throw new RuntimeException('Неверный публичный IPv4'); $res=$ip===''?run_ctl(['public-ip','clear'],60):run_ctl(['public-ip','set',$ip],60); if($res['code']!==0) throw new RuntimeException($res['output']); setting_set('public_ip_override',$ip); hh_clear_cache(); flash($ip===''?'Публичный IP сброшен':'Публичный IP сохранён: '.$ip,'success'); redirect('/?page=ssl'); }
             case 'set_site_php': { $id=(int)($_POST['id']??0); $ver=(string)($_POST['php_version']??''); $st=db()->prepare('SELECT * FROM sites WHERE id=?'); $st->execute([$id]); $s=$st->fetch(); if(!$s) throw new RuntimeException('Сайт не найден'); $res=run_ctl(['site-php',$s['domain'],$ver],120); if($res['code']!==0) throw new RuntimeException($res['output']); db()->prepare('UPDATE sites SET php_version=? WHERE id=?')->execute([$ver,$id]); redirect('/?page=php'); }
             case 'create_cron': { $name=trim((string)($_POST['name']??'')); $schedule=trim((string)($_POST['schedule']??'')); $cmd=trim((string)($_POST['command']??'')); if(!is_valid_name($name)||$schedule===''||$cmd==='') throw new RuntimeException('Неверные данные cron'); db()->prepare('INSERT INTO cron_tasks(name,schedule,command,enabled) VALUES(?,?,?,1) ON CONFLICT(name) DO UPDATE SET schedule=excluded.schedule,command=excluded.command,enabled=1')->execute([$name,$schedule,$cmd]); $res=run_ctl(['cron-set',$name,$schedule,$cmd],60); if($res['code']!==0) throw new RuntimeException($res['output']); redirect('/?page=cron'); }
             case 'delete_cron': { $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM cron_tasks WHERE id=?'); $st->execute([$id]); $c=$st->fetch(); if($c){ run_ctl(['cron-delete',$c['name']],60); db()->prepare('DELETE FROM cron_tasks WHERE id=?')->execute([$id]); } redirect('/?page=cron'); }
@@ -251,9 +257,32 @@ function stat_card(string $icon,string $label,string $value,string $sub=''): voi
 function progress_block(string $label,float $used,float $total): string { $p=percent($used,$total); return '<div class="usage"><div class="d-flex justify-content-between"><span>'.e($label).'</span><b>'.e(human_bytes($used).' / '.human_bytes($total)).'</b></div><div class="progress"><div class="progress-bar" style="width:'.$p.'%"></div></div></div>'; }
 
 function view_dashboard(): void
-{ $stats=run_ctl_json_cached(['stats-json'],15,6); $events=db()->query('SELECT * FROM events ORDER BY id DESC LIMIT 8')->fetchAll(); ?>
-<div class="row g-3 mb-4"><div class="col-md-3"><?php stat_card('fa-globe','Сайты',(string)table_count('sites'),'домены') ?></div><div class="col-md-3"><?php stat_card('fa-network-wired','FTP',(string)table_count('ftp_accounts'),'аккаунты') ?></div><div class="col-md-3"><?php stat_card('fa-robot','Боты',(string)table_count('bots'),'PM2 24/7') ?></div><div class="col-md-3"><?php stat_card('fa-box-archive','Backup',(string)table_count('backup_jobs'),'задачи') ?></div></div>
-<div class="row g-4"><div class="col-xl-8"><div class="panel-card"><div class="card-title-row"><h2><i class="fa-solid fa-microchip me-2"></i>Железо сервера</h2><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="repair_panel"><button class="btn btn-primary btn-sm">Починить права</button></form></div><?php if(isset($stats['_error'])): ?><div class="alert alert-warning"><?= e($stats['_error']) ?></div><?php else: ?><div class="hardware-grid"><div><span>CPU</span><b><?= e((string)$stats['cpu_model']) ?></b></div><div><span>Ядра</span><b><?= e((string)$stats['cpu_cores']) ?></b></div><div><span>Uptime</span><b><?= e((string)$stats['uptime']) ?></b></div><div><span>PM2</span><b><?= e((string)($stats['pm2_version']?:'not installed')) ?></b></div></div><?= progress_block('RAM',(float)$stats['mem_used'],(float)$stats['mem_total']) ?><?= progress_block('Диск /',(float)$stats['disk_used'],(float)$stats['disk_total']) ?><div class="service-row mt-3"><?php foreach(($stats['services']??[]) as $name=>$st): ?><span class="badge rounded-pill text-bg-<?= $st==='active'?'success':'danger' ?>"><?= e($name) ?>: <?= e((string)$st) ?></span><?php endforeach; ?></div><?php endif; ?></div></div><div class="col-xl-4"><div class="panel-card"><h2><i class="fa-solid fa-clock-rotate-left me-2"></i>События</h2><?php foreach($events as $ev): ?><div class="event"><b><?= e($ev['type']) ?></b><span><?= e($ev['message']) ?></span><small><?= e($ev['created_at']) ?></small></div><?php endforeach; if(!$events): ?><div class="empty">Событий пока нет</div><?php endif; ?></div></div></div><?php }
+{ $stats=run_ctl_json_cached(['stats-json'],8,45); $events=db()->query('SELECT * FROM events ORDER BY id DESC LIMIT 8')->fetchAll(); $sites=table_count('sites'); $ftp=table_count('ftp_accounts'); $bots=table_count('bots'); $backups=table_count('backup_jobs'); ?>
+<div class="dashboard-hero mb-4">
+  <div>
+    <div class="eyebrow"><i class="fa-solid fa-rocket"></i> HYPER-HOST Control Center</div>
+    <h2>Сервер под контролем</h2>
+    <p>Сайты, SSL, FTP, базы, боты и backup — всё в одном быстром интерфейсе.</p>
+  </div>
+  <div class="hero-actions">
+    <a class="btn btn-primary" href="/?page=sites"><i class="fa-solid fa-plus me-2"></i>Сайт</a>
+    <a class="btn btn-soft" href="/?page=bots"><i class="fa-solid fa-robot me-2"></i>Бот</a>
+    <a class="btn btn-soft" href="/?page=ssl"><i class="fa-solid fa-shield-halved me-2"></i>SSL</a>
+  </div>
+</div>
+<div class="row g-3 mb-4">
+  <div class="col-md-3"><?php stat_card('fa-globe','Сайты',(string)$sites,'домены') ?></div>
+  <div class="col-md-3"><?php stat_card('fa-network-wired','FTP',(string)$ftp,'аккаунты') ?></div>
+  <div class="col-md-3"><?php stat_card('fa-robot','Боты',(string)$bots,'PM2 24/7') ?></div>
+  <div class="col-md-3"><?php stat_card('fa-box-archive','Backup',(string)$backups,'задачи') ?></div>
+</div>
+<div class="quick-grid mb-4">
+  <a class="quick-card" href="/?page=files"><i class="fa-solid fa-folder-open"></i><b>Файлы</b><span>Загрузка и редактор</span></a>
+  <a class="quick-card" href="/?page=databases"><i class="fa-solid fa-database"></i><b>Базы</b><span>MySQL/phpMyAdmin</span></a>
+  <a class="quick-card" href="/?page=backups"><i class="fa-solid fa-box-archive"></i><b>Backup</b><span>Архивы и расписание</span></a>
+  <a class="quick-card" href="/?page=settings"><i class="fa-solid fa-screwdriver-wrench"></i><b>Ремонт</b><span>Права и сервисы</span></a>
+</div>
+<div class="row g-4"><div class="col-xl-8"><div class="panel-card"><div class="card-title-row"><h2><i class="fa-solid fa-microchip me-2"></i>Железо сервера</h2><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="repair_panel"><button class="btn btn-primary btn-sm"><i class="fa-solid fa-screwdriver-wrench me-1"></i>Починить</button></form></div><?php if(isset($stats['_error'])): ?><div class="alert alert-warning"><?= e($stats['_error']) ?></div><?php else: ?><div class="hardware-grid"><div><span>CPU</span><b><?= e((string)$stats['cpu_model']) ?></b></div><div><span>Ядра</span><b><?= e((string)$stats['cpu_cores']) ?></b></div><div><span>Uptime</span><b><?= e((string)$stats['uptime']) ?></b></div><div><span>PM2</span><b><?= e((string)($stats['pm2_version']?:'not installed')) ?></b></div></div><?= progress_block('RAM',(float)$stats['mem_used'],(float)$stats['mem_total']) ?><?= progress_block('Диск /',(float)$stats['disk_used'],(float)$stats['disk_total']) ?><div class="service-row mt-3"><?php foreach(($stats['services']??[]) as $name=>$st): ?><span class="badge rounded-pill text-bg-<?= $st==='active'?'success':'danger' ?>"><?= e($name) ?>: <?= e((string)$st) ?></span><?php endforeach; ?></div><?php endif; ?></div></div><div class="col-xl-4"><div class="panel-card"><h2><i class="fa-solid fa-clock-rotate-left me-2"></i>Последние события</h2><?php foreach($events as $ev): ?><div class="event"><b><?= e($ev['type']) ?></b><span><?= e($ev['message']) ?></span><small><?= e($ev['created_at']) ?></small></div><?php endforeach; if(!$events): ?><div class="empty">Событий пока нет</div><?php endif; ?></div></div></div><?php }
 
 function view_files(): void
 { $rootKey=(string)($_GET['root']??'sites'); $rel=safe_rel_path((string)($_GET['path']??'')); [$rootKey,$root,$rel,$path]=fm_resolve($rootKey,$rel); $items=is_dir($path)?array_values(array_diff(scandir($path)?:[],['.','..'])):[]; sort($items); $currentDir=is_dir($path)?$rel:dirname($rel); if($currentDir==='.')$currentDir=''; ?>
@@ -286,14 +315,14 @@ function view_ftp(): void
 { $rows=db()->query('SELECT * FROM ftp_accounts ORDER BY id DESC')->fetchAll(); $gen=default_ftp_password(); ?>
 <div class="row g-4"><div class="col-lg-4"><div class="panel-card"><h2>Создать FTP</h2><p class="muted">После входа будет одна общая папка <code>common/</code>. Внутри неё: <code>sites/</code> со всеми сайтами и <code>bots/</code> со всеми ботами.</p><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_ftp"><input class="form-control" name="username" placeholder="hyperhost" required><div class="input-group"><input class="form-control" name="password" id="ftpPass" value="<?= e($gen) ?>" minlength="8" required><button class="btn btn-outline-light" type="button" onclick="copyValue('ftpPass')"><i class="fa-regular fa-copy"></i></button></div><button class="btn btn-primary">Создать FTP</button></form></div></div><div class="col-lg-8"><div class="row g-3"><?php foreach($rows as $r): ?><div class="col-md-6"><div class="ftp-card"><h3><?= e($r['username']) ?></h3><div class="cred"><span>Хост</span><code><?= e($r['host']?:host_name()) ?></code></div><div class="cred"><span>Имя пользователя</span><code><?= e($r['username']) ?></code></div><div class="cred"><span>Пароль</span><code><?= e($r['password_plain']?:'задать новый') ?></code></div><div class="small mt-3">Путь после входа: <code>common/sites/</code> и <code>common/bots/</code><br>Порт: <b>21</b>, Passive: <b>40000-40100</b></div><div class="d-flex gap-2 mt-3"><button class="btn btn-sm btn-light" onclick="copyText('Host: <?= e($r['host']?:host_name()) ?>\nLogin: <?= e($r['username']) ?>\nPassword: <?= e($r['password_plain']) ?>\nPort: 21')">Копировать</button><button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#ftp<?= (int)$r['id'] ?>">Пароль</button><form method="post" onsubmit="return confirm('Удалить FTP?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_ftp"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-danger">Удалить</button></form></div></div></div><div class="modal fade" id="ftp<?= (int)$r['id'] ?>"><div class="modal-dialog"><div class="modal-content"><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="reset_ftp_password"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><div class="modal-header"><h5>Новый пароль FTP</h5><button class="btn-close" data-bs-dismiss="modal" type="button"></button></div><div class="modal-body"><input class="form-control" name="password" value="<?= e(default_ftp_password()) ?>" minlength="8" required></div><div class="modal-footer"><button class="btn btn-primary">Сохранить</button></div></form></div></div></div><?php endforeach; if(!$rows): ?><div class="empty">FTP аккаунтов пока нет</div><?php endif; ?></div></div></div><?php }
 
-function pm2_status_map(): array { $d=run_ctl_json_cached(['bot-list-json'],20,4); $m=[]; if(!isset($d['_error'])) foreach($d as $p) $m[$p['name']]=$p; return $m; }
+function pm2_status_map(): array { $d=run_ctl_json_cached(['bot-list-json'],10,25); $m=[]; if(!isset($d['_error'])) foreach($d as $p) $m[$p['name']]=$p; return $m; }
 function view_bots(): void
 { $bots=db()->query('SELECT * FROM bots ORDER BY id DESC')->fetchAll(); $status=pm2_status_map(); ?>
 <div class="row g-4">
   <div class="col-lg-4">
     <div class="panel-card">
       <h2>Загрузить и запустить бота</h2>
-      <p class="muted">Загрузи <code>bot.py</code>, при необходимости <code>.env</code> и <code>requirements.txt</code>. Панель сначала поставит зависимости, потом запустит PM2 24/7 с именем бота.</p>
+      <p class="muted">Загрузи <code>bot.py</code>, при необходимости <code>.env</code> и <code>requirements.txt</code>. Панель поставит зависимости, запустит PM2 и сохранит автозапуск: можно закрывать панель/SSH — бот продолжит работать.</p>
       <form method="post" enctype="multipart/form-data" class="vstack gap-3">
         <?= csrf_field() ?><input type="hidden" name="action" value="create_bot">
         <input class="form-control" name="name" placeholder="mystockbot" required>
@@ -309,7 +338,8 @@ function view_bots(): void
   </div>
   <div class="col-lg-8">
     <div class="panel-card">
-      <h2>Список ботов PM2</h2>
+      <div class="card-title-row"><h2>Список ботов PM2</h2><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="pm2_persist"><button class="btn btn-soft btn-sm"><i class="fa-solid fa-shield-heart me-1"></i>Включить 24/7</button></form></div>
+      <div class="alert alert-dark-soft small mb-3"><i class="fa-solid fa-circle-check me-2 text-success"></i>После запуска бот не зависит от открытой панели или консоли. PM2 сохраняется в systemd и поднимает ботов после перезагрузки.</div>
       <div class="table-responsive"><table class="table table-dark-soft align-middle"><thead><tr><th>Бот</th><th>Статус</th><th>Файлы</th><th>Управление</th></tr></thead><tbody>
       <?php foreach($bots as $b): $pm=$status[$b['name']]??[]; $st=$pm['status']??'not_found'; $files=$pm['files']??[]; ?>
         <tr>
@@ -363,49 +393,72 @@ function view_dns(): void { $zones=db()->query('SELECT * FROM dns_zones ORDER BY
 
 function view_ssl(): void {
     $sites=db()->query('SELECT * FROM sites ORDER BY domain')->fetchAll();
-    $certs=run_ctl_json_cached(['ssl-status-json'],20,30); $map=[]; if(!isset($certs['_error'])) foreach($certs as $c) $map[$c['domain']]=$c;
+    $certs=run_ctl_json_cached(['ssl-status-json'],8,120); $map=[]; if(!isset($certs['_error'])) foreach($certs as $c) $map[$c['domain']]=$c;
     $savedPublicIp = setting_get('public_ip_override', (string)app_config('public_ip',''));
+    $modals = [];
 ?>
-<div class="panel-card mb-4">
-  <div class="card-title-row"><h2>SSL сертификаты</h2><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_renew_all"><button class="btn btn-primary">Проверить автопродление</button></form></div>
-  <div class="alert alert-info mb-3">
-    Если сервер внутри сети <code>192.168.x.x</code>, укажи настоящий публичный IP роутера/сервера. Для тебя это должен быть <b>90.189.208.25</b>, если именно на него смотрит домен и проброшены порты 80/443.
+<div class="ssl-hero mb-4">
+  <div>
+    <div class="eyebrow"><i class="fa-solid fa-shield-halved"></i> Let's Encrypt</div>
+    <h2>SSL сертификаты</h2>
+    <p>Быстрая проверка DNS, ACME и Nginx без зависаний. Если статус зелёный — можно выпускать сертификат.</p>
   </div>
-  <form method="post" class="row g-2 mb-4">
-    <?= csrf_field() ?><input type="hidden" name="action" value="save_public_ip">
-    <div class="col-md-4"><input class="form-control" name="public_ip" value="<?= e($savedPublicIp) ?>" placeholder="90.189.208.25"></div>
-    <div class="col-md-3"><button class="btn btn-soft w-100">Сохранить публичный IP</button></div>
-    <div class="col-md-5 small muted d-flex align-items-center">Пусто = автоопределение. При NAT лучше указать вручную.</div>
-  </form>
-  <table class="table table-dark-soft align-middle"><thead><tr><th>Сайт</th><th>Проверка DNS</th><th>Статус</th><th></th></tr></thead><tbody>
+  <div class="ssl-hero-actions">
+    <form method="post" class="d-flex gap-2 flex-wrap">
+      <?= csrf_field() ?><input type="hidden" name="action" value="save_public_ip">
+      <input class="form-control public-ip-input" name="public_ip" value="<?= e($savedPublicIp) ?>" placeholder="90.189.208.25">
+      <button class="btn btn-soft"><i class="fa-solid fa-floppy-disk me-2"></i>IP</button>
+    </form>
+    <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_renew_all"><button class="btn btn-primary"><i class="fa-solid fa-arrows-rotate me-2"></i>Автопродление</button></form>
+  </div>
+</div>
+<div class="panel-card ssl-card">
+  <div class="table-responsive"><table class="table table-dark-soft align-middle mb-0"><thead><tr><th>Сайт</th><th>Проверка</th><th>Сертификат</th><th class="text-end">Действия</th></tr></thead><tbody>
   <?php foreach($sites as $s):
       $c=$map[$s['domain']]??null;
-      $dns=run_ctl_json_cached(['ssl-check-json',$s['domain']],25,20);
+      $dns=run_ctl_json_cached(['ssl-check-json',$s['domain']],10,90);
+      $hasCert = $c && (($c['status'] ?? '') === 'ok');
       $ready=empty($dns['_error']) && !empty($dns['certbot_ready']);
       $points=empty($dns['_error']) && !empty($dns['points_here']);
-      $badge=$ready?'success':($points?'info':'warning');
-      $label=$ready?'Готово к выпуску':($points?'DNS OK, проверь порты':'DNS не готов');
-  ?>
+      if($hasCert){ $badge='success'; $label='SSL работает'; }
+      elseif($ready){ $badge='success'; $label='Можно выпускать'; }
+      elseif($points){ $badge='info'; $label='DNS OK'; }
+      else { $badge='warning'; $label='Нужна настройка'; }
+      ob_start(); ?>
+      <div class="modal fade hh-modal" id="ssl<?= (int)$s['id'] ?>" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered modal-lg"><div class="modal-content"><form method="post">
+          <?= csrf_field() ?><input type="hidden" name="action" value="ssl_site"><input type="hidden" name="id" value="<?= (int)$s['id'] ?>">
+          <div class="modal-header"><div><div class="eyebrow mb-1"><i class="fa-solid fa-certificate"></i> SSL выпуск</div><h5 class="modal-title mb-0"><?= e($s['domain']) ?></h5></div><button class="btn-close" data-bs-dismiss="modal" type="button"></button></div>
+          <div class="modal-body">
+            <div class="ssl-ready-box <?= $ready ? 'ok' : 'warn' ?>">
+              <i class="fa-solid <?= $ready ? 'fa-circle-check' : 'fa-triangle-exclamation' ?>"></i>
+              <div><b><?= $ready ? 'Проверка пройдена' : 'Перед выпуском есть предупреждение' ?></b><span><?= $ready ? 'DNS и ACME challenge готовы. Можно выпускать сертификат.' : e((string)($dns['problem'] ?? 'Проверь DNS/ACME и попробуй ещё раз.')) ?></span></div>
+            </div>
+            <label class="form-label mt-3">Email для Let’s Encrypt</label>
+            <input class="form-control form-control-lg" name="email" type="email" placeholder="email@example.com" required>
+          </div>
+          <div class="modal-footer"><button type="button" class="btn btn-soft" data-bs-dismiss="modal">Отмена</button><button class="btn btn-primary btn-lg"><i class="fa-solid fa-bolt me-2"></i>Выпустить SSL</button></div>
+        </form></div></div>
+      </div>
+      <?php $modals[] = ob_get_clean(); ?>
     <tr>
-      <td><b><?= e($s['domain']) ?></b><div class="small muted">A: <?= e(implode(', ', $dns['a'] ?? [])) ?: 'нет' ?></div><div class="small muted">Внутренний IP: <?= e((string)($dns['server_ip'] ?? host_name())) ?></div></td>
-      <td><span class="badge text-bg-<?= e($badge) ?>"><?= e($label) ?></span>
+      <td><b><?= e($s['domain']) ?></b><div class="small muted">A: <?= e(implode(', ', $dns['a'] ?? [])) ?: 'нет' ?></div><?php if(!empty($dns['configured_public_ip'])): ?><div class="small text-success">IP: <?= e((string)$dns['configured_public_ip']) ?></div><?php endif; ?></td>
+      <td><span class="badge rounded-pill text-bg-<?= e($badge) ?>"><?= e($label) ?></span>
         <div class="small muted mt-1">Нужно: <code><?= e((string)($dns['required_a'] ?? '')) ?></code></div>
-        <?php if(!empty($dns['configured_public_ip'])): ?><div class="small text-success">Публичный IP задан вручную: <?= e((string)$dns['configured_public_ip']) ?></div><?php endif; ?>
-        <?php if(!empty($dns['outbound_public_ip']) && !empty($dns['configured_public_ip']) && $dns['outbound_public_ip']!==$dns['configured_public_ip']): ?><div class="small text-warning">Исходящий IP отличается: <?= e((string)$dns['outbound_public_ip']) ?>. Это нормально при NAT, если DNS/порты настроены.</div><?php endif; ?>
-        <?php if(!empty($dns['warning'])): ?><div class="small text-warning"><?= e((string)$dns['warning']) ?></div><?php endif; ?>
-        <?php if(!empty($dns['problem'])): ?><div class="small text-danger"><?= e((string)$dns['problem']) ?></div><?php endif; ?>
+        <?php if(!empty($dns['outbound_public_ip']) && !empty($dns['configured_public_ip']) && $dns['outbound_public_ip']!==$dns['configured_public_ip']): ?><div class="small text-warning">NAT режим: исходящий IP отличается, это не мешает SSL при пробросе портов.</div><?php endif; ?>
+        <?php if(!$hasCert && !empty($dns['problem'])): ?><div class="small text-danger mt-1"><?= e((string)$dns['problem']) ?></div><?php endif; ?>
       </td>
-      <td><?= $c?'<span class="badge text-bg-'.(($c['status']??'')==='ok'?'success':'warning').'">'.e((string)($c['days_left']??'?')).' дней</span>':'<span class="badge text-bg-secondary">нет SSL</span>' ?><div class="small muted"><?= e((string)($c['expires']??'')) ?></div></td>
-      <td><div class="d-flex gap-2 flex-wrap"><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_fix_site"><input type="hidden" name="id" value="<?= (int)$s['id'] ?>"><button class="btn btn-sm btn-outline-info">Fix ACME</button></form><button class="btn btn-sm btn-soft" data-bs-toggle="modal" data-bs-target="#ssl<?= (int)$s['id'] ?>">Выпустить</button></div></td>
+      <td><?= $hasCert?'<span class="badge rounded-pill text-bg-success">'.e((string)($c['days_left']??'?')).' дней</span>':'<span class="badge rounded-pill text-bg-secondary">нет SSL</span>' ?><div class="small muted"><?= e((string)($c['expires']??'')) ?></div></td>
+      <td class="text-end"><div class="d-inline-flex gap-2 flex-wrap justify-content-end"><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_fix_site"><input type="hidden" name="id" value="<?= (int)$s['id'] ?>"><button class="btn btn-sm btn-outline-info"><i class="fa-solid fa-wand-magic-sparkles me-1"></i>Fix ACME</button></form><button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#ssl<?= (int)$s['id'] ?>"><i class="fa-solid fa-certificate me-1"></i><?= $hasCert?'Перевыпустить':'Выпустить' ?></button></div></td>
     </tr>
-    <div class="modal fade" id="ssl<?= (int)$s['id'] ?>"><div class="modal-dialog"><div class="modal-content"><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_site"><input type="hidden" name="id" value="<?= (int)$s['id'] ?>"><div class="modal-header"><h5>SSL для <?= e($s['domain']) ?></h5><button class="btn-close" data-bs-dismiss="modal" type="button"></button></div><div class="modal-body"><div class="alert alert-info">Панель проверит DNS, Nginx и challenge. Если сервер за роутером, убедись, что 80/443 проброшены на <?= e((string)($dns['server_ip'] ?? host_name())) ?>.</div><input class="form-control" name="email" type="email" placeholder="email@example.com" required></div><div class="modal-footer"><button class="btn btn-primary">Выпустить</button></div></form></div></div></div>
   <?php endforeach; if(!$sites): ?><tr><td colspan="4" class="empty">Сайтов пока нет</td></tr><?php endif; ?>
-  </tbody></table>
+  </tbody></table></div>
 </div>
-<div class="panel-card">
-  <h2>SSL на IP</h2>
-  <p class="muted">Обычный стабильный SSL лучше выпускать на домен. Для IP панель может сделать self-signed сертификат, но браузер будет ругаться, пока сертификат не добавлен в доверенные.</p>
-  <pre class="logs">sudo hyper-host-ctl ssl-ip-selfsigned 192.168.0.179</pre>
+<?= implode("\n", $modals) ?>
+<div class="panel-card mt-4">
+  <h2><i class="fa-solid fa-network-wired me-2"></i>SSL на IP</h2>
+  <p class="muted mb-2">Для домена используй Let’s Encrypt. Для локального IP доступен self-signed сертификат.</p>
+  <pre class="logs mb-0">sudo hyper-host-ctl ssl-ip-selfsigned 192.168.0.179</pre>
 </div>
 <?php }
 

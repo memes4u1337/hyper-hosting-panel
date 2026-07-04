@@ -14,6 +14,7 @@ echo "[HYPER-HOST] Остановка и удаление панели..."
 rm -f /etc/nginx/sites-enabled/hyper-host-panel.conf /etc/nginx/sites-available/hyper-host-panel.conf
 rm -f /etc/sudoers.d/hyper-host
 rm -f /usr/local/sbin/hyper-host-ctl
+rm -f /usr/local/bin/hyper
 
 systemctl daemon-reload || true
 systemctl reload nginx || true
