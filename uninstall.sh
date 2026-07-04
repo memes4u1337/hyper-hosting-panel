@@ -23,12 +23,13 @@ rm -rf /etc/hyper-host
 
 if [[ "$DELETE_USER_DATA" == "1" ]]; then
   echo "[HYPER-HOST] Удаляю пользовательские данные сайтов/ботов/базу панели..."
-  rm -rf /opt/hyper-host /var/www/hyper-host-sites /var/www/hyper-host-bots
+  rm -rf /opt/hyper-host /var/www/hyper-host-sites /var/www/hyper-host-bots /var/www/hyper-host-ftp
 else
   echo "[HYPER-HOST] Сайты, боты и база панели сохранены:"
   echo "  /opt/hyper-host"
   echo "  /var/www/hyper-host-sites"
   echo "  /var/www/hyper-host-bots"
+  echo "  /var/www/hyper-host-ftp"
 fi
 
 echo "[HYPER-HOST] Готово. Системные пакеты nginx/php/mariadb/vsftpd не удалялись специально."

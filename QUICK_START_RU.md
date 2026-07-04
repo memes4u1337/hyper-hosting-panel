@@ -1,130 +1,93 @@
-# Быстрый гайд HYPER-HOST
+# Быстрый старт HYPER-HOST v4
 
-## 1. Залить на GitHub
-
-На своём ПК:
+## Установка с GitHub
 
 ```bash
-git init
-git add .
-git commit -m "HYPER-HOST panel"
-git branch -M main
-git remote add origin https://github.com/YOUR_LOGIN/HYPER-HOST.git
-git push -u origin main
-```
-
-## 2. Установить на сервер
-
-На чистом сервере Ubuntu/Debian:
-
-```bash
-sudo apt update
-sudo apt install -y git
-
-git clone https://github.com/YOUR_LOGIN/HYPER-HOST.git
-cd HYPER-HOST
-sudo bash install.sh
-```
-
-Сразу со своим логином и паролем:
-
-```bash
+ssh root@IP_СЕРВЕРА
+apt update && apt upgrade -y
+apt install -y git curl unzip ca-certificates sudo ufw
+cd /root
+git clone https://github.com/memes4u1337/hyper-hosting-panel.git
+cd hyper-hosting-panel
 ADMIN_USER=admin ADMIN_PASS='StrongPassword123!' sudo -E bash install.sh
 ```
 
-## 3. Открыть панель
-
-После установки открой:
+Открыть:
 
 ```text
 http://IP_СЕРВЕРА/
 ```
 
-IP установщик определяет автоматически и покажет в конце.
+## Обновление
 
-## 4. Создать сайт
-
-1. Открой раздел **Сайты**.
-2. Введи домен: `example.com`.
-3. Если надо, добавь alias: `www.example.com`.
-4. Нажми **Создать сайт**.
-
-Файлы сайта будут тут:
-
-```text
-/var/www/hyper-host-sites/example.com/public_html
+```bash
+cd /root/hyper-hosting-panel
+git fetch origin main
+git checkout main
+git reset --hard origin/main
+git clean -fd
+sudo bash install.sh
+sudo hyper-host-ctl repair
+sudo hyper-host-ctl sync-json
+sudo nginx -t
+sudo systemctl reload nginx
 ```
 
-## 5. Привязать домен
+## Создать сайт
 
-В DNS домена создай A-запись:
-
-```text
-example.com -> IP_СЕРВЕРА
-www.example.com -> IP_СЕРВЕРА
+```bash
+sudo hyper-host-ctl add-site hyper-host.pw www.hyper-host.pw
 ```
 
-## 6. Создать FTP
+Файлы:
 
-1. Открой **FTP**.
-2. Создай логин и пароль.
-3. Выбери папку сайта или бота.
+```text
+/var/www/hyper-host-sites/hyper-host.pw/public_html
+```
+
+## Создать папку без домена
+
+```bash
+sudo hyper-host-ctl create-folder test-site
+```
+
+Файлы:
+
+```text
+/var/www/hyper-host-sites/test-site/public_html
+```
+
+## Создать FTP
+
+```bash
+sudo hyper-host-ctl create-ftp hyperhost 'StrongFTPPassword123!' /var/www/hyper-host-sites/hyper-host.pw/public_html
+```
 
 Подключение:
 
 ```text
-Host: IP_СЕРВЕРА
-Port: 21
-Login: hhftp_логин
-Password: твой пароль
+Хост: IP_СЕРВЕРА
+Порт: 21
+Имя пользователя: hhftp_hyperhost
+Пароль: StrongFTPPassword123!
 ```
 
-## 7. Создать базу и открыть phpMyAdmin
-
-1. Открой **Базы данных**.
-2. Создай базу, пользователя и пароль.
-3. Открой phpMyAdmin из панели.
-
-Прямой адрес:
+Внутри FTP:
 
 ```text
-http://IP_СЕРВЕРА/phpmyadmin
+common/
+site/
 ```
 
-## 8. Внешние подключения MySQL
+## Создать бота 24/7
 
-1. Открой **Настройки**.
-2. Нажми **Включить внешний доступ**.
-3. При создании базы включи **Разрешить внешний доступ**.
-
-Данные подключения:
-
-```text
-Host: IP_СЕРВЕРА
-Port: 3306
-Database: имя базы
-User: имя пользователя
-Password: пароль
+```bash
+sudo hyper-host-ctl bot-create mybot python 'python3 main.py'
+sudo hyper-host-ctl bot start mybot
 ```
 
-## 9. Создать Telegram-бота
+Логи:
 
-1. Открой **Telegram-боты**.
-2. Введи имя: `mybot`.
-3. Runtime: `Python`.
-4. Команда: `python3 main.py`.
-5. Создай FTP для папки бота.
-6. Загрузи файлы бота.
-7. Нажми **Старт**.
-
-Папка бота:
-
-```text
-/var/www/hyper-host-bots/mybot
+```bash
+sudo hyper-host-ctl bot logs mybot
 ```
-
-## 10. SSL
-
-В разделе **Сайты** нажми действия → SSL, укажи email.
-
-Важно: DNS домена уже должен смотреть на сервер.

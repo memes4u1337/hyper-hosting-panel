@@ -5,7 +5,20 @@ CONF="/etc/hyper-host/hyper-host.conf"
 [[ -f "$CONF" ]] || { echo "Config not found: $CONF" >&2; exit 2; }
 # shellcheck disable=SC1090
 source "$CONF"
-export PANEL_NAME POWERED_BY SERVER_IP PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR PHP_FPM_SOCK PHPMYADMIN_PATH
+
+PANEL_NAME="${PANEL_NAME:-HYPER-HOST}"
+POWERED_BY="${POWERED_BY:-powered by memes4u1337}"
+SERVER_IP="${SERVER_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
+PANEL_DOMAIN="${PANEL_DOMAIN:-_}"
+BASE_DIR="${BASE_DIR:-/opt/hyper-host}"
+PANEL_DIR="${PANEL_DIR:-/var/www/hyper-host}"
+SITES_DIR="${SITES_DIR:-/var/www/hyper-host-sites}"
+BOTS_DIR="${BOTS_DIR:-/var/www/hyper-host-bots}"
+FTP_DIR="${FTP_DIR:-/var/www/hyper-host-ftp}"
+PHP_FPM_SOCK="${PHP_FPM_SOCK:-}"
+PHPMYADMIN_PATH="${PHPMYADMIN_PATH:-/usr/share/phpmyadmin}"
+
+export PANEL_NAME POWERED_BY SERVER_IP PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH
 
 NGINX_AVAILABLE="/etc/nginx/sites-available"
 NGINX_ENABLED="/etc/nginx/sites-enabled"
@@ -14,28 +27,24 @@ BOT_SERVICE_PREFIX="hyperbot"
 log() { echo "[hhctl] $*"; }
 err() { echo "[hhctl error] $*" >&2; exit 1; }
 
-valid_domain() {
-  [[ "$1" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]
-}
+valid_domain() { [[ "$1" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]; }
+valid_name() { [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{1,63}$ ]]; }
+valid_folder() { [[ "$1" =~ ^[A-Za-z0-9._-]{1,80}$ ]] && [[ "$1" != "." && "$1" != ".." ]]; }
+valid_db_name() { [[ "$1" =~ ^[A-Za-z0-9_]{2,48}$ ]]; }
 
-valid_name() {
-  [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{1,63}$ ]]
-}
+sql_escape() { printf "%s" "$1" | sed "s/'/''/g"; }
 
-valid_db_name() {
-  [[ "$1" =~ ^[A-Za-z0-9_]{2,48}$ ]]
-}
-
-shell_quote() {
-  printf "%q" "$1"
-}
-
-sql_escape() {
-  printf "%s" "$1" | sed "s/'/''/g"
+ensure_nologin_shell() {
+  if [[ -x /usr/sbin/nologin ]] && ! grep -qxF /usr/sbin/nologin /etc/shells 2>/dev/null; then
+    echo /usr/sbin/nologin >> /etc/shells
+  fi
+  if [[ -x /bin/false ]] && ! grep -qxF /bin/false /etc/shells 2>/dev/null; then
+    echo /bin/false >> /etc/shells
+  fi
 }
 
 ensure_dirs() {
-  mkdir -p "$SITES_DIR" "$BOTS_DIR" "$BASE_DIR/templates"
+  mkdir -p "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$BASE_DIR/templates" "$BASE_DIR/data"
 }
 
 nginx_reload() {
@@ -43,33 +52,56 @@ nginx_reload() {
   systemctl reload nginx
 }
 
-php_index_template() {
-  local domain="$1"
-  cat > "$SITES_DIR/$domain/public_html/index.php" <<EOPHP
-<?php
-http_response_code(200);
-?>
+php_index_template_file() {
+  local title="$1"
+  local file="$2"
+  mkdir -p "$(dirname "$file")"
+  cat > "$file" <<EOPHP
+<?php http_response_code(200); ?>
 <!doctype html>
 <html lang="ru">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${domain} — HYPER-HOST</title>
+  <title>${title} — HYPER-HOST</title>
   <style>
-    body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#090b12;color:#fff;font-family:Arial,sans-serif}
-    .box{max-width:720px;padding:38px;border:1px solid rgba(255,255,255,.12);border-radius:24px;background:linear-gradient(135deg,rgba(99,102,241,.22),rgba(14,165,233,.12));box-shadow:0 30px 90px rgba(0,0,0,.45)}
-    h1{margin:0 0 14px;font-size:42px}.muted{color:#aeb8d0}.badge{display:inline-block;margin-top:18px;padding:9px 14px;border-radius:999px;background:#111827;color:#7dd3fc}
+    :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20% 20%,#2563eb44,transparent 32%),radial-gradient(circle at 90% 10%,#9333ea44,transparent 30%),linear-gradient(135deg,#070a14,#101827);color:#fff;font-family:Inter,Arial,sans-serif}.box{width:min(820px,92vw);padding:44px;border:1px solid rgba(255,255,255,.14);border-radius:32px;background:rgba(15,23,42,.78);box-shadow:0 40px 120px rgba(0,0,0,.55);backdrop-filter:blur(18px)}.logo{display:inline-flex;gap:10px;align-items:center;padding:10px 14px;border:1px solid rgba(255,255,255,.14);border-radius:999px;background:rgba(255,255,255,.06);color:#93c5fd}h1{margin:18px 0 12px;font-size:clamp(36px,6vw,64px);letter-spacing:-.05em}.muted{color:#b7c2d8;font-size:18px;line-height:1.65}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:26px}.item{padding:16px;border-radius:18px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1)}code{color:#a7f3d0}.powered{margin-top:24px;color:#a78bfa}
   </style>
 </head>
 <body>
-  <div class="box">
-    <h1>${domain} работает 🚀</h1>
-    <p class="muted">Сайт создан в панели HYPER-HOST. Загрузи свои файлы в public_html.</p>
-    <div class="badge">powered by memes4u1337</div>
-  </div>
+  <main class="box">
+    <div class="logo">🚀 HYPER-HOST</div>
+    <h1>${title}</h1>
+    <p class="muted">Сайт/папка создана. Загрузи файлы через FTP в нужную папку и замени этот стартовый экран.</p>
+    <div class="grid"><div class="item">Корень: <code>public_html</code></div><div class="item">PHP: <code>работает</code></div><div class="item">Панель: <code>HYPER-HOST</code></div></div>
+    <div class="powered">powered by memes4u1337</div>
+  </main>
 </body>
 </html>
 EOPHP
+}
+
+cmd_create_folder() {
+  ensure_dirs
+  local name="${1:-}"
+  [[ -n "$name" ]] || err "Folder name required"
+  valid_folder "$name" || err "Invalid folder name: $name"
+  local root="$SITES_DIR/$name/public_html"
+  mkdir -p "$root" "$SITES_DIR/$name/logs"
+  if [[ ! -f "$root/index.php" && ! -f "$root/index.html" ]]; then
+    php_index_template_file "$name" "$root/index.php"
+  fi
+  chown -R www-data:www-data "$SITES_DIR/$name"
+  chmod -R u+rwX,g+rwX,o+rX "$SITES_DIR/$name"
+  log "Folder created: $name -> $root"
+}
+
+cmd_delete_folder() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || err "Folder name required"
+  valid_folder "$name" || err "Invalid folder name: $name"
+  rm -rf "$SITES_DIR/$name"
+  log "Folder deleted: $name"
 }
 
 cmd_add_site() {
@@ -82,7 +114,7 @@ cmd_add_site() {
   local root="$SITES_DIR/$domain/public_html"
   mkdir -p "$root" "$SITES_DIR/$domain/logs"
   if [[ ! -f "$root/index.php" && ! -f "$root/index.html" ]]; then
-    php_index_template "$domain"
+    php_index_template_file "$domain работает" "$root/index.php"
   fi
   chown -R www-data:www-data "$SITES_DIR/$domain"
   chmod -R u+rwX,g+rwX,o+rX "$SITES_DIR/$domain"
@@ -106,7 +138,7 @@ server {
 
     root ${root};
     index index.php index.html index.htm;
-    client_max_body_size 256M;
+    client_max_body_size 512M;
 
     access_log ${SITES_DIR}/${domain}/logs/access.log;
     error_log ${SITES_DIR}/${domain}/logs/error.log;
@@ -157,24 +189,50 @@ cmd_ssl_site() {
 }
 
 cmd_create_ftp() {
+  ensure_dirs
+  ensure_nologin_shell
   local username="${1:-}"
   local password="${2:-}"
-  local target="${3:-}"
-  [[ -n "$username" && -n "$password" && -n "$target" ]] || err "Username, password and target path required"
+  local target="${3:-common}"
+  [[ -n "$username" && -n "$password" ]] || err "Username and password required"
   valid_name "$username" || err "Invalid ftp username"
   [[ "$username" == hhftp_* ]] || username="hhftp_${username}"
-  [[ "$target" == "$SITES_DIR"/* || "$target" == "$BOTS_DIR"/* ]] || err "Target must be inside sites or bots dir"
-  mkdir -p "$target"
+
+  local home="$FTP_DIR/$username"
+  local common="$home/common"
+  mkdir -p "$common"
+
   if id "$username" >/dev/null 2>&1; then
+    usermod -d "$home" -s /usr/sbin/nologin "$username" || true
     echo "$username:$password" | chpasswd
   else
-    useradd -d "$target" -s /usr/sbin/nologin "$username"
+    useradd -m -d "$home" -s /usr/sbin/nologin "$username"
     echo "$username:$password" | chpasswd
   fi
-  chown -R "$username":www-data "$target"
-  chmod -R u+rwX,g+rwX,o+rX "$target"
+
+  chown root:root "$home"
+  chmod 0755 "$home"
+  chown -R "$username":www-data "$common"
+  chmod -R u+rwX,g+rwX,o+rX "$common"
+
+  if [[ -n "$target" && "$target" != "common" ]]; then
+    [[ "$target" == "$SITES_DIR"/* || "$target" == "$BOTS_DIR"/* || "$target" == "$FTP_DIR"/* ]] || err "Target must be inside sites, bots or ftp dir"
+    mkdir -p "$target"
+    chown -R "$username":www-data "$target" || true
+    chmod -R u+rwX,g+rwX,o+rX "$target" || true
+    # Для удобства в FTP-корне делаем папку site, которая ведёт на public_html.
+    # Если bind недоступен, остаётся common, но целевая папка всё равно доступна как home для legacy-клиентов не нужна.
+    mkdir -p "$home/site"
+    if ! mountpoint -q "$home/site"; then
+      mount --bind "$target" "$home/site" 2>/dev/null || true
+    fi
+    if mountpoint -q "$home/site" && ! grep -qs " $home/site " /etc/fstab; then
+      echo "$target $home/site none bind 0 0" >> /etc/fstab
+    fi
+  fi
+
   systemctl restart vsftpd
-  log "FTP user ready: $username -> $target"
+  log "FTP user ready: $username -> $home"
 }
 
 cmd_delete_ftp() {
@@ -182,9 +240,22 @@ cmd_delete_ftp() {
   [[ -n "$username" ]] || err "Username required"
   valid_name "$username" || err "Invalid username"
   [[ "$username" == hhftp_* ]] || username="hhftp_${username}"
-  if id "$username" >/dev/null 2>&1; then
-    userdel "$username"
+  local home="$FTP_DIR/$username"
+  if [[ -d "$home/site" ]] && mountpoint -q "$home/site"; then
+    umount "$home/site" || true
   fi
+  if [[ -f /etc/fstab ]]; then
+    local tmp_fstab
+    tmp_fstab="$(mktemp)"
+    grep -vF " $home/site " /etc/fstab > "$tmp_fstab" || true
+    cat "$tmp_fstab" > /etc/fstab
+    rm -f "$tmp_fstab"
+  fi
+  if id "$username" >/dev/null 2>&1; then
+    userdel "$username" || true
+  fi
+  rm -rf "$home"
+  systemctl restart vsftpd || true
   log "FTP user deleted: $username"
 }
 
@@ -269,6 +340,7 @@ cmd_mysql_external() {
 }
 
 cmd_bot_create() {
+  ensure_dirs
   local name="${1:-}"
   local runtime="${2:-python}"
   local command="${3:-}"
@@ -276,35 +348,47 @@ cmd_bot_create() {
   valid_name "$name" || err "Invalid bot name"
   [[ "$runtime" =~ ^(python|node|php|custom)$ ]] || err "Invalid bot runtime"
 
+  if ! id hyperbot >/dev/null 2>&1; then
+    useradd --system --home "$BOTS_DIR" --shell /usr/sbin/nologin hyperbot
+  fi
+
   local path="$BOTS_DIR/$name"
   local service="${BOT_SERVICE_PREFIX}-${name}.service"
   mkdir -p "$path"
-  if [[ ! -f "$path/README.txt" ]]; then
-    cat > "$path/README.txt" <<EOTXT
-HYPER-HOST bot folder: ${name}
-Put your bot files here and set start command in panel.
+  [[ -f "$path/.env" ]] || cat > "$path/.env" <<EOENV
+# HYPER-HOST bot env
+# BOT_TOKEN=put_token_here
+EOENV
+  [[ -f "$path/README.txt" ]] || cat > "$path/README.txt" <<EOTXT
+HYPER-HOST bot: ${name}
+1) Upload files here by FTP/SFTP.
+2) For Python add requirements.txt and run install requirements from panel.
+3) Service works 24/7 with systemd Restart=always.
 EOTXT
-  fi
   chown -R hyperbot:www-data "$path"
   chmod -R u+rwX,g+rwX,o+rX "$path"
 
   local escaped_cmd
-  escaped_cmd="$(printf "%s" "$command" | sed "s/'/'\\\\''/g")"
+  escaped_cmd="$(printf "%s" "$command" | sed "s/'/'\\''/g")"
   cat > "/etc/systemd/system/${service}" <<EOSERVICE
 [Unit]
-Description=HYPER-HOST Telegram Bot ${name}
-After=network-online.target mariadb.service
+Description=HYPER-HOST 24/7 Bot ${name}
 Wants=network-online.target
+After=network-online.target mariadb.service nginx.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=hyperbot
 Group=www-data
 WorkingDirectory=${path}
+EnvironmentFile=-${path}/.env
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/bin/bash -lc 'cd ${path} && exec ${escaped_cmd}'
 Restart=always
-RestartSec=5
-Environment=PYTHONUNBUFFERED=1
+RestartSec=3
+KillSignal=SIGINT
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
@@ -312,6 +396,25 @@ EOSERVICE
   systemctl daemon-reload
   systemctl enable "$service" >/dev/null 2>&1 || true
   log "Bot service created: $service"
+}
+
+cmd_bot_install_requirements() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || err "Bot name required"
+  valid_name "$name" || err "Invalid bot name"
+  local path="$BOTS_DIR/$name"
+  [[ -d "$path" ]] || err "Bot folder not found: $path"
+  if [[ -f "$path/requirements.txt" ]]; then
+    sudo -u hyperbot python3 -m venv "$path/venv"
+    sudo -u hyperbot "$path/venv/bin/pip" install --upgrade pip wheel
+    sudo -u hyperbot "$path/venv/bin/pip" install -r "$path/requirements.txt"
+    log "Python requirements installed for $name"
+  elif [[ -f "$path/package.json" ]]; then
+    (cd "$path" && sudo -u hyperbot npm install)
+    log "Node packages installed for $name"
+  else
+    log "No requirements.txt or package.json found for $name"
+  fi
 }
 
 cmd_bot_delete() {
@@ -324,9 +427,7 @@ cmd_bot_delete() {
   systemctl disable "$service" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/$service"
   systemctl daemon-reload
-  if [[ "$mode" == "--delete-files" ]]; then
-    rm -rf "$BOTS_DIR/$name"
-  fi
+  [[ "$mode" == "--delete-files" ]] && rm -rf "$BOTS_DIR/$name"
   log "Bot deleted: $name"
 }
 
@@ -346,163 +447,110 @@ cmd_bot_action() {
       systemctl is-active "$service" || true
       ;;
     logs)
-      journalctl -u "$service" -n 160 --no-pager || true
+      journalctl -u "$service" -n 200 --no-pager || true
       ;;
   esac
 }
-
 
 cmd_stats_json() {
   python3 - <<'PY'
 import os, json, subprocess, shutil
 
 def run(cmd):
-    try:
-        return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
-    except Exception:
-        return ""
+    try: return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception: return ""
 
 def service(name):
-    out = run(f"systemctl is-active {name}")
-    return out or "inactive"
+    return run(f"systemctl is-active {name}") or "inactive"
 
 def meminfo():
-    data = {}
+    data={}
     try:
-        with open('/proc/meminfo', 'r', encoding='utf-8') as f:
-            for line in f:
-                k, v = line.split(':', 1)
-                data[k] = int(v.strip().split()[0]) * 1024
-    except Exception:
-        pass
-    total = data.get('MemTotal', 0)
-    available = data.get('MemAvailable', 0)
-    used = max(0, total - available)
-    return total, used, available
+        for line in open('/proc/meminfo', encoding='utf-8'):
+            k,v=line.split(':',1); data[k]=int(v.strip().split()[0])*1024
+    except Exception: pass
+    total=data.get('MemTotal',0); avail=data.get('MemAvailable',0)
+    return total, max(0,total-avail), avail
 
 def cpu_model():
     try:
-        for line in open('/proc/cpuinfo', 'r', encoding='utf-8', errors='ignore'):
+        for line in open('/proc/cpuinfo', encoding='utf-8', errors='ignore'):
             if line.lower().startswith('model name'):
-                return line.split(':', 1)[1].strip()
-    except Exception:
-        pass
+                return line.split(':',1)[1].strip()
+    except Exception: pass
     return run('uname -m') or 'unknown'
 
 def uptime_text():
     try:
-        sec = int(float(open('/proc/uptime').read().split()[0]))
-        d, sec = divmod(sec, 86400)
-        h, sec = divmod(sec, 3600)
-        m, _ = divmod(sec, 60)
-        if d:
-            return f"{d}д {h}ч {m}м"
-        return f"{h}ч {m}м"
-    except Exception:
-        return "unknown"
+        sec=int(float(open('/proc/uptime').read().split()[0])); d,sec=divmod(sec,86400); h,sec=divmod(sec,3600); m,_=divmod(sec,60)
+        return f"{d}д {h}ч {m}м" if d else f"{h}ч {m}м"
+    except Exception: return 'unknown'
 
-du = shutil.disk_usage('/')
-mt, mu, ma = meminfo()
-load = os.getloadavg() if hasattr(os, 'getloadavg') else (0,0,0)
-php_units = run("systemctl list-units --type=service --state=running --no-legend 'php*-fpm.service' | awk '{print $1}' | head -n1")
-php_service = php_units or 'php-fpm'
-
-result = {
-    'server_ip': os.environ.get('SERVER_IP', ''),
-    'panel_domain': os.environ.get('PANEL_DOMAIN', ''),
-    'cpu_model': cpu_model(),
-    'cpu_cores': os.cpu_count() or 0,
-    'load1': load[0], 'load5': load[1], 'load15': load[2],
-    'uptime': uptime_text(),
-    'disk_total': du.total, 'disk_used': du.used, 'disk_free': du.free,
-    'mem_total': mt, 'mem_used': mu, 'mem_available': ma,
-    'services': {
-        'nginx': service('nginx'),
-        'mariadb': service('mariadb'),
-        'vsftpd': service('vsftpd'),
-        'php_fpm': service(php_service),
-    },
-    'paths': {
-        'panel': os.environ.get('PANEL_DIR', ''),
-        'sites': os.environ.get('SITES_DIR', ''),
-        'bots': os.environ.get('BOTS_DIR', ''),
-        'phpmyadmin': os.environ.get('PHPMYADMIN_PATH', '/usr/share/phpmyadmin'),
-    }
-}
-print(json.dumps(result, ensure_ascii=False))
+du=shutil.disk_usage('/'); mt,mu,ma=meminfo(); load=os.getloadavg() if hasattr(os,'getloadavg') else (0,0,0)
+php_unit=run("systemctl list-units --type=service --state=running --no-legend 'php*-fpm.service' | awk '{print $1}' | head -n1") or 'php-fpm'
+print(json.dumps({
+ 'server_ip': os.environ.get('SERVER_IP',''), 'panel_domain': os.environ.get('PANEL_DOMAIN',''),
+ 'cpu_model': cpu_model(), 'cpu_cores': os.cpu_count() or 0, 'load1': load[0], 'load5': load[1], 'load15': load[2], 'uptime': uptime_text(),
+ 'disk_total': du.total, 'disk_used': du.used, 'disk_free': du.free,
+ 'mem_total': mt, 'mem_used': mu, 'mem_available': ma,
+ 'services': {'nginx': service('nginx'), 'mariadb': service('mariadb'), 'vsftpd': service('vsftpd'), 'php_fpm': service(php_unit)},
+ 'paths': {'panel': os.environ.get('PANEL_DIR',''), 'sites': os.environ.get('SITES_DIR',''), 'bots': os.environ.get('BOTS_DIR',''), 'ftp': os.environ.get('FTP_DIR',''), 'phpmyadmin': os.environ.get('PHPMYADMIN_PATH','/usr/share/phpmyadmin')}
+}, ensure_ascii=False))
 PY
-  exit 0
 }
 
 cmd_sync_json() {
   python3 - <<'PY'
 import os, json, glob, pwd, re, subprocess
-
-SITES_DIR=os.environ.get('SITES_DIR','/var/www/hyper-host-sites')
-BOTS_DIR=os.environ.get('BOTS_DIR','/var/www/hyper-host-bots')
+SITES_DIR=os.environ.get('SITES_DIR','/var/www/hyper-host-sites'); BOTS_DIR=os.environ.get('BOTS_DIR','/var/www/hyper-host-bots'); FTP_DIR=os.environ.get('FTP_DIR','/var/www/hyper-host-ftp')
 NGINX_AVAILABLE='/etc/nginx/sites-available'
-
-sites=[]
-for public_html in sorted(glob.glob(os.path.join(SITES_DIR, '*', 'public_html'))):
-    domain=os.path.basename(os.path.dirname(public_html))
-    if not re.match(r'^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$', domain):
-        continue
-    aliases=[]
-    conf=os.path.join(NGINX_AVAILABLE, f'hyper-host-site-{domain}.conf')
-    if os.path.exists(conf):
-        text=open(conf, encoding='utf-8', errors='ignore').read()
-        m=re.search(r'server_name\s+([^;]+);', text)
+sites=[]; folders=[]
+for public_html in sorted(glob.glob(os.path.join(SITES_DIR,'*','public_html'))):
+    name=os.path.basename(os.path.dirname(public_html)); conf=os.path.join(NGINX_AVAILABLE,f'hyper-host-site-{name}.conf')
+    if os.path.exists(conf) and re.match(r'^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$', name):
+        text=open(conf,encoding='utf-8',errors='ignore').read(); aliases=[]; m=re.search(r'server_name\s+([^;]+);', text)
         if m:
-            names=[x.strip() for x in m.group(1).split() if x.strip()]
-            aliases=[x for x in names if x != domain]
-    ssl=1 if os.path.exists(f'/etc/letsencrypt/live/{domain}/fullchain.pem') else 0
-    sites.append({'domain':domain,'aliases':','.join(aliases),'root_path':public_html,'ssl_enabled':ssl})
-
+            names=[x.strip() for x in m.group(1).split() if x.strip()]; aliases=[x for x in names if x != name]
+        ssl=1 if os.path.exists(f'/etc/letsencrypt/live/{name}/fullchain.pem') else 0
+        sites.append({'domain':name,'aliases':','.join(aliases),'root_path':public_html,'ssl_enabled':ssl})
+    else:
+        folders.append({'name':name,'path':public_html})
 ftp=[]
 for u in pwd.getpwall():
     if u.pw_name.startswith('hhftp_'):
-        ftp.append({'username':u.pw_name,'target_path':u.pw_dir})
-
+        ftp.append({'username':u.pw_name,'target_path':u.pw_dir,'host':os.environ.get('PANEL_DOMAIN') if os.environ.get('PANEL_DOMAIN','_') != '_' else os.environ.get('SERVER_IP','')})
 bots=[]
 for svc in sorted(glob.glob('/etc/systemd/system/hyperbot-*.service')):
     name=os.path.basename(svc)[len('hyperbot-'):-len('.service')]
-    if not re.match(r'^[A-Za-z0-9_][A-Za-z0-9_-]{1,63}$', name):
-        continue
-    text=open(svc, encoding='utf-8', errors='ignore').read()
-    mpath=re.search(r'^WorkingDirectory=(.+)$', text, re.M)
-    mcmd=re.search(r"^ExecStart=/bin/bash -lc 'cd [^']+ && exec (.*)'$", text, re.M)
-    path=mpath.group(1).strip() if mpath else os.path.join(BOTS_DIR,name)
-    cmd=mcmd.group(1).strip() if mcmd else ''
+    if not re.match(r'^[A-Za-z0-9_][A-Za-z0-9_-]{1,63}$', name): continue
+    text=open(svc,encoding='utf-8',errors='ignore').read(); mpath=re.search(r'^WorkingDirectory=(.+)$', text, re.M); mcmd=re.search(r"^ExecStart=/bin/bash -lc 'cd [^']+ && exec (.*)'$", text, re.M)
+    path=mpath.group(1).strip() if mpath else os.path.join(BOTS_DIR,name); cmd=mcmd.group(1).strip() if mcmd else ''
     runtime='custom'
-    if cmd.startswith('python') or 'python' in cmd: runtime='python'
-    elif cmd.startswith('node') or 'node ' in cmd: runtime='node'
-    elif cmd.startswith('php') or 'php ' in cmd: runtime='php'
+    if 'python' in cmd: runtime='python'
+    elif 'node' in cmd: runtime='node'
+    elif 'php' in cmd: runtime='php'
     bots.append({'name':name,'runtime':runtime,'path':path,'start_command':cmd})
-
 databases=[]
 try:
     out=subprocess.check_output("mysql -N -B -e \"SELECT Db, User, MAX(Host <> 'localhost') AS remote FROM mysql.db WHERE Db NOT IN ('mysql','performance_schema','information_schema','sys') GROUP BY Db, User ORDER BY Db\"", shell=True, text=True, stderr=subprocess.DEVNULL)
     for line in out.splitlines():
         parts=line.split('\t')
-        if len(parts) >= 3:
-            db,user,remote=parts[0],parts[1],parts[2]
-            if db and user and not db.startswith('phpmyadmin'):
-                databases.append({'db_name':db,'db_user':user,'remote_allowed':1 if remote in ('1','true','TRUE') else 0})
-except Exception:
-    pass
-
-print(json.dumps({'sites':sites,'ftp':ftp,'databases':databases,'bots':bots}, ensure_ascii=False))
+        if len(parts)>=3 and parts[0] and parts[1] and not parts[0].startswith('phpmyadmin'):
+            databases.append({'db_name':parts[0],'db_user':parts[1],'remote_allowed':1 if parts[2] in ('1','true','TRUE') else 0})
+except Exception: pass
+print(json.dumps({'sites':sites,'folders':folders,'ftp':ftp,'databases':databases,'bots':bots}, ensure_ascii=False))
 PY
-  exit 0
 }
 
 cmd_repair() {
   ensure_dirs
-  mkdir -p "$BASE_DIR/data" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$BASE_DIR/templates" /etc/hyper-host
-  chown -R www-data:www-data "$PANEL_DIR" "$BASE_DIR/data"
+  ensure_nologin_shell
+  mkdir -p "$BASE_DIR/data" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$BASE_DIR/templates" /etc/hyper-host
+  chown -R www-data:www-data "$PANEL_DIR" "$BASE_DIR/data" 2>/dev/null || true
   chown www-data:www-data "$SITES_DIR" 2>/dev/null || true
-  chmod 0755 "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR"
-  chmod 0770 "$BASE_DIR/data"
+  chown root:root "$FTP_DIR" 2>/dev/null || true
+  chmod 0755 "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" 2>/dev/null || true
+  chmod 0770 "$BASE_DIR/data" 2>/dev/null || true
   if [[ -f "$BASE_DIR/data/hyperhost.sqlite" ]]; then
     chown www-data:www-data "$BASE_DIR/data/hyperhost.sqlite" "$BASE_DIR/data/hyperhost.sqlite"-* 2>/dev/null || true
     chmod 0660 "$BASE_DIR/data/hyperhost.sqlite" "$BASE_DIR/data/hyperhost.sqlite"-* 2>/dev/null || true
@@ -510,13 +558,18 @@ cmd_repair() {
   if ! id hyperbot >/dev/null 2>&1; then
     useradd --system --home "$BOTS_DIR" --shell /usr/sbin/nologin hyperbot
   fi
-  chown -R hyperbot:www-data "$BOTS_DIR"
-  chmod -R u+rwX,g+rwX,o+rX "$BOTS_DIR"
+  usermod -aG www-data hyperbot 2>/dev/null || true
+  chown -R hyperbot:www-data "$BOTS_DIR" 2>/dev/null || true
+  chmod -R u+rwX,g+rwX,o+rX "$BOTS_DIR" 2>/dev/null || true
   while IFS=: read -r user _ uid gid gecos home shell; do
     [[ "$user" == hhftp_* ]] || continue
     [[ -n "$home" && -d "$home" ]] || continue
-    chown -R "$user":www-data "$home" 2>/dev/null || true
-    chmod -R u+rwX,g+rwX,o+rX "$home" 2>/dev/null || true
+    usermod -s /usr/sbin/nologin "$user" 2>/dev/null || true
+    chown root:root "$home" 2>/dev/null || true
+    chmod 0755 "$home" 2>/dev/null || true
+    [[ -d "$home/common" ]] || mkdir -p "$home/common"
+    chown -R "$user":www-data "$home/common" 2>/dev/null || true
+    chmod -R u+rwX,g+rwX,o+rX "$home/common" 2>/dev/null || true
   done < /etc/passwd
   cat > /etc/sudoers.d/hyper-host <<EOSUDO
 www-data ALL=(root) NOPASSWD: /usr/local/sbin/hyper-host-ctl *
@@ -529,10 +582,12 @@ EOSUDO
   ufw allow 40000:40100/tcp >/dev/null 2>&1 || true
   systemctl restart vsftpd 2>/dev/null || true
   systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
-  log "Repair finished: permissions, sudoers, FTP ports and services checked"
+  log "Repair finished: permissions, sudoers, FTP shell, FTP ports and services checked"
 }
 
 case "${1:-}" in
+  create-folder) shift; cmd_create_folder "$@" ;;
+  delete-folder) shift; cmd_delete_folder "$@" ;;
   add-site) shift; cmd_add_site "$@" ;;
   delete-site) shift; cmd_delete_site "$@" ;;
   ssl-site) shift; cmd_ssl_site "$@" ;;
@@ -543,6 +598,7 @@ case "${1:-}" in
   delete-db) shift; cmd_delete_db "$@" ;;
   mysql-external) shift; cmd_mysql_external "$@" ;;
   bot-create) shift; cmd_bot_create "$@" ;;
+  bot-install-requirements) shift; cmd_bot_install_requirements "$@" ;;
   bot-delete) shift; cmd_bot_delete "$@" ;;
   bot) shift; cmd_bot_action "$@" ;;
   stats-json) shift; cmd_stats_json "$@" ;;
@@ -551,16 +607,19 @@ case "${1:-}" in
   *)
     cat >&2 <<EOHELP
 Usage:
+  hyper-host-ctl create-folder NAME
+  hyper-host-ctl delete-folder NAME
   hyper-host-ctl add-site DOMAIN [ALIASES_COMMA]
   hyper-host-ctl delete-site DOMAIN [--keep-files|--delete-files]
   hyper-host-ctl ssl-site DOMAIN EMAIL
-  hyper-host-ctl create-ftp USER PASS TARGET_PATH
+  hyper-host-ctl create-ftp USER PASS [TARGET_PATH|common]
   hyper-host-ctl delete-ftp USER
   hyper-host-ctl ftp-password USER PASS
   hyper-host-ctl create-db DB USER PASS [0|1]
   hyper-host-ctl delete-db DB USER
   hyper-host-ctl mysql-external enable|disable
   hyper-host-ctl bot-create NAME python|node|php|custom COMMAND
+  hyper-host-ctl bot-install-requirements NAME
   hyper-host-ctl bot-delete NAME [--keep-files|--delete-files]
   hyper-host-ctl bot start|stop|restart|status|logs NAME
   hyper-host-ctl stats-json

@@ -2,7 +2,7 @@
 declare(strict_types=1);
 require __DIR__ . '/../app/bootstrap.php';
 
-$page = $_GET['page'] ?? 'dashboard';
+$page = (string)($_GET['page'] ?? 'dashboard');
 $action = $_POST['action'] ?? $_GET['action'] ?? null;
 
 if ($page === 'logout') {
@@ -18,12 +18,12 @@ if ($page === 'login') {
         $stmt = db()->prepare('SELECT * FROM users WHERE username = ?');
         $stmt->execute([$username]);
         $user = $stmt->fetch();
-        if ($user && password_verify($password, $user['password_hash'])) {
+        if ($user && password_verify($password, (string)$user['password_hash'])) {
             $_SESSION['user_id'] = (int)$user['id'];
             add_event('auth', 'Вход в панель: ' . $username);
             redirect('/');
         }
-        flash('Неверный логин или пароль', 'err');
+        flash('Неверный логин или пароль', 'danger');
         redirect('/?page=login');
     }
     render_login();
@@ -31,13 +31,26 @@ if ($page === 'login') {
 }
 
 $user = require_auth();
-
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     check_csrf();
     handle_post((string)$action);
 }
+render_page($page, $user);
 
-render_page((string)$page, $user);
+function csrf_field(): string
+{
+    return '<input type="hidden" name="_csrf" value="' . e(csrf_token()) . '">';
+}
+
+function host_name(): string
+{
+    return panel_host_for_connections();
+}
+
+function default_ftp_password(): string
+{
+    return 'Hh-' . bin2hex(random_bytes(5)) . '!';
+}
 
 function handle_post(string $action): void
 {
@@ -49,22 +62,19 @@ function handle_post(string $action): void
                 if (!is_valid_domain($domain)) {
                     throw new RuntimeException('Неверный домен');
                 }
-                if ($aliases !== '') {
-                    foreach (array_filter(array_map('trim', explode(',', $aliases))) as $alias) {
-                        if (!is_valid_domain($alias)) {
-                            throw new RuntimeException('Неверный alias: ' . $alias);
-                        }
+                foreach (array_filter(array_map('trim', explode(',', $aliases))) as $alias) {
+                    if (!is_valid_domain($alias)) {
+                        throw new RuntimeException('Неверный alias: ' . $alias);
                     }
                 }
-                $result = run_ctl(['add-site', $domain, $aliases]);
+                $result = run_ctl(['add-site', $domain, $aliases], 180);
                 if ($result['code'] !== 0) {
                     throw new RuntimeException($result['output']);
                 }
-                $root = rtrim(app_config('sites_dir'), '/') . '/' . $domain . '/public_html';
-                $stmt = db()->prepare('INSERT INTO sites(domain, aliases, root_path) VALUES(?, ?, ?) ON CONFLICT(domain) DO UPDATE SET aliases = excluded.aliases, root_path = excluded.root_path');
-                $stmt->execute([$domain, $aliases, $root]);
+                $root = rtrim((string)app_config('sites_dir'), '/') . '/' . $domain . '/public_html';
+                upsert_site_row($domain, $aliases, $root, 0);
                 add_event('site', 'Создан сайт: ' . $domain);
-                flash('Сайт создан: ' . $domain);
+                flash('Сайт создан и папка public_html готова: ' . $domain, 'success');
                 redirect('/?page=sites');
 
             case 'delete_site':
@@ -73,60 +83,70 @@ function handle_post(string $action): void
                 $stmt = db()->prepare('SELECT * FROM sites WHERE id = ?');
                 $stmt->execute([$id]);
                 $site = $stmt->fetch();
-                if (!$site) {
-                    throw new RuntimeException('Сайт не найден');
-                }
-                $result = run_ctl(['delete-site', $site['domain'], $mode]);
-                if ($result['code'] !== 0) {
-                    throw new RuntimeException($result['output']);
-                }
+                if (!$site) throw new RuntimeException('Сайт не найден');
+                $result = run_ctl(['delete-site', $site['domain'], $mode], 120);
+                if ($result['code'] !== 0) throw new RuntimeException($result['output']);
                 db()->prepare('DELETE FROM sites WHERE id = ?')->execute([$id]);
                 add_event('site', 'Удалён сайт: ' . $site['domain']);
-                flash('Сайт удалён: ' . $site['domain']);
+                flash('Сайт удалён: ' . $site['domain'], 'success');
                 redirect('/?page=sites');
 
             case 'ssl_site':
                 $id = (int)($_POST['id'] ?? 0);
                 $email = trim((string)($_POST['email'] ?? ''));
-                if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-                    throw new RuntimeException('Укажи нормальный email для Let\'s Encrypt');
-                }
+                if (!filter_var($email, FILTER_VALIDATE_EMAIL)) throw new RuntimeException('Укажи нормальный email');
                 $stmt = db()->prepare('SELECT * FROM sites WHERE id = ?');
                 $stmt->execute([$id]);
                 $site = $stmt->fetch();
-                if (!$site) {
-                    throw new RuntimeException('Сайт не найден');
-                }
-                $result = run_ctl(['ssl-site', $site['domain'], $email], 240);
-                if ($result['code'] !== 0) {
-                    throw new RuntimeException($result['output']);
-                }
+                if (!$site) throw new RuntimeException('Сайт не найден');
+                $result = run_ctl(['ssl-site', $site['domain'], $email], 300);
+                if ($result['code'] !== 0) throw new RuntimeException($result['output']);
                 db()->prepare('UPDATE sites SET ssl_enabled = 1 WHERE id = ?')->execute([$id]);
                 add_event('ssl', 'Выпущен SSL: ' . $site['domain']);
-                flash('SSL выпущен для ' . $site['domain']);
+                flash('SSL выпущен для ' . $site['domain'], 'success');
                 redirect('/?page=sites');
+
+            case 'create_folder':
+                $name = trim((string)($_POST['name'] ?? ''));
+                if (!is_valid_folder_name($name)) throw new RuntimeException('Неверное имя папки. Можно латиницу, цифры, точку, _ и -');
+                $result = run_ctl(['create-folder', $name], 120);
+                if ($result['code'] !== 0) throw new RuntimeException($result['output']);
+                $path = rtrim((string)app_config('sites_dir'), '/') . '/' . $name . '/public_html';
+                upsert_folder_row($name, $path);
+                add_event('folder', 'Создана папка: ' . $name);
+                flash('Папка создана: ' . $name . '. Внутри уже есть стартовый index.php', 'success');
+                redirect('/?page=folders');
+
+            case 'delete_folder':
+                $id = (int)($_POST['id'] ?? 0);
+                $stmt = db()->prepare('SELECT * FROM folders WHERE id = ?');
+                $stmt->execute([$id]);
+                $folder = $stmt->fetch();
+                if (!$folder) throw new RuntimeException('Папка не найдена');
+                $result = run_ctl(['delete-folder', $folder['name']], 120);
+                if ($result['code'] !== 0) throw new RuntimeException($result['output']);
+                db()->prepare('DELETE FROM folders WHERE id = ?')->execute([$id]);
+                add_event('folder', 'Удалена папка: ' . $folder['name']);
+                flash('Папка удалена: ' . $folder['name'], 'success');
+                redirect('/?page=folders');
 
             case 'create_ftp':
                 $username = trim((string)($_POST['username'] ?? ''));
                 $password = (string)($_POST['password'] ?? '');
-                $target = trim((string)($_POST['target_path'] ?? ''));
-                if ($username === '' || !is_valid_name($username)) {
-                    throw new RuntimeException('Неверный FTP логин');
+                $target = trim((string)($_POST['target_path'] ?? 'common'));
+                if ($username === '' || !is_valid_name($username)) throw new RuntimeException('Неверный FTP логин');
+                if (strlen($password) < 8) throw new RuntimeException('Пароль FTP минимум 8 символов');
+                if ($target === '') $target = 'common';
+                if ($target !== 'common' && !str_starts_with($target, (string)app_config('sites_dir')) && !str_starts_with($target, (string)app_config('bots_dir')) && !str_starts_with($target, (string)app_config('ftp_dir', '/var/www/hyper-host-ftp'))) {
+                    throw new RuntimeException('Путь должен быть common, сайтами или ботами');
                 }
-                if (strlen($password) < 8) {
-                    throw new RuntimeException('Пароль FTP минимум 8 символов');
-                }
-                if (!str_starts_with($target, app_config('sites_dir')) && !str_starts_with($target, app_config('bots_dir'))) {
-                    throw new RuntimeException('Путь должен быть внутри сайтов или ботов');
-                }
-                $result = run_ctl(['create-ftp', $username, $password, $target]);
-                if ($result['code'] !== 0) {
-                    throw new RuntimeException($result['output']);
-                }
+                $result = run_ctl(['create-ftp', $username, $password, $target], 180);
+                if ($result['code'] !== 0) throw new RuntimeException($result['output']);
                 $finalUser = str_starts_with($username, 'hhftp_') ? $username : 'hhftp_' . $username;
-                upsert_ftp_row($finalUser, $target, $password);
+                $home = rtrim((string)app_config('ftp_dir', '/var/www/hyper-host-ftp'), '/') . '/' . $finalUser;
+                upsert_ftp_row($finalUser, $home, $password, host_name());
                 add_event('ftp', 'Создан FTP: ' . $finalUser);
-                flash("FTP создан.\nХост: " . panel_host_for_connections() . "\nИмя пользователя: " . $finalUser . "\nПароль: " . $password);
+                flash("FTP создан. Хост: " . host_name() . " | Имя пользователя: {$finalUser} | Пароль: {$password}", 'success');
                 redirect('/?page=ftp');
 
             case 'delete_ftp':
@@ -134,37 +154,27 @@ function handle_post(string $action): void
                 $stmt = db()->prepare('SELECT * FROM ftp_accounts WHERE id = ?');
                 $stmt->execute([$id]);
                 $ftp = $stmt->fetch();
-                if (!$ftp) {
-                    throw new RuntimeException('FTP не найден');
-                }
-                $result = run_ctl(['delete-ftp', $ftp['username']]);
-                if ($result['code'] !== 0) {
-                    throw new RuntimeException($result['output']);
-                }
+                if (!$ftp) throw new RuntimeException('FTP не найден');
+                $result = run_ctl(['delete-ftp', $ftp['username']], 120);
+                if ($result['code'] !== 0) throw new RuntimeException($result['output']);
                 db()->prepare('DELETE FROM ftp_accounts WHERE id = ?')->execute([$id]);
                 add_event('ftp', 'Удалён FTP: ' . $ftp['username']);
-                flash('FTP удалён: ' . $ftp['username']);
+                flash('FTP удалён: ' . $ftp['username'], 'success');
                 redirect('/?page=ftp');
 
             case 'reset_ftp_password':
                 $id = (int)($_POST['id'] ?? 0);
                 $password = (string)($_POST['password'] ?? '');
-                if (strlen($password) < 8) {
-                    throw new RuntimeException('Пароль FTP минимум 8 символов');
-                }
+                if (strlen($password) < 8) throw new RuntimeException('Пароль FTP минимум 8 символов');
                 $stmt = db()->prepare('SELECT * FROM ftp_accounts WHERE id = ?');
                 $stmt->execute([$id]);
                 $ftp = $stmt->fetch();
-                if (!$ftp) {
-                    throw new RuntimeException('FTP не найден');
-                }
-                $result = run_ctl(['ftp-password', $ftp['username'], $password]);
-                if ($result['code'] !== 0) {
-                    throw new RuntimeException($result['output']);
-                }
-                upsert_ftp_row((string)$ftp['username'], (string)$ftp['target_path'], $password);
+                if (!$ftp) throw new RuntimeException('FTP не найден');
+                $result = run_ctl(['ftp-password', $ftp['username'], $password], 120);
+                if ($result['code'] !== 0) throw new RuntimeException($result['output']);
+                upsert_ftp_row((string)$ftp['username'], (string)$ftp['target_path'], $password, host_name());
                 add_event('ftp', 'Обновлён пароль FTP: ' . $ftp['username']);
-                flash("Пароль FTP обновлён.\nХост: " . panel_host_for_connections() . "\nИмя пользователя: " . $ftp['username'] . "\nПароль: " . $password);
+                flash("Пароль FTP обновлён. Хост: " . host_name() . " | Имя пользователя: {$ftp['username']} | Пароль: {$password}", 'success');
                 redirect('/?page=ftp');
 
             case 'create_db':
@@ -172,20 +182,13 @@ function handle_post(string $action): void
                 $dbUser = trim((string)($_POST['db_user'] ?? ''));
                 $password = (string)($_POST['password'] ?? '');
                 $remote = !empty($_POST['remote_allowed']) ? '1' : '0';
-                if (!is_valid_db_name($dbName) || !is_valid_db_name($dbUser)) {
-                    throw new RuntimeException('Имя базы и пользователя: только латиница, цифры, _');
-                }
-                if (strlen($password) < 10) {
-                    throw new RuntimeException('Пароль базы минимум 10 символов');
-                }
-                $result = run_ctl(['create-db', $dbName, $dbUser, $password, $remote]);
-                if ($result['code'] !== 0) {
-                    throw new RuntimeException($result['output']);
-                }
-                $stmt = db()->prepare('INSERT INTO databases(db_name, db_user, remote_allowed) VALUES(?, ?, ?) ON CONFLICT(db_name) DO UPDATE SET db_user = excluded.db_user, remote_allowed = excluded.remote_allowed');
-                $stmt->execute([$dbName, $dbUser, (int)$remote]);
+                if (!is_valid_db_name($dbName) || !is_valid_db_name($dbUser)) throw new RuntimeException('Имя базы и пользователя: латиница, цифры, _');
+                if (strlen($password) < 10) throw new RuntimeException('Пароль базы минимум 10 символов');
+                $result = run_ctl(['create-db', $dbName, $dbUser, $password, $remote], 180);
+                if ($result['code'] !== 0) throw new RuntimeException($result['output']);
+                upsert_db_row($dbName, $dbUser, (int)$remote);
                 add_event('db', 'Создана база: ' . $dbName);
-                flash('База создана: ' . $dbName);
+                flash('База создана: ' . $dbName, 'success');
                 redirect('/?page=databases');
 
             case 'delete_db':
@@ -193,72 +196,52 @@ function handle_post(string $action): void
                 $stmt = db()->prepare('SELECT * FROM databases WHERE id = ?');
                 $stmt->execute([$id]);
                 $row = $stmt->fetch();
-                if (!$row) {
-                    throw new RuntimeException('База не найдена');
-                }
-                $result = run_ctl(['delete-db', $row['db_name'], $row['db_user']]);
-                if ($result['code'] !== 0) {
-                    throw new RuntimeException($result['output']);
-                }
+                if (!$row) throw new RuntimeException('База не найдена');
+                $result = run_ctl(['delete-db', $row['db_name'], $row['db_user']], 180);
+                if ($result['code'] !== 0) throw new RuntimeException($result['output']);
                 db()->prepare('DELETE FROM databases WHERE id = ?')->execute([$id]);
                 add_event('db', 'Удалена база: ' . $row['db_name']);
-                flash('База удалена: ' . $row['db_name']);
+                flash('База удалена: ' . $row['db_name'], 'success');
                 redirect('/?page=databases');
 
             case 'mysql_external':
                 $state = (string)($_POST['state'] ?? 'disable');
-                $state = $state === 'enable' ? 'enable' : 'disable';
+                if (!in_array($state, ['enable', 'disable'], true)) throw new RuntimeException('Неверное действие');
                 $result = run_ctl(['mysql-external', $state], 180);
-                if ($result['code'] !== 0) {
-                    throw new RuntimeException($result['output']);
-                }
+                if ($result['code'] !== 0) throw new RuntimeException($result['output']);
                 setting_set('mysql_external', $state === 'enable' ? '1' : '0');
-                add_event('settings', 'Внешние подключения MySQL: ' . $state);
-                flash($state === 'enable' ? 'Внешние подключения MySQL включены' : 'Внешние подключения MySQL выключены');
+                flash('Внешний MySQL: ' . ($state === 'enable' ? 'включён' : 'выключен'), 'success');
                 redirect('/?page=settings');
 
             case 'create_bot':
                 $name = trim((string)($_POST['name'] ?? ''));
-                $runtime = trim((string)($_POST['runtime'] ?? 'python'));
-                $command = trim((string)($_POST['start_command'] ?? ''));
-                if (!is_valid_name($name)) {
-                    throw new RuntimeException('Неверное имя бота');
-                }
-                if (!in_array($runtime, ['python', 'node', 'php', 'custom'], true)) {
-                    throw new RuntimeException('Неверный runtime');
-                }
-                if ($command === '') {
-                    throw new RuntimeException('Укажи команду запуска');
-                }
-                $result = run_ctl(['bot-create', $name, $runtime, $command]);
-                if ($result['code'] !== 0) {
-                    throw new RuntimeException($result['output']);
-                }
-                $path = rtrim(app_config('bots_dir'), '/') . '/' . $name;
-                $stmt = db()->prepare('INSERT INTO bots(name, runtime, path, start_command) VALUES(?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET runtime = excluded.runtime, path = excluded.path, start_command = excluded.start_command');
-                $stmt->execute([$name, $runtime, $path, $command]);
-                add_event('bot', 'Создан бот: ' . $name);
-                flash('Бот создан: ' . $name);
+                $runtime = (string)($_POST['runtime'] ?? 'python');
+                $cmd = trim((string)($_POST['start_command'] ?? ''));
+                if (!is_valid_name($name)) throw new RuntimeException('Неверное имя бота');
+                if (!in_array($runtime, ['python', 'node', 'php', 'custom'], true)) throw new RuntimeException('Неверный runtime');
+                if ($cmd === '') throw new RuntimeException('Команда запуска обязательна');
+                $result = run_ctl(['bot-create', $name, $runtime, $cmd], 180);
+                if ($result['code'] !== 0) throw new RuntimeException($result['output']);
+                $path = rtrim((string)app_config('bots_dir'), '/') . '/' . $name;
+                upsert_bot_row($name, $runtime, $path, $cmd);
+                add_event('bot', 'Создан 24/7 бот: ' . $name);
+                flash('Бот создан как systemd-сервис 24/7: ' . $name, 'success');
                 redirect('/?page=bots');
 
             case 'bot_action':
                 $id = (int)($_POST['id'] ?? 0);
-                $botAction = (string)($_POST['bot_action'] ?? 'status');
-                if (!in_array($botAction, ['start', 'stop', 'restart'], true)) {
-                    throw new RuntimeException('Неверное действие');
-                }
+                $botAction = (string)($_POST['bot_action'] ?? '');
                 $stmt = db()->prepare('SELECT * FROM bots WHERE id = ?');
                 $stmt->execute([$id]);
                 $bot = $stmt->fetch();
-                if (!$bot) {
-                    throw new RuntimeException('Бот не найден');
+                if (!$bot) throw new RuntimeException('Бот не найден');
+                if ($botAction === 'install') {
+                    $result = run_ctl(['bot-install-requirements', $bot['name']], 300);
+                } else {
+                    $result = run_ctl(['bot', $botAction, $bot['name']], 120);
                 }
-                $result = run_ctl(['bot', $botAction, $bot['name']]);
-                if ($result['code'] !== 0) {
-                    throw new RuntimeException($result['output']);
-                }
-                add_event('bot', 'Бот ' . $botAction . ': ' . $bot['name']);
-                flash('Команда выполнена: ' . $botAction . ' ' . $bot['name']);
+                if ($result['code'] !== 0) throw new RuntimeException($result['output']);
+                flash('Команда выполнена: ' . $botAction . ' / ' . $bot['name'], 'success');
                 redirect('/?page=bots');
 
             case 'delete_bot':
@@ -267,724 +250,200 @@ function handle_post(string $action): void
                 $stmt = db()->prepare('SELECT * FROM bots WHERE id = ?');
                 $stmt->execute([$id]);
                 $bot = $stmt->fetch();
-                if (!$bot) {
-                    throw new RuntimeException('Бот не найден');
-                }
-                $result = run_ctl(['bot-delete', $bot['name'], $mode]);
-                if ($result['code'] !== 0) {
-                    throw new RuntimeException($result['output']);
-                }
+                if (!$bot) throw new RuntimeException('Бот не найден');
+                $result = run_ctl(['bot-delete', $bot['name'], $mode], 120);
+                if ($result['code'] !== 0) throw new RuntimeException($result['output']);
                 db()->prepare('DELETE FROM bots WHERE id = ?')->execute([$id]);
-                add_event('bot', 'Удалён бот: ' . $bot['name']);
-                flash('Бот удалён: ' . $bot['name']);
+                flash('Бот удалён: ' . $bot['name'], 'success');
                 redirect('/?page=bots');
-
-
-            case 'sync_resources':
-                $synced = sync_resources_from_server();
-                add_event('sync', 'Синхронизация ресурсов: ' . $synced);
-                flash('Синхронизация готова: ' . $synced);
-                redirect($_SERVER['HTTP_REFERER'] ?? '/');
 
             case 'repair_panel':
                 $result = run_ctl(['repair'], 180);
-                if ($result['code'] !== 0) {
-                    throw new RuntimeException($result['output']);
-                }
-                add_event('repair', 'Исправлены права, sudoers, FTP-порты и сервисы');
-                flash("Ремонт выполнен.\n" . $result['output']);
+                if ($result['code'] !== 0) throw new RuntimeException($result['output']);
+                flash('Ремонт выполнен: права, sudoers, FTP shell/порты и сервисы проверены', 'success');
                 redirect('/?page=settings');
+
+            case 'sync_resources':
+                sync_resources();
+                flash('Ресурсы синхронизированы с сервером', 'success');
+                redirect('/?page=dashboard');
 
             case 'change_password':
                 $current = (string)($_POST['current_password'] ?? '');
                 $new = (string)($_POST['new_password'] ?? '');
-                if (strlen($new) < 10) {
-                    throw new RuntimeException('Новый пароль минимум 10 символов');
-                }
-                $user = current_user();
+                if (strlen($new) < 10) throw new RuntimeException('Новый пароль минимум 10 символов');
+                $uid = (int)($_SESSION['user_id'] ?? 0);
                 $stmt = db()->prepare('SELECT * FROM users WHERE id = ?');
-                $stmt->execute([(int)$user['id']]);
-                $row = $stmt->fetch();
-                if (!$row || !password_verify($current, $row['password_hash'])) {
-                    throw new RuntimeException('Текущий пароль неверный');
-                }
-                $hash = password_hash($new, PASSWORD_DEFAULT);
-                db()->prepare('UPDATE users SET password_hash = ? WHERE id = ?')->execute([$hash, (int)$user['id']]);
-                add_event('settings', 'Пароль администратора изменён');
-                flash('Пароль изменён');
+                $stmt->execute([$uid]);
+                $u = $stmt->fetch();
+                if (!$u || !password_verify($current, (string)$u['password_hash'])) throw new RuntimeException('Текущий пароль неверный');
+                db()->prepare('UPDATE users SET password_hash = ? WHERE id = ?')->execute([password_hash($new, PASSWORD_DEFAULT), $uid]);
+                flash('Пароль панели изменён', 'success');
                 redirect('/?page=settings');
         }
     } catch (Throwable $e) {
-        flash($e->getMessage(), 'err');
-        $referer = $_SERVER['HTTP_REFERER'] ?? '/';
-        redirect($referer);
+        flash($e->getMessage(), 'danger');
+        redirect('/?page=' . ($_GET['page'] ?? 'dashboard'));
     }
 }
 
-
-function sync_resources_from_server(): string
+function sync_resources(): void
 {
-    $data = run_ctl_json(['sync-json'], 60);
-    if (isset($data['_error'])) {
-        throw new RuntimeException((string)$data['_error']);
-    }
-    $counts = ['sites' => 0, 'ftp' => 0, 'databases' => 0, 'bots' => 0];
-    foreach (($data['sites'] ?? []) as $site) {
-        if (!empty($site['domain']) && !empty($site['root_path'])) {
-            upsert_site_row((string)$site['domain'], (string)($site['aliases'] ?? ''), (string)$site['root_path'], (int)($site['ssl_enabled'] ?? 0));
-            $counts['sites']++;
-        }
-    }
-    foreach (($data['ftp'] ?? []) as $ftp) {
-        if (!empty($ftp['username']) && !empty($ftp['target_path'])) {
-            upsert_ftp_row((string)$ftp['username'], (string)$ftp['target_path'], (string)($ftp['password_plain'] ?? ''));
-            $counts['ftp']++;
-        }
-    }
-    foreach (($data['databases'] ?? []) as $row) {
-        if (!empty($row['db_name']) && !empty($row['db_user'])) {
-            upsert_db_row((string)$row['db_name'], (string)$row['db_user'], (int)($row['remote_allowed'] ?? 0));
-            $counts['databases']++;
-        }
-    }
-    foreach (($data['bots'] ?? []) as $bot) {
-        if (!empty($bot['name']) && !empty($bot['path'])) {
-            upsert_bot_row((string)$bot['name'], (string)($bot['runtime'] ?? 'custom'), (string)$bot['path'], (string)($bot['start_command'] ?? ''));
-            $counts['bots']++;
-        }
-    }
-    return "сайты {$counts['sites']}, FTP {$counts['ftp']}, базы {$counts['databases']}, боты {$counts['bots']}";
+    $data = run_ctl_json(['sync-json'], 90);
+    if (isset($data['_error'])) throw new RuntimeException((string)$data['_error']);
+    foreach (($data['sites'] ?? []) as $s) upsert_site_row((string)$s['domain'], (string)($s['aliases'] ?? ''), (string)$s['root_path'], (int)($s['ssl_enabled'] ?? 0));
+    foreach (($data['folders'] ?? []) as $f) upsert_folder_row((string)$f['name'], (string)$f['path']);
+    foreach (($data['ftp'] ?? []) as $f) upsert_ftp_row((string)$f['username'], (string)$f['target_path'], '', (string)($f['host'] ?? host_name()));
+    foreach (($data['databases'] ?? []) as $d) upsert_db_row((string)$d['db_name'], (string)$d['db_user'], (int)($d['remote_allowed'] ?? 0));
+    foreach (($data['bots'] ?? []) as $b) upsert_bot_row((string)$b['name'], (string)$b['runtime'], (string)$b['path'], (string)$b['start_command']);
 }
 
 function render_login(): void
 {
     $flash = flash();
     ?>
-<!doctype html>
-<html lang="ru">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>HYPER-HOST — вход</title>
-    <link rel="stylesheet" href="/assets/style.css">
-</head>
-<body class="login-body">
-    <main class="login-card">
-        <div class="brand-mark">HH</div>
-        <h1>HYPER-HOST</h1>
-        <p>Личная панель хостинга сайтов и Telegram-ботов</p>
-        <?php if ($flash): ?><div class="alert <?= e($flash['type']) ?>"><?= e($flash['message']) ?></div><?php endif; ?>
-        <form method="post" class="form-grid">
-            <input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>">
-            <label>Логин<input name="username" autocomplete="username" required></label>
-            <label>Пароль<input type="password" name="password" autocomplete="current-password" required></label>
-            <button class="btn primary" type="submit">Войти</button>
-        </form>
-        <div class="powered">powered by memes4u1337</div>
-    </main>
-</body>
-</html>
-<?php
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css" rel="stylesheet"></head><body class="login-body">
+<div class="login-shell">
+  <div class="login-card card-glass">
+    <div class="brand-mark"><i class="fa-solid fa-rocket"></i></div>
+    <h1>HYPER-HOST</h1><p>powered by memes4u1337</p>
+    <?php if ($flash): ?><div class="alert alert-<?= e($flash['type']) ?> py-2"><?= e($flash['message']) ?></div><?php endif; ?>
+    <form method="post" class="vstack gap-3">
+      <?= csrf_field() ?>
+      <input class="form-control form-control-lg" name="username" placeholder="Логин" autofocus required>
+      <input class="form-control form-control-lg" type="password" name="password" placeholder="Пароль" required>
+      <button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-right-to-bracket me-2"></i>Войти</button>
+    </form>
+  </div>
+</div>
+</body></html><?php
 }
 
 function render_page(string $page, array $user): void
 {
-    $allowed = ['dashboard', 'sites', 'ftp', 'databases', 'bots', 'bot_logs', 'settings'];
-    if (!in_array($page, $allowed, true)) {
-        $page = 'dashboard';
-    }
+    $titles = ['dashboard'=>'Дашборд','sites'=>'Сайты','folders'=>'Папки','ftp'=>'FTP','databases'=>'Базы данных','bots'=>'Боты 24/7','bot_logs'=>'Логи бота','settings'=>'Настройки','roadmap'=>'Что ещё добавить'];
+    $title = $titles[$page] ?? 'Дашборд';
     $flash = flash();
-    ?>
-<!doctype html>
-<html lang="ru">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>HYPER-HOST</title>
-    <link rel="stylesheet" href="/assets/style.css">
-</head>
-<body>
-<div class="app">
-    <aside class="sidebar">
-        <div class="logo">
-            <div class="brand-mark small">HH</div>
-            <div><strong>HYPER-HOST</strong><span>powered by memes4u1337</span></div>
-        </div>
-        <nav>
-            <?= nav_item('dashboard', '📊 Дашборд', $page) ?>
-            <?= nav_item('sites', '🌐 Сайты', $page) ?>
-            <?= nav_item('ftp', '📁 FTP', $page) ?>
-            <?= nav_item('databases', '🗄️ Базы данных', $page) ?>
-            <?= nav_item('bots', '🤖 Telegram-боты', $page) ?>
-            <?= nav_item('settings', '⚙️ Настройки', $page) ?>
-        </nav>
-        <a class="logout" href="/?page=logout">Выйти</a>
-    </aside>
-    <main class="content">
-        <header class="topbar">
-            <div>
-                <h1><?= e(page_title($page)) ?></h1>
-                <p>Сервер: <?= e(app_config('server_ip')) ?> · Пользователь: <?= e($user['username']) ?></p>
-            </div>
-            <a class="btn ghost" href="/phpmyadmin" target="_blank">phpMyAdmin</a>
-        </header>
-        <?php if ($flash): ?><div class="alert <?= e($flash['type']) ?>"><?= nl2br(e($flash['message'])) ?></div><?php endif; ?>
-        <?php
-        match ($page) {
-            'dashboard' => view_dashboard(),
-            'sites' => view_sites(),
-            'ftp' => view_ftp(),
-            'databases' => view_databases(),
-            'bots' => view_bots(),
-            'bot_logs' => view_bot_logs(),
-            'settings' => view_settings(),
-            default => view_dashboard(),
-        };
-        ?>
-    </main>
+    ?><!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($title) ?> — HYPER-HOST</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css" rel="stylesheet"></head><body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-icon"><i class="fa-solid fa-bolt"></i></div><div><b>HYPER-HOST</b><span>powered by memes4u1337</span></div></div>
+    <nav class="nav flex-column gap-1 mt-4">
+      <?= nav_item('dashboard','fa-gauge-high','Дашборд',$page) ?>
+      <?= nav_item('sites','fa-globe','Сайты',$page) ?>
+      <?= nav_item('folders','fa-folder-tree','Папки',$page) ?>
+      <?= nav_item('ftp','fa-network-wired','FTP',$page) ?>
+      <?= nav_item('databases','fa-database','Базы',$page) ?>
+      <?= nav_item('bots','fa-robot','Боты 24/7',$page) ?>
+      <?= nav_item('settings','fa-sliders','Настройки',$page) ?>
+      <?= nav_item('roadmap','fa-list-check','Что добавить',$page) ?>
+    </nav>
+    <div class="sidebar-footer"><a href="/?page=logout" class="btn btn-outline-light w-100"><i class="fa-solid fa-arrow-right-from-bracket me-2"></i>Выйти</a></div>
+  </aside>
+  <main class="content">
+    <header class="topbar">
+      <div><h1><?= e($title) ?></h1><div class="text-muted small">Сервер: <code><?= e(host_name()) ?></code></div></div>
+      <div class="top-actions"><form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-light"><i class="fa-solid fa-rotate me-2"></i>Синхронизация</button></form></div>
+    </header>
+    <?php if ($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?>
+    <?php route_view($page); ?>
+  </main>
 </div>
-<script src="/assets/app.js"></script>
-</body>
-</html>
-<?php
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script><script src="/assets/app.js"></script>
+</body></html><?php
 }
 
-function nav_item(string $key, string $label, string $page): string
+function nav_item(string $id, string $icon, string $label, string $page): string
 {
-    $class = $key === $page ? 'active' : '';
-    return '<a class="' . $class . '" href="/?page=' . e($key) . '">' . e($label) . '</a>';
+    $active = $id === $page ? ' active' : '';
+    return '<a class="nav-link' . $active . '" href="/?page=' . e($id) . '"><i class="fa-solid ' . e($icon) . '"></i><span>' . e($label) . '</span></a>';
 }
 
-function page_title(string $page): string
+function route_view(string $page): void
 {
-    return match ($page) {
-        'sites' => 'Сайты и домены',
-        'ftp' => 'FTP подключения',
-        'databases' => 'Базы данных',
-        'bots' => 'Telegram-боты',
-        'bot_logs' => 'Логи бота',
-        'settings' => 'Настройки сервера',
-        default => 'Дашборд',
+    match ($page) {
+        'sites' => view_sites(), 'folders' => view_folders(), 'ftp' => view_ftp(), 'databases' => view_databases(), 'bots' => view_bots(), 'bot_logs' => view_bot_logs(), 'settings' => view_settings(), 'roadmap' => view_roadmap(), default => view_dashboard(),
     };
 }
 
-function csrf_field(): string
-{
-    return '<input type="hidden" name="_csrf" value="' . e(csrf_token()) . '">';
-}
+function stat_card(string $icon, string $label, string $value, string $sub=''): void { ?><div class="stat-card"><div class="stat-icon"><i class="fa-solid <?= e($icon) ?>"></i></div><div><span><?= e($label) ?></span><b><?= e($value) ?></b><?php if($sub): ?><em><?= e($sub) ?></em><?php endif; ?></div></div><?php }
 
 function view_dashboard(): void
 {
-    $stats = run_ctl_json(['stats-json'], 25);
-    $statErr = $stats['_error'] ?? null;
-    $services = $stats['services'] ?? [];
-    $paths = $stats['paths'] ?? [];
-    $diskTotal = (float)($stats['disk_total'] ?? (@disk_total_space('/') ?: 0));
-    $diskUsed = (float)($stats['disk_used'] ?? 0);
-    if ($diskUsed <= 0 && $diskTotal > 0) {
-        $diskUsed = $diskTotal - (float)(@disk_free_space('/') ?: 0);
-    }
-    $memTotal = (float)($stats['mem_total'] ?? 0);
-    $memUsed = (float)($stats['mem_used'] ?? 0);
-    $diskPct = percent($diskUsed, $diskTotal);
-    $memPct = percent($memUsed, $memTotal);
-    $dbStatus = db_writable_status();
-    $events = db()->query('SELECT * FROM events ORDER BY id DESC LIMIT 12')->fetchAll();
+    $stats = run_ctl_json(['stats-json'], 40);
+    $events = db()->query('SELECT * FROM events ORDER BY id DESC LIMIT 8')->fetchAll();
     ?>
-<section class="hero">
-    <div>
-        <span class="hero-kicker">HYPER-HOST CONTROL CENTER</span>
-        <h2>Сервер под сайты и Telegram-ботов</h2>
-        <p>IP: <code><?= e(app_config('server_ip')) ?></code> · uptime: <code><?= e((string)($stats['uptime'] ?? 'unknown')) ?></code></p>
-    </div>
-    <form method="post" class="hero-actions">
-        <?= csrf_field() ?>
-        <input type="hidden" name="action" value="sync_resources">
-        <button class="btn primary" type="submit">Синхронизировать ресурсы</button>
-        <a class="btn ghost" href="/?page=ftp">FTP подключения</a>
-    </form>
-</section>
+<div class="row g-3 mb-4">
+  <div class="col-md-3"><?php stat_card('fa-globe', 'Сайты', (string)table_count('sites'), 'домены') ?></div>
+  <div class="col-md-3"><?php stat_card('fa-folder', 'Папки', (string)table_count('folders'), 'public_html') ?></div>
+  <div class="col-md-3"><?php stat_card('fa-network-wired', 'FTP', (string)table_count('ftp_accounts'), 'аккаунты') ?></div>
+  <div class="col-md-3"><?php stat_card('fa-robot', 'Боты', (string)table_count('bots'), 'systemd 24/7') ?></div>
+</div>
+<div class="row g-4">
+  <div class="col-xl-8"><div class="panel-card"><div class="card-title-row"><h2><i class="fa-solid fa-microchip me-2"></i>Железо сервера</h2><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="repair_panel"><button class="btn btn-sm btn-primary">Починить</button></form></div>
+  <?php if (isset($stats['_error'])): ?><div class="alert alert-warning">Статистика пока недоступна: <?= e($stats['_error']) ?></div><?php else: ?>
+  <div class="hardware-grid">
+    <div><span>CPU</span><b><?= e((string)$stats['cpu_model']) ?></b></div><div><span>Ядра</span><b><?= e((string)$stats['cpu_cores']) ?></b></div><div><span>Uptime</span><b><?= e((string)$stats['uptime']) ?></b></div><div><span>Load</span><b><?= e(round((float)$stats['load1'],2).' / '.round((float)$stats['load5'],2).' / '.round((float)$stats['load15'],2)) ?></b></div>
+  </div>
+  <?= progress_block('RAM', (float)$stats['mem_used'], (float)$stats['mem_total']) ?>
+  <?= progress_block('Диск /', (float)$stats['disk_used'], (float)$stats['disk_total']) ?>
+  <div class="service-row mt-3"><?php foreach (($stats['services'] ?? []) as $name=>$st): ?><span class="badge rounded-pill text-bg-<?= $st==='active'?'success':'danger' ?>"><?= e($name) ?>: <?= e((string)$st) ?></span><?php endforeach; ?></div>
+  <?php endif; ?></div></div>
+  <div class="col-xl-4"><div class="panel-card"><h2><i class="fa-solid fa-clock-rotate-left me-2"></i>События</h2><?php foreach($events as $ev): ?><div class="event"><b><?= e($ev['type']) ?></b><span><?= e($ev['message']) ?></span><small><?= e($ev['created_at']) ?></small></div><?php endforeach; if(!$events): ?><div class="empty">Событий пока нет</div><?php endif; ?></div></div>
+</div><?php
+}
 
-<?php if ($statErr): ?>
-    <div class="alert err">Статистика пока недоступна: <?= e((string)$statErr) ?></div>
-<?php endif; ?>
-
-<section class="grid cards4">
-    <div class="card stat gradient"><span>Сайты</span><strong><?= table_count('sites') ?></strong><em><?= e(app_config('sites_dir')) ?></em></div>
-    <div class="card stat gradient"><span>FTP</span><strong><?= table_count('ftp_accounts') ?></strong><em>порт 21 / passive 40000-40100</em></div>
-    <div class="card stat gradient"><span>Базы</span><strong><?= table_count('databases') ?></strong><em>MariaDB + phpMyAdmin</em></div>
-    <div class="card stat gradient"><span>Боты</span><strong><?= table_count('bots') ?></strong><em>systemd services</em></div>
-</section>
-
-<section class="grid two">
-    <div class="card">
-        <div class="split-head"><h2>Железо сервера</h2><span class="tag">live</span></div>
-        <div class="status-row"><span>CPU</span><code><?= e((string)($stats['cpu_model'] ?? 'unknown')) ?></code></div>
-        <div class="status-row"><span>Ядра</span><b><?= e((string)($stats['cpu_cores'] ?? '0')) ?></b></div>
-        <div class="status-row"><span>Load average</span><code><?= e(number_format((float)($stats['load1'] ?? 0), 2)) ?> / <?= e(number_format((float)($stats['load5'] ?? 0), 2)) ?> / <?= e(number_format((float)($stats['load15'] ?? 0), 2)) ?></code></div>
-        <div class="status-row"><span>RAM</span><b><?= e(human_bytes($memUsed)) ?> / <?= e(human_bytes($memTotal)) ?></b></div>
-        <div class="meter big"><i style="width: <?= $memPct ?>%"></i></div>
-    </div>
-    <div class="card">
-        <div class="split-head"><h2>Сервисы</h2><a class="btn tiny ghost" href="/?page=settings">ремонт</a></div>
-        <?php foreach (['nginx' => 'Nginx', 'mariadb' => 'MariaDB', 'vsftpd' => 'FTP / VSFTPD', 'php_fpm' => 'PHP-FPM'] as $key => $label): $status = (string)($services[$key] ?? 'unknown'); ?>
-            <div class="status-row"><span><?= e($label) ?></span><b class="pill <?= e($status) ?>"><?= e($status) ?></b></div>
-        <?php endforeach; ?>
-        <div class="status-row"><span>SQLite панели</span><b class="pill <?= $dbStatus['file_writable'] && $dbStatus['dir_writable'] ? 'active' : 'failed' ?>"><?= $dbStatus['file_writable'] && $dbStatus['dir_writable'] ? 'writable' : 'problem' ?></b></div>
-        <div class="hint"><code><?= e($dbStatus['path']) ?></code></div>
-    </div>
-</section>
-
-<section class="grid two">
-    <div class="card">
-        <h2>Диск</h2>
-        <div class="meter big"><i style="width: <?= $diskPct ?>%"></i></div>
-        <p class="muted">Использовано <?= e(human_bytes($diskUsed)) ?> из <?= e(human_bytes($diskTotal)) ?> · свободно <?= e(human_bytes((float)($stats['disk_free'] ?? 0))) ?></p>
-        <div class="hint">Сайты: <code><?= e((string)($paths['sites'] ?? app_config('sites_dir'))) ?></code></div>
-        <div class="hint">Боты: <code><?= e((string)($paths['bots'] ?? app_config('bots_dir'))) ?></code></div>
-    </div>
-    <div class="card quick-card">
-        <h2>Быстрые действия</h2>
-        <div class="quick-actions">
-            <a class="btn primary" href="/?page=sites">Добавить сайт</a>
-            <a class="btn primary" href="/?page=ftp">Создать FTP</a>
-            <a class="btn primary" href="/?page=databases">Создать базу</a>
-            <a class="btn primary" href="/?page=bots">Создать бота</a>
-            <a class="btn ghost" href="/phpmyadmin" target="_blank">phpMyAdmin</a>
-        </div>
-    </div>
-</section>
-
-<section class="card">
-    <h2>Последние события</h2>
-    <div class="table-wrap">
-        <table>
-            <thead><tr><th>Дата</th><th>Тип</th><th>Событие</th></tr></thead>
-            <tbody>
-            <?php foreach ($events as $event): ?>
-                <tr><td><?= e($event['created_at']) ?></td><td><span class="tag"><?= e($event['type']) ?></span></td><td><?= e($event['message']) ?></td></tr>
-            <?php endforeach; ?>
-            <?php if (!$events): ?><tr><td colspan="3" class="empty">Событий пока нет</td></tr><?php endif; ?>
-            </tbody>
-        </table>
-    </div>
-</section>
-<?php
+function progress_block(string $label, float $used, float $total): string
+{
+    $p = percent($used,$total);
+    return '<div class="usage"><div class="d-flex justify-content-between"><span>'.e($label).'</span><b>'.e(human_bytes($used).' / '.human_bytes($total)).'</b></div><div class="progress"><div class="progress-bar" style="width:'.$p.'%"></div></div></div>';
 }
 
 function view_sites(): void
 {
-    $sites = db()->query('SELECT * FROM sites ORDER BY id DESC')->fetchAll();
-    ?>
-<section class="grid two">
-    <div class="card">
-        <h2>Добавить сайт</h2>
-        <form method="post" class="form-grid">
-            <?= csrf_field() ?>
-            <input type="hidden" name="action" value="add_site">
-            <label>Домен<input name="domain" placeholder="example.com" required></label>
-            <label>Alias через запятую<input name="aliases" placeholder="www.example.com, api.example.com"></label>
-            <button class="btn primary" type="submit">Создать сайт</button>
-        </form>
-        <p class="muted">Папка сайта будет создана автоматически в <code><?= e(app_config('sites_dir')) ?>/domain/public_html</code>.</p>
-    </div>
-    <div class="card accent-card">
-        <h2>Как привязать домен</h2>
-        <p>В DNS создай A-запись на IP сервера:</p>
-        <div class="copy-line"><code><?= e(app_config('server_ip')) ?></code><button class="btn tiny" data-copy="<?= e(app_config('server_ip')) ?>">копировать</button></div>
-        <p class="muted">После обновления DNS добавь домен тут. Nginx-конфиг создастся сам.</p>
-    </div>
-</section>
-
-<section class="card">
-    <h2>Сайты</h2>
-    <div class="table-wrap">
-        <table>
-            <thead><tr><th>Домен</th><th>Alias</th><th>Папка</th><th>SSL</th><th>Дата</th><th></th></tr></thead>
-            <tbody>
-            <?php foreach ($sites as $site): ?>
-                <tr>
-                    <td><a href="http://<?= e($site['domain']) ?>" target="_blank"><?= e($site['domain']) ?></a></td>
-                    <td><?= e($site['aliases'] ?: '—') ?></td>
-                    <td><code><?= e($site['root_path']) ?></code></td>
-                    <td><?= (int)$site['ssl_enabled'] ? '<span class="pill active">on</span>' : '<span class="pill inactive">off</span>' ?></td>
-                    <td><?= e($site['created_at']) ?></td>
-                    <td class="actions">
-                        <details class="dropdown">
-                            <summary class="btn tiny">действия</summary>
-                            <form method="post">
-                                <?= csrf_field() ?>
-                                <input type="hidden" name="action" value="ssl_site">
-                                <input type="hidden" name="id" value="<?= (int)$site['id'] ?>">
-                                <input name="email" placeholder="email для SSL" required>
-                                <button class="btn tiny primary" type="submit">SSL</button>
-                            </form>
-                            <form method="post" onsubmit="return confirm('Удалить сайт?');">
-                                <?= csrf_field() ?>
-                                <input type="hidden" name="action" value="delete_site">
-                                <input type="hidden" name="id" value="<?= (int)$site['id'] ?>">
-                                <label class="check"><input type="checkbox" name="delete_files" value="1"> удалить файлы</label>
-                                <button class="btn tiny danger" type="submit">удалить</button>
-                            </form>
-                        </details>
-                    </td>
-                </tr>
-            <?php endforeach; ?>
-            <?php if (!$sites): ?><tr><td colspan="6" class="empty">Сайтов пока нет</td></tr><?php endif; ?>
-            </tbody>
-        </table>
-    </div>
-</section>
-<?php
+    $sites = db()->query('SELECT * FROM sites ORDER BY id DESC')->fetchAll(); ?>
+<div class="row g-4"><div class="col-lg-5"><div class="panel-card"><h2><i class="fa-solid fa-plus me-2"></i>Создать сайт</h2><p class="text-muted">Сразу создаётся папка <code>public_html</code>, Nginx-конфиг и стартовая страница.</p><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="add_site"><input class="form-control" name="domain" placeholder="hyper-host.pw" required><input class="form-control" name="aliases" placeholder="www.hyper-host.pw, api.hyper-host.pw"><button class="btn btn-primary"><i class="fa-solid fa-globe me-2"></i>Создать сайт</button></form></div></div><div class="col-lg-7"><div class="panel-card"><h2>Сайты</h2><div class="table-responsive"><table class="table align-middle"><thead><tr><th>Домен</th><th>Папка</th><th>SSL</th><th></th></tr></thead><tbody><?php foreach($sites as $s): ?><tr><td><b><?= e($s['domain']) ?></b><div class="small text-muted"><?= e($s['aliases']) ?></div></td><td><code><?= e($s['root_path']) ?></code></td><td><span class="badge text-bg-<?= (int)$s['ssl_enabled']?'success':'secondary' ?>"><?= (int)$s['ssl_enabled']?'SSL':'HTTP' ?></span></td><td class="text-end"><button class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#ssl<?= (int)$s['id'] ?>">SSL</button><form method="post" class="d-inline" onsubmit="return confirm('Удалить сайт?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_site"><input type="hidden" name="id" value="<?= (int)$s['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form></td></tr><div class="modal fade" id="ssl<?= (int)$s['id'] ?>"><div class="modal-dialog"><div class="modal-content"><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_site"><input type="hidden" name="id" value="<?= (int)$s['id'] ?>"><div class="modal-header"><h5>SSL для <?= e($s['domain']) ?></h5><button class="btn-close" data-bs-dismiss="modal" type="button"></button></div><div class="modal-body"><input class="form-control" name="email" type="email" placeholder="email@example.com" required></div><div class="modal-footer"><button class="btn btn-primary">Выпустить SSL</button></div></form></div></div></div><?php endforeach; if(!$sites): ?><tr><td colspan="4" class="empty">Сайтов пока нет</td></tr><?php endif; ?></tbody></table></div></div></div></div><?php
 }
 
-function available_targets(): array
+function view_folders(): void
 {
-    $targets = [];
-    $sites = db()->query('SELECT domain, root_path FROM sites ORDER BY domain')->fetchAll();
-    foreach ($sites as $site) {
-        $targets[] = ['label' => 'Сайт: ' . $site['domain'], 'path' => $site['root_path']];
-    }
-    $bots = db()->query('SELECT name, path FROM bots ORDER BY name')->fetchAll();
-    foreach ($bots as $bot) {
-        $targets[] = ['label' => 'Бот: ' . $bot['name'], 'path' => $bot['path']];
-    }
-    return $targets;
+    $rows = db()->query('SELECT * FROM folders ORDER BY id DESC')->fetchAll(); ?>
+<div class="row g-4"><div class="col-lg-5"><div class="panel-card"><h2><i class="fa-solid fa-folder-plus me-2"></i>Создать папку</h2><p class="text-muted">Создаёт пустой мини-сайт без домена: папка с <code>public_html/index.php</code> и названием папки.</p><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_folder"><input class="form-control" name="name" placeholder="client-site-1" required><button class="btn btn-primary">Создать папку</button></form></div></div><div class="col-lg-7"><div class="panel-card"><h2>Папки сайтов</h2><div class="table-responsive"><table class="table align-middle"><thead><tr><th>Название</th><th>Путь</th><th></th></tr></thead><tbody><?php foreach($rows as $r): ?><tr><td><b><?= e($r['name']) ?></b></td><td><code><?= e($r['path']) ?></code></td><td class="text-end"><form method="post" onsubmit="return confirm('Удалить папку с файлами?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_folder"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form></td></tr><?php endforeach; if(!$rows): ?><tr><td colspan="3" class="empty">Папок пока нет</td></tr><?php endif; ?></tbody></table></div></div></div></div><?php
 }
 
 function view_ftp(): void
 {
-    $accounts = db()->query('SELECT * FROM ftp_accounts ORDER BY id DESC')->fetchAll();
-    $targets = available_targets();
-    $ftpStatus = system_service_status('vsftpd');
-    $host = panel_host_for_connections();
-    ?>
-<section class="hero small-hero ftp-hero">
-    <div>
-        <span class="hero-kicker">FTP ACCESS</span>
-        <h2>FTP подключения без головной боли</h2>
-        <p>Нужные данные для FileZilla / WinSCP: <b>хост</b>, <b>имя пользователя</b>, <b>пароль</b>.</p>
-    </div>
-    <div class="ftp-main-card">
-        <div><span>Хост</span><code><?= e($host) ?></code><button class="btn tiny" data-copy="<?= e($host) ?>">копировать</button></div>
-        <div><span>Порт</span><code>21</code></div>
-        <div><span>Режим</span><code>Passive / 40000-40100</code></div>
-    </div>
-</section>
-
-<section class="grid three">
-    <div class="card mini"><span>Статус FTP</span><b class="pill <?= e($ftpStatus) ?>"><?= e($ftpStatus) ?></b></div>
-    <div class="card mini"><span>Аккаунтов</span><b><?= count($accounts) ?></b></div>
-    <div class="card mini"><span>Папок доступно</span><b><?= count($targets) ?></b></div>
-</section>
-
-<section class="grid two">
-    <div class="card create-card">
-        <h2>Создать FTP</h2>
-        <form method="post" class="form-grid">
-            <?= csrf_field() ?>
-            <input type="hidden" name="action" value="create_ftp">
-            <label>Имя пользователя
-                <input name="username" placeholder="hyperhost" required>
-                <small>Панель сама добавит префикс <code>hhftp_</code>. В FTP будет логин вида <code>hhftp_hyperhost</code>.</small>
-            </label>
-            <label>Пароль
-                <div class="password-line">
-                    <input name="password" type="text" minlength="8" required placeholder="StrongFTPPassword123!">
-                    <button class="btn ghost" type="button" data-generate-password>сгенерировать</button>
-                </div>
-            </label>
-            <label>Папка
-                <select name="target_path" required>
-                    <?php foreach ($targets as $target): ?>
-                        <option value="<?= e($target['path']) ?>"><?= e($target['label'] . ' — ' . $target['path']) ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </label>
-            <?php if (!$targets): ?><p class="muted">Сначала создай сайт или бота, потом тут появится папка для FTP.</p><?php endif; ?>
-            <button class="btn primary wide" type="submit" <?= !$targets ? 'disabled' : '' ?>>Создать FTP-доступ</button>
-        </form>
-    </div>
-    <div class="card accent-card">
-        <h2>Как подключаться</h2>
-        <div class="connect-box simple">
-            <div><span>Хост</span><code><?= e($host) ?></code><button class="btn tiny" data-copy="<?= e($host) ?>">копировать</button></div>
-            <div><span>Имя пользователя</span><code>hhftp_твой_логин</code></div>
-            <div><span>Пароль</span><code>тот, который указал при создании</code></div>
-        </div>
-        <p class="muted">Порт: <code>21</code>. Тип подключения: обычный FTP. Passive mode должен быть включён.</p>
-        <form method="post" class="inline-form">
-            <?= csrf_field() ?>
-            <input type="hidden" name="action" value="sync_resources">
-            <button class="btn ghost" type="submit">Обновить список FTP</button>
-        </form>
-    </div>
-</section>
-
-<section class="card">
-    <div class="split-head">
-        <h2>FTP аккаунты</h2>
-        <span class="tag"><?= count($accounts) ?> шт.</span>
-    </div>
-    <div class="ftp-list">
-        <?php foreach ($accounts as $acc):
-            $password = (string)($acc['password_plain'] ?? '');
-            $line = 'Host: ' . $host . "\nUsername: " . $acc['username'] . "\nPassword: " . ($password !== '' ? $password : 'пароль не сохранён, задай новый в панели');
-        ?>
-            <div class="ftp-account-card">
-                <div class="ftp-account-head">
-                    <div>
-                        <span class="tag">FTP</span>
-                        <h3><?= e($acc['username']) ?></h3>
-                        <p class="muted"><code><?= e($acc['target_path']) ?></code></p>
-                    </div>
-                    <form method="post" onsubmit="return confirm('Удалить FTP? Файлы не удаляются.');">
-                        <?= csrf_field() ?>
-                        <input type="hidden" name="action" value="delete_ftp">
-                        <input type="hidden" name="id" value="<?= (int)$acc['id'] ?>">
-                        <button class="btn tiny danger" type="submit">удалить</button>
-                    </form>
-                </div>
-                <div class="ftp-credentials">
-                    <div><span>Хост</span><code><?= e($host) ?></code><button class="btn tiny" data-copy="<?= e($host) ?>">копировать</button></div>
-                    <div><span>Имя пользователя</span><code><?= e($acc['username']) ?></code><button class="btn tiny" data-copy="<?= e($acc['username']) ?>">копировать</button></div>
-                    <div><span>Пароль</span><code><?= $password !== '' ? e($password) : 'не сохранён' ?></code><?php if ($password !== ''): ?><button class="btn tiny" data-copy="<?= e($password) ?>">копировать</button><?php endif; ?></div>
-                </div>
-                <div class="ftp-actions-row">
-                    <button class="btn ghost" data-copy="<?= e($line) ?>">Скопировать всё</button>
-                    <details class="reset-box">
-                        <summary class="btn ghost">Задать новый пароль</summary>
-                        <form method="post" class="inline-form">
-                            <?= csrf_field() ?>
-                            <input type="hidden" name="action" value="reset_ftp_password">
-                            <input type="hidden" name="id" value="<?= (int)$acc['id'] ?>">
-                            <input name="password" type="text" minlength="8" placeholder="Новый пароль" required>
-                            <button class="btn primary" type="submit">Сохранить</button>
-                        </form>
-                    </details>
-                </div>
-            </div>
-        <?php endforeach; ?>
-        <?php if (!$accounts): ?><div class="empty">FTP аккаунтов пока нет. Создай сайт, потом создай FTP к его public_html.</div><?php endif; ?>
-    </div>
-</section>
-<?php
+    $rows = db()->query('SELECT * FROM ftp_accounts ORDER BY id DESC')->fetchAll();
+    $sites = db()->query('SELECT domain, root_path FROM sites ORDER BY domain')->fetchAll();
+    $folders = db()->query('SELECT name, path FROM folders ORDER BY name')->fetchAll();
+    $bots = db()->query('SELECT name, path FROM bots ORDER BY name')->fetchAll();
+    $gen = default_ftp_password(); ?>
+<div class="row g-4"><div class="col-lg-5"><div class="panel-card"><h2><i class="fa-solid fa-user-plus me-2"></i>Создать FTP</h2><p class="text-muted">После входа FTP увидит папку <b>common</b>. Если выбрать сайт/бота — дополнительно будет папка <b>site</b> с файлами.</p><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_ftp"><input class="form-control" name="username" placeholder="hyperhost" required><div class="input-group"><input class="form-control" name="password" id="ftpPass" value="<?= e($gen) ?>" minlength="8" required><button class="btn btn-outline-secondary" type="button" onclick="copyValue('ftpPass')"><i class="fa-regular fa-copy"></i></button></div><select class="form-select" name="target_path"><option value="common">Только общая папка common</option><?php foreach($sites as $s): ?><option value="<?= e($s['root_path']) ?>">Сайт: <?= e($s['domain']) ?></option><?php endforeach; foreach($folders as $f): ?><option value="<?= e($f['path']) ?>">Папка: <?= e($f['name']) ?></option><?php endforeach; foreach($bots as $b): ?><option value="<?= e($b['path']) ?>">Бот: <?= e($b['name']) ?></option><?php endforeach; ?></select><button class="btn btn-primary"><i class="fa-solid fa-network-wired me-2"></i>Создать FTP</button></form></div></div><div class="col-lg-7"><div class="row g-3"><?php foreach($rows as $r): ?><div class="col-md-6"><div class="ftp-card"><h3><i class="fa-solid fa-plug me-2"></i><?= e($r['username']) ?></h3><div class="cred"><span>Хост</span><code><?= e($r['host'] ?: host_name()) ?></code></div><div class="cred"><span>Имя пользователя</span><code><?= e($r['username']) ?></code></div><div class="cred"><span>Пароль</span><code><?= e($r['password_plain'] ?: 'задать новый') ?></code></div><div class="small text-muted mt-2">Корень: <code><?= e($r['target_path']) ?></code><br>Порт: <b>21</b>, Passive: <b>40000-40100</b></div><div class="d-flex gap-2 mt-3"><button class="btn btn-sm btn-light" onclick="copyText('Host: <?= e($r['host'] ?: host_name()) ?>\nLogin: <?= e($r['username']) ?>\nPassword: <?= e($r['password_plain']) ?>')">Копировать</button><button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#ftp<?= (int)$r['id'] ?>">Пароль</button><form method="post" onsubmit="return confirm('Удалить FTP?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_ftp"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-danger">Удалить</button></form></div></div></div><div class="modal fade" id="ftp<?= (int)$r['id'] ?>"><div class="modal-dialog"><div class="modal-content"><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="reset_ftp_password"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><div class="modal-header"><h5>Новый пароль FTP</h5><button class="btn-close" data-bs-dismiss="modal" type="button"></button></div><div class="modal-body"><input class="form-control" name="password" value="<?= e(default_ftp_password()) ?>" minlength="8" required></div><div class="modal-footer"><button class="btn btn-primary">Сохранить пароль</button></div></form></div></div></div><?php endforeach; if(!$rows): ?><div class="empty">FTP аккаунтов пока нет</div><?php endif; ?></div></div></div><?php
 }
 
 function view_databases(): void
 {
-    $rows = db()->query('SELECT * FROM databases ORDER BY id DESC')->fetchAll();
-    ?>
-<section class="grid two">
-    <div class="card">
-        <h2>Создать базу</h2>
-        <form method="post" class="form-grid">
-            <?= csrf_field() ?>
-            <input type="hidden" name="action" value="create_db">
-            <label>Имя базы<input name="db_name" placeholder="hh_site_db" required></label>
-            <label>Пользователь<input name="db_user" placeholder="hh_site_user" required></label>
-            <label>Пароль<input name="password" type="password" minlength="10" required></label>
-            <label class="check"><input type="checkbox" name="remote_allowed" value="1"> Разрешить внешний доступ для этого пользователя</label>
-            <button class="btn primary" type="submit">Создать базу</button>
-        </form>
-    </div>
-    <div class="card accent-card">
-        <h2>phpMyAdmin</h2>
-        <p>Открыть phpMyAdmin можно тут:</p>
-        <p><a class="btn primary" href="/phpmyadmin" target="_blank">Открыть phpMyAdmin</a></p>
-        <p class="muted">Для внешнего доступа нужно включить его в настройках и открыть доступ у пользователя базы.</p>
-    </div>
-</section>
-
-<section class="card">
-    <h2>Базы данных</h2>
-    <div class="table-wrap">
-        <table>
-            <thead><tr><th>База</th><th>Пользователь</th><th>Внешний доступ</th><th>Дата</th><th></th></tr></thead>
-            <tbody>
-            <?php foreach ($rows as $row): ?>
-                <tr>
-                    <td><code><?= e($row['db_name']) ?></code></td>
-                    <td><code><?= e($row['db_user']) ?></code></td>
-                    <td><?= (int)$row['remote_allowed'] ? '<span class="pill active">allowed</span>' : '<span class="pill inactive">local</span>' ?></td>
-                    <td><?= e($row['created_at']) ?></td>
-                    <td>
-                        <form method="post" onsubmit="return confirm('Удалить базу и пользователя?');">
-                            <?= csrf_field() ?>
-                            <input type="hidden" name="action" value="delete_db">
-                            <input type="hidden" name="id" value="<?= (int)$row['id'] ?>">
-                            <button class="btn tiny danger" type="submit">удалить</button>
-                        </form>
-                    </td>
-                </tr>
-            <?php endforeach; ?>
-            <?php if (!$rows): ?><tr><td colspan="5" class="empty">Баз пока нет</td></tr><?php endif; ?>
-            </tbody>
-        </table>
-    </div>
-</section>
-<?php
+    $rows = db()->query('SELECT * FROM databases ORDER BY id DESC')->fetchAll(); ?>
+<div class="row g-4"><div class="col-lg-5"><div class="panel-card"><h2><i class="fa-solid fa-database me-2"></i>Создать базу</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_db"><input class="form-control" name="db_name" placeholder="site_db" required><input class="form-control" name="db_user" placeholder="site_user" required><input class="form-control" name="password" type="password" placeholder="Пароль" minlength="10" required><label class="form-check"><input class="form-check-input" type="checkbox" name="remote_allowed" value="1"> <span class="form-check-label">Разрешить внешний доступ</span></label><button class="btn btn-primary">Создать базу</button><a class="btn btn-outline-primary" href="/phpmyadmin" target="_blank">Открыть phpMyAdmin</a></form></div></div><div class="col-lg-7"><div class="panel-card"><h2>Базы данных</h2><div class="table-responsive"><table class="table align-middle"><thead><tr><th>База</th><th>Пользователь</th><th>Доступ</th><th></th></tr></thead><tbody><?php foreach($rows as $r): ?><tr><td><code><?= e($r['db_name']) ?></code></td><td><code><?= e($r['db_user']) ?></code></td><td><span class="badge text-bg-<?= (int)$r['remote_allowed']?'success':'secondary' ?>"><?= (int)$r['remote_allowed']?'remote':'local' ?></span></td><td class="text-end"><form method="post" onsubmit="return confirm('Удалить базу?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_db"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form></td></tr><?php endforeach; if(!$rows): ?><tr><td colspan="4" class="empty">Баз пока нет</td></tr><?php endif; ?></tbody></table></div></div></div></div><?php
 }
 
 function view_bots(): void
 {
-    $bots = db()->query('SELECT * FROM bots ORDER BY id DESC')->fetchAll();
-    ?>
-<section class="grid two">
-    <div class="card">
-        <h2>Добавить Telegram-бота</h2>
-        <form method="post" class="form-grid">
-            <?= csrf_field() ?>
-            <input type="hidden" name="action" value="create_bot">
-            <label>Имя бота<input name="name" placeholder="mybot" required></label>
-            <label>Runtime
-                <select name="runtime">
-                    <option value="python">Python</option>
-                    <option value="node">Node.js</option>
-                    <option value="php">PHP</option>
-                    <option value="custom">Custom</option>
-                </select>
-            </label>
-            <label>Команда запуска<input name="start_command" placeholder="python3 main.py" required></label>
-            <button class="btn primary" type="submit">Создать бота</button>
-        </form>
-    </div>
-    <div class="card accent-card">
-        <h2>Как это работает</h2>
-        <p>Панель создаёт папку и systemd-сервис:</p>
-        <p><code><?= e(app_config('bots_dir')) ?>/имя_бота</code></p>
-        <p class="muted">Код бота загружаешь через FTP, потом запускаешь кнопкой «Старт».</p>
-    </div>
-</section>
-
-<section class="card">
-    <h2>Боты</h2>
-    <div class="table-wrap">
-        <table>
-            <thead><tr><th>Имя</th><th>Runtime</th><th>Статус</th><th>Папка</th><th>Команда</th><th></th></tr></thead>
-            <tbody>
-            <?php foreach ($bots as $bot): $status = system_service_status('hyperbot-' . $bot['name']); ?>
-                <tr>
-                    <td><code><?= e($bot['name']) ?></code></td>
-                    <td><span class="tag"><?= e($bot['runtime']) ?></span></td>
-                    <td><span class="pill <?= e($status) ?>"><?= e($status) ?></span></td>
-                    <td><code><?= e($bot['path']) ?></code></td>
-                    <td><code><?= e($bot['start_command']) ?></code></td>
-                    <td class="actions bot-actions">
-                        <?php foreach (['start' => 'Старт', 'stop' => 'Стоп', 'restart' => 'Рестарт'] as $cmd => $label): ?>
-                            <form method="post">
-                                <?= csrf_field() ?>
-                                <input type="hidden" name="action" value="bot_action">
-                                <input type="hidden" name="id" value="<?= (int)$bot['id'] ?>">
-                                <input type="hidden" name="bot_action" value="<?= e($cmd) ?>">
-                                <button class="btn tiny" type="submit"><?= e($label) ?></button>
-                            </form>
-                        <?php endforeach; ?>
-                        <a class="btn tiny ghost" href="/?page=bot_logs&id=<?= (int)$bot['id'] ?>">логи</a>
-                        <form method="post" onsubmit="return confirm('Удалить бота?');">
-                            <?= csrf_field() ?>
-                            <input type="hidden" name="action" value="delete_bot">
-                            <input type="hidden" name="id" value="<?= (int)$bot['id'] ?>">
-                            <label class="check tiny-check"><input type="checkbox" name="delete_files" value="1"> файлы</label>
-                            <button class="btn tiny danger" type="submit">удалить</button>
-                        </form>
-                    </td>
-                </tr>
-            <?php endforeach; ?>
-            <?php if (!$bots): ?><tr><td colspan="6" class="empty">Ботов пока нет</td></tr><?php endif; ?>
-            </tbody>
-        </table>
-    </div>
-</section>
-<?php
+    $bots = db()->query('SELECT * FROM bots ORDER BY id DESC')->fetchAll(); ?>
+<div class="row g-4"><div class="col-lg-5"><div class="panel-card"><h2><i class="fa-solid fa-robot me-2"></i>Создать 24/7 бота</h2><p class="text-muted">Создаётся systemd-сервис с <code>Restart=always</code>. Бот будет работать после перезагрузки сервера.</p><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_bot"><input class="form-control" name="name" placeholder="mybot" required><select class="form-select" name="runtime"><option value="python">Python</option><option value="node">Node.js</option><option value="php">PHP</option><option value="custom">Custom</option></select><input class="form-control" name="start_command" placeholder="python3 main.py" value="python3 main.py" required><button class="btn btn-primary">Создать бота</button></form></div></div><div class="col-lg-7"><div class="panel-card"><h2>Боты</h2><div class="table-responsive"><table class="table align-middle"><thead><tr><th>Бот</th><th>Статус</th><th>Команда</th><th></th></tr></thead><tbody><?php foreach($bots as $b): $st=system_service_status('hyperbot-'.$b['name']); ?><tr><td><b><?= e($b['name']) ?></b><div class="small text-muted"><code><?= e($b['path']) ?></code></div></td><td><span class="badge text-bg-<?= $st==='active'?'success':'danger' ?>"><?= e($st) ?></span></td><td><code><?= e($b['start_command']) ?></code></td><td class="text-end"><div class="btn-group btn-group-sm"><?php foreach(['start'=>'Start','stop'=>'Stop','restart'=>'Restart','install'=>'Deps'] as $cmd=>$label): ?><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="bot_action"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="bot_action" value="<?= e($cmd) ?>"><button class="btn btn-outline-primary"><?= e($label) ?></button></form><?php endforeach; ?><a class="btn btn-outline-dark" href="/?page=bot_logs&id=<?= (int)$b['id'] ?>">Logs</a></div></td></tr><?php endforeach; if(!$bots): ?><tr><td colspan="4" class="empty">Ботов пока нет</td></tr><?php endif; ?></tbody></table></div></div></div></div><?php
 }
 
 function view_bot_logs(): void
 {
-    $id = (int)($_GET['id'] ?? 0);
-    $stmt = db()->prepare('SELECT * FROM bots WHERE id = ?');
-    $stmt->execute([$id]);
-    $bot = $stmt->fetch();
-    if (!$bot) {
-        echo '<section class="card"><p class="empty">Бот не найден</p></section>';
-        return;
-    }
-    $result = run_ctl(['bot', 'logs', $bot['name']], 20);
-    ?>
-<section class="card">
-    <div class="split-head">
-        <h2>Логи: <?= e($bot['name']) ?></h2>
-        <a class="btn ghost" href="/?page=bots">Назад</a>
-    </div>
-    <pre class="logs"><?= e($result['output'] ?: 'Логов пока нет') ?></pre>
-</section>
-<?php
+    $id=(int)($_GET['id']??0); $stmt=db()->prepare('SELECT * FROM bots WHERE id=?'); $stmt->execute([$id]); $bot=$stmt->fetch(); if(!$bot){echo '<div class="panel-card empty">Бот не найден</div>';return;} $res=run_ctl(['bot','logs',$bot['name']],30); ?><div class="panel-card"><div class="card-title-row"><h2>Логи: <?= e($bot['name']) ?></h2><a class="btn btn-light" href="/?page=bots">Назад</a></div><pre class="logs"><?= e($res['output'] ?: 'Логов пока нет') ?></pre></div><?php
 }
 
 function view_settings(): void
 {
-    $mysqlExternal = setting_get('mysql_external', '0');
-    $dbStatus = db_writable_status();
-    ?>
-<section class="grid two">
-    <div class="card">
-        <h2>Внешние подключения MySQL</h2>
-        <p>Текущий статус: <?= $mysqlExternal === '1' ? '<span class="pill active">включено</span>' : '<span class="pill inactive">выключено</span>' ?></p>
-        <form method="post" class="inline-form">
-            <?= csrf_field() ?>
-            <input type="hidden" name="action" value="mysql_external">
-            <input type="hidden" name="state" value="<?= $mysqlExternal === '1' ? 'disable' : 'enable' ?>">
-            <button class="btn <?= $mysqlExternal === '1' ? 'danger' : 'primary' ?>" type="submit">
-                <?= $mysqlExternal === '1' ? 'Выключить внешний доступ' : 'Включить внешний доступ' ?>
-            </button>
-        </form>
-        <p class="muted">Команда меняет bind-address MariaDB и открывает/закрывает порт 3306 в UFW.</p>
-    </div>
-    <div class="card">
-        <h2>Ремонт панели</h2>
-        <p class="muted">Если кнопки не сохраняют, FTP не показывается или права слетели — нажми ремонт. Он чинит права SQLite, sudoers, FTP-порты и перезапускает сервисы.</p>
-        <form method="post" class="inline-form" onsubmit="return confirm('Запустить ремонт панели?');">
-            <?= csrf_field() ?>
-            <input type="hidden" name="action" value="repair_panel">
-            <button class="btn primary" type="submit">Починить права и сервисы</button>
-        </form>
-        <form method="post" class="inline-form" style="margin-top:10px">
-            <?= csrf_field() ?>
-            <input type="hidden" name="action" value="sync_resources">
-            <button class="btn ghost" type="submit">Синхронизировать сайты / FTP / базы / боты</button>
-        </form>
-    </div>
-</section>
-
-<section class="grid two">
-    <div class="card">
-        <h2>Сменить пароль панели</h2>
-        <form method="post" class="form-grid">
-            <?= csrf_field() ?>
-            <input type="hidden" name="action" value="change_password">
-            <label>Текущий пароль<input type="password" name="current_password" required></label>
-            <label>Новый пароль<input type="password" name="new_password" minlength="10" required></label>
-            <button class="btn primary" type="submit">Сменить пароль</button>
-        </form>
-    </div>
-    <div class="card">
-        <h2>SQLite панели</h2>
-        <div class="status-row"><span>Файл</span><b class="pill <?= $dbStatus['file_writable'] ? 'active' : 'failed' ?>"><?= $dbStatus['file_writable'] ? 'writable' : 'not writable' ?></b></div>
-        <div class="status-row"><span>Папка</span><b class="pill <?= $dbStatus['dir_writable'] ? 'active' : 'failed' ?>"><?= $dbStatus['dir_writable'] ? 'writable' : 'not writable' ?></b></div>
-        <div class="hint"><code><?= e($dbStatus['path']) ?></code></div>
-    </div>
-</section>
-
-<section class="card">
-    <h2>Системная информация</h2>
-    <div class="settings-grid">
-        <div><span>Панель</span><code>HYPER-HOST</code></div>
-        <div><span>Разработчик</span><code>powered by memes4u1337</code></div>
-        <div><span>IP</span><code><?= e(app_config('server_ip')) ?></code></div>
-        <div><span>Папка панели</span><code><?= e(app_config('panel_dir')) ?></code></div>
-        <div><span>Папка сайтов</span><code><?= e(app_config('sites_dir')) ?></code></div>
-        <div><span>Папка ботов</span><code><?= e(app_config('bots_dir')) ?></code></div>
-    </div>
-</section>
-<?php
+    $mysqlExternal = setting_get('mysql_external', '0'); $dbStatus=db_writable_status(); ?>
+<div class="row g-4"><div class="col-lg-6"><div class="panel-card"><h2>Внешние подключения MySQL</h2><p>Статус: <span class="badge text-bg-<?= $mysqlExternal==='1'?'success':'secondary' ?>"><?= $mysqlExternal==='1'?'включено':'выключено' ?></span></p><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="mysql_external"><input type="hidden" name="state" value="<?= $mysqlExternal==='1'?'disable':'enable' ?>"><button class="btn btn-<?= $mysqlExternal==='1'?'danger':'primary' ?>"><?= $mysqlExternal==='1'?'Выключить':'Включить' ?></button></form></div></div><div class="col-lg-6"><div class="panel-card"><h2>Ремонт</h2><p class="text-muted">Чинит SQLite, sudoers, FTP shell, порты и сервисы.</p><form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="repair_panel"><button class="btn btn-primary">Починить права и сервисы</button></form><form method="post" class="d-inline ms-2"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-light">Синхронизировать</button></form></div></div><div class="col-lg-6"><div class="panel-card"><h2>Сменить пароль</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="change_password"><input class="form-control" type="password" name="current_password" placeholder="Текущий пароль" required><input class="form-control" type="password" name="new_password" placeholder="Новый пароль" minlength="10" required><button class="btn btn-primary">Сменить пароль</button></form></div></div><div class="col-lg-6"><div class="panel-card"><h2>Системные пути</h2><div class="hardware-grid"><div><span>SQLite</span><b><?= e($dbStatus['file_writable']?'writable':'not writable') ?></b></div><div><span>Панель</span><b><?= e((string)app_config('panel_dir')) ?></b></div><div><span>Сайты</span><b><?= e((string)app_config('sites_dir')) ?></b></div><div><span>FTP</span><b><?= e((string)app_config('ftp_dir','/var/www/hyper-host-ftp')) ?></b></div></div></div></div></div><?php
 }
+
+function view_roadmap(): void
+{ ?>
+<div class="panel-card"><h2><i class="fa-solid fa-list-check me-2"></i>Чего ещё не хватает для полной хостинг-панели</h2><div class="row g-3 mt-2"><div class="col-md-6"><ul class="nice-list"><li>Файловый менеджер в браузере: загрузка, удаление, редактор PHP/HTML.</li><li>Резервные копии сайтов, баз и ботов по расписанию.</li><li>DNS-менеджер, если домены будут обслуживаться на твоих NS.</li><li>SSL-автопродление с красивым статусом сертификатов.</li><li>Ограничения ресурсов: лимит диска, лимит процессов, лимит RAM для ботов.</li></ul></div><div class="col-md-6"><ul class="nice-list"><li>Менеджер PHP-версий для каждого сайта.</li><li>Cron-задачи из панели.</li><li>Логи сайтов в UI: access/error, фильтр ошибок.</li><li>Безопасность: 2FA, IP allowlist, журнал входов.</li><li>Уведомления Telegram: падение бота, ошибка Nginx, мало места на диске.</li></ul></div></div></div><?php }

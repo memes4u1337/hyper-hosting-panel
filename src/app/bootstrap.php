@@ -189,6 +189,11 @@ function is_valid_db_name(string $name): bool
     return (bool)preg_match('/^[A-Za-z0-9_]{2,48}$/', $name);
 }
 
+function is_valid_folder_name(string $name): bool
+{
+    return (bool)preg_match('/^[A-Za-z0-9._-]{1,80}$/', $name) && !in_array($name, ['.', '..'], true);
+}
+
 function human_bytes(float $bytes): string
 {
     $units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -202,7 +207,7 @@ function human_bytes(float $bytes): string
 
 function table_count(string $table): int
 {
-    $allowed = ['sites', 'ftp_accounts', 'databases', 'bots', 'events'];
+    $allowed = ['sites', 'folders', 'ftp_accounts', 'databases', 'bots', 'events'];
     if (!in_array($table, $allowed, true)) {
         return 0;
     }
@@ -289,19 +294,31 @@ function upsert_site_row(string $domain, string $aliases, string $root, int $ssl
     }
 }
 
-function upsert_ftp_row(string $username, string $target, string $passwordPlain = ''): void
+function upsert_folder_row(string $name, string $path): void
 {
+    $stmt = db()->prepare('SELECT id FROM folders WHERE name = ?');
+    $stmt->execute([$name]);
+    if ($stmt->fetch()) {
+        db()->prepare('UPDATE folders SET path = ? WHERE name = ?')->execute([$path, $name]);
+    } else {
+        db()->prepare('INSERT INTO folders(name, path) VALUES(?, ?)')->execute([$name, $path]);
+    }
+}
+
+function upsert_ftp_row(string $username, string $target, string $passwordPlain = '', ?string $host = null): void
+{
+    $host = $host ?: panel_host_for_connections();
     $stmt = db()->prepare('SELECT id, password_plain FROM ftp_accounts WHERE username = ?');
     $stmt->execute([$username]);
     $row = $stmt->fetch();
     if ($row) {
         if ($passwordPlain !== '') {
-            db()->prepare('UPDATE ftp_accounts SET target_path = ?, password_plain = ? WHERE username = ?')->execute([$target, $passwordPlain, $username]);
+            db()->prepare('UPDATE ftp_accounts SET host = ?, target_path = ?, password_plain = ? WHERE username = ?')->execute([$host, $target, $passwordPlain, $username]);
         } else {
-            db()->prepare('UPDATE ftp_accounts SET target_path = ? WHERE username = ?')->execute([$target, $username]);
+            db()->prepare('UPDATE ftp_accounts SET host = ?, target_path = ? WHERE username = ?')->execute([$host, $target, $username]);
         }
     } else {
-        db()->prepare('INSERT INTO ftp_accounts(username, target_path, password_plain) VALUES(?, ?, ?)')->execute([$username, $target, $passwordPlain]);
+        db()->prepare('INSERT INTO ftp_accounts(host, username, target_path, password_plain) VALUES(?, ?, ?, ?)')->execute([$host, $username, $target, $passwordPlain]);
     }
 }
 

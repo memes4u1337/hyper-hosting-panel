@@ -1,25 +1,3 @@
-document.addEventListener('click', async (event) => {
-  const copyBtn = event.target.closest('[data-copy]');
-  if (copyBtn) {
-    try {
-      await navigator.clipboard.writeText(copyBtn.dataset.copy || '');
-      const old = copyBtn.textContent;
-      copyBtn.textContent = 'скопировано';
-      setTimeout(() => copyBtn.textContent = old, 1200);
-    } catch (e) {
-      alert('Не удалось скопировать');
-    }
-    return;
-  }
-
-  const genBtn = event.target.closest('[data-generate-password]');
-  if (genBtn) {
-    const form = genBtn.closest('form');
-    const input = form ? form.querySelector('input[name="password"]') : null;
-    if (!input) return;
-    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%_-';
-    const bytes = new Uint32Array(18);
-    crypto.getRandomValues(bytes);
-    input.value = Array.from(bytes, (x) => alphabet[x % alphabet.length]).join('');
-  }
-});
+function copyText(text){navigator.clipboard.writeText(text).then(()=>showToast('Скопировано'));}
+function copyValue(id){const el=document.getElementById(id); if(el){el.select(); copyText(el.value);}}
+function showToast(message){let t=document.createElement('div');t.className='position-fixed bottom-0 end-0 m-4 alert alert-success shadow';t.style.zIndex=9999;t.innerText=message;document.body.appendChild(t);setTimeout(()=>t.remove(),1800)}

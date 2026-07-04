@@ -7,6 +7,7 @@ BASE_DIR="/opt/hyper-host"
 PANEL_DIR="/var/www/hyper-host"
 SITES_DIR="/var/www/hyper-host-sites"
 BOTS_DIR="/var/www/hyper-host-bots"
+FTP_DIR="/var/www/hyper-host-ftp"
 CONF_DIR="/etc/hyper-host"
 CONTROL_BIN="/usr/local/sbin/hyper-host-ctl"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,6 +41,16 @@ PMA_APP_PASS="$(openssl rand -base64 24 | tr -d '\n')"
 
 export DEBIAN_FRONTEND=noninteractive
 
+ensure_nologin_shell() {
+  if [[ -x /usr/sbin/nologin ]] && ! grep -qxF /usr/sbin/nologin /etc/shells 2>/dev/null; then
+    echo /usr/sbin/nologin >> /etc/shells
+  fi
+  if [[ -x /bin/false ]] && ! grep -qxF /bin/false /etc/shells 2>/dev/null; then
+    echo /bin/false >> /etc/shells
+  fi
+}
+
+
 log "Установка системных пакетов..."
 apt-get update -y
 apt-get install -y \
@@ -66,7 +77,7 @@ fi
 [[ -n "$PHP_FPM_SOCK" ]] || fail "Не найден PHP-FPM socket. Проверь установку php-fpm."
 
 log "Создание папок..."
-mkdir -p "$BASE_DIR/data" "$BASE_DIR/templates" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$CONF_DIR"
+mkdir -p "$BASE_DIR/data" "$BASE_DIR/templates" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$CONF_DIR"
 
 log "Копирование файлов панели..."
 rsync -a --delete "$PROJECT_DIR/src/" "$PANEL_DIR/"
@@ -83,6 +94,7 @@ BASE_DIR="${BASE_DIR}"
 PANEL_DIR="${PANEL_DIR}"
 SITES_DIR="${SITES_DIR}"
 BOTS_DIR="${BOTS_DIR}"
+FTP_DIR="${FTP_DIR}"
 PHP_FPM_SOCK="${PHP_FPM_SOCK}"
 PHPMYADMIN_PATH="/usr/share/phpmyadmin"
 EOCONF
@@ -99,6 +111,7 @@ return [
     'panel_dir' => '${PANEL_DIR}',
     'sites_dir' => '${SITES_DIR}',
     'bots_dir' => '${BOTS_DIR}',
+    'ftp_dir' => '${FTP_DIR}',
     'db_path' => '${BASE_DIR}/data/hyperhost.sqlite',
     'php_fpm_sock' => '${PHP_FPM_SOCK}',
     'phpmyadmin_path' => '/usr/share/phpmyadmin',
@@ -110,12 +123,14 @@ log "Настройка пользователей и прав..."
 if ! id hyperbot >/dev/null 2>&1; then
   useradd --system --home "$BOTS_DIR" --shell /usr/sbin/nologin hyperbot
 fi
+ensure_nologin_shell
 usermod -aG www-data hyperbot || true
 chown -R www-data:www-data "$PANEL_DIR"
 chown -R www-data:www-data "$BASE_DIR/data"
 chown -R www-data:www-data "$SITES_DIR"
+chown root:root "$FTP_DIR"
 chown -R hyperbot:www-data "$BOTS_DIR"
-chmod 0755 "$SITES_DIR" "$BOTS_DIR"
+chmod 0755 "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR"
 chmod 0770 "$BASE_DIR/data"
 
 log "Инициализация базы панели..."
@@ -207,6 +222,8 @@ pasv_enable=YES
 pasv_min_port=40000
 pasv_max_port=40100
 pasv_address=${SERVER_IP}
+force_dot_files=YES
+utf8_filesystem=YES
 EOFTP
 systemctl enable vsftpd >/dev/null 2>&1 || true
 systemctl restart vsftpd
@@ -245,6 +262,7 @@ cat <<EOF_DONE
 
  Файлы сайтов: ${SITES_DIR}
  Файлы ботов:  ${BOTS_DIR}
+ FTP папки:     ${FTP_DIR}
  phpMyAdmin:   http://${SERVER_IP}/phpmyadmin
 
  ВАЖНО: сохрани пароль сейчас.

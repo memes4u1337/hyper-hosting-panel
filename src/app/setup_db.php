@@ -32,8 +32,16 @@ CREATE TABLE IF NOT EXISTS sites (
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS folders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    path TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
 CREATE TABLE IF NOT EXISTS ftp_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    host TEXT NOT NULL DEFAULT '',
     username TEXT NOT NULL UNIQUE,
     target_path TEXT NOT NULL,
     password_plain TEXT NOT NULL DEFAULT '',
@@ -70,19 +78,19 @@ CREATE TABLE IF NOT EXISTS events (
 );
 SQL);
 
-
-// Миграции для уже установленных панелей.
-$columns = $pdo->query("PRAGMA table_info(ftp_accounts)")->fetchAll(PDO::FETCH_ASSOC);
-$hasPasswordPlain = false;
-foreach ($columns as $column) {
-    if (($column['name'] ?? '') === 'password_plain') {
-        $hasPasswordPlain = true;
-        break;
+function ensure_column(PDO $pdo, string $table, string $column, string $definition): void
+{
+    $cols = $pdo->query('PRAGMA table_info(' . $table . ')')->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($cols as $col) {
+        if (($col['name'] ?? '') === $column) {
+            return;
+        }
     }
+    $pdo->exec('ALTER TABLE ' . $table . ' ADD COLUMN ' . $column . ' ' . $definition);
 }
-if (!$hasPasswordPlain) {
-    $pdo->exec("ALTER TABLE ftp_accounts ADD COLUMN password_plain TEXT NOT NULL DEFAULT ''");
-}
+
+ensure_column($pdo, 'ftp_accounts', 'password_plain', "TEXT NOT NULL DEFAULT ''");
+ensure_column($pdo, 'ftp_accounts', 'host', "TEXT NOT NULL DEFAULT ''");
 
 $stmt = $pdo->prepare('SELECT id FROM users WHERE username = ?');
 $stmt->execute([$adminUser]);
@@ -103,4 +111,4 @@ foreach ($settings as $key => $value) {
 }
 
 $stmt = $pdo->prepare('INSERT INTO events(type, message) VALUES(?, ?)');
-$stmt->execute(['install', 'Панель HYPER-HOST установлена/обновлена']);
+$stmt->execute(['install', 'Панель HYPER-HOST установлена/обновлена до v4']);
