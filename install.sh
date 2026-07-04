@@ -8,6 +8,8 @@ PANEL_DIR="/var/www/hyper-host"
 SITES_DIR="/var/www/hyper-host-sites"
 BOTS_DIR="/var/www/hyper-host-bots"
 FTP_DIR="/var/www/hyper-host-ftp"
+BACKUP_DIR="/opt/hyper-host/backups"
+DNS_DIR="/etc/bind/hyper-host-zones"
 CONF_DIR="/etc/hyper-host"
 CONTROL_BIN="/usr/local/sbin/hyper-host-ctl"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,7 +59,7 @@ apt-get install -y \
   ca-certificates curl git unzip rsync sudo openssl ufw \
   nginx mariadb-server \
   php-fpm php-cli php-sqlite3 php-mysql php-curl php-mbstring php-xml php-zip php-gd \
-  vsftpd certbot python3-certbot-nginx python3 python3-venv python3-pip nodejs npm
+  vsftpd certbot python3-certbot-nginx python3 python3-venv python3-pip nodejs npm acl cron bind9 dnsutils
 
 log "Установка phpMyAdmin..."
 if ! dpkg -s phpmyadmin >/dev/null 2>&1; then
@@ -77,7 +79,7 @@ fi
 [[ -n "$PHP_FPM_SOCK" ]] || fail "Не найден PHP-FPM socket. Проверь установку php-fpm."
 
 log "Создание папок..."
-mkdir -p "$BASE_DIR/data" "$BASE_DIR/templates" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$CONF_DIR"
+mkdir -p "$BASE_DIR/data" "$BASE_DIR/templates" "$BACKUP_DIR" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$DNS_DIR" "$CONF_DIR"
 
 log "Копирование файлов панели..."
 rsync -a --delete "$PROJECT_DIR/src/" "$PANEL_DIR/"
@@ -95,6 +97,8 @@ PANEL_DIR="${PANEL_DIR}"
 SITES_DIR="${SITES_DIR}"
 BOTS_DIR="${BOTS_DIR}"
 FTP_DIR="${FTP_DIR}"
+BACKUP_DIR="${BACKUP_DIR}"
+DNS_DIR="${DNS_DIR}"
 PHP_FPM_SOCK="${PHP_FPM_SOCK}"
 PHPMYADMIN_PATH="/usr/share/phpmyadmin"
 EOCONF
@@ -112,6 +116,8 @@ return [
     'sites_dir' => '${SITES_DIR}',
     'bots_dir' => '${BOTS_DIR}',
     'ftp_dir' => '${FTP_DIR}',
+    'backup_dir' => '${BACKUP_DIR}',
+    'dns_dir' => '${DNS_DIR}',
     'db_path' => '${BASE_DIR}/data/hyperhost.sqlite',
     'php_fpm_sock' => '${PHP_FPM_SOCK}',
     'phpmyadmin_path' => '/usr/share/phpmyadmin',
@@ -128,9 +134,9 @@ usermod -aG www-data hyperbot || true
 chown -R www-data:www-data "$PANEL_DIR"
 chown -R www-data:www-data "$BASE_DIR/data"
 chown -R www-data:www-data "$SITES_DIR"
-chown root:root "$FTP_DIR"
+chown root:root "$FTP_DIR" "$BACKUP_DIR"
 chown -R hyperbot:www-data "$BOTS_DIR"
-chmod 0755 "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR"
+chmod 0755 "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$BACKUP_DIR"
 chmod 0770 "$BASE_DIR/data"
 
 log "Инициализация базы панели..."
@@ -228,11 +234,26 @@ EOFTP
 systemctl enable vsftpd >/dev/null 2>&1 || true
 systemctl restart vsftpd
 
+log "Настройка PM2 для ботов 24/7..."
+if ! command -v pm2 >/dev/null 2>&1; then
+  npm install -g pm2 || warn "PM2 не установился через npm. Проверь Node/NPM."
+fi
+if command -v pm2 >/dev/null 2>&1; then
+  pm2 startup systemd -u root --hp /root >/dev/null 2>&1 || true
+  pm2 save >/dev/null 2>&1 || true
+fi
+
+log "Настройка DNS сервиса bind9..."
+systemctl enable bind9 >/dev/null 2>&1 || true
+systemctl restart bind9 2>/dev/null || true
+
 log "Запуск MariaDB и PHP-FPM..."
 systemctl enable mariadb >/dev/null 2>&1 || true
 systemctl restart mariadb
 systemctl enable "php${PHP_VER}-fpm" >/dev/null 2>&1 || true
 systemctl restart "php${PHP_VER}-fpm" 2>/dev/null || systemctl restart php-fpm 2>/dev/null || true
+systemctl enable cron >/dev/null 2>&1 || true
+systemctl restart cron 2>/dev/null || true
 
 log "Настройка firewall..."
 ufw allow OpenSSH >/dev/null 2>&1 || true
@@ -263,6 +284,7 @@ cat <<EOF_DONE
  Файлы сайтов: ${SITES_DIR}
  Файлы ботов:  ${BOTS_DIR}
  FTP папки:     ${FTP_DIR}
+ Backup:       ${BACKUP_DIR}
  phpMyAdmin:   http://${SERVER_IP}/phpmyadmin
 
  ВАЖНО: сохрани пароль сейчас.

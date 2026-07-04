@@ -207,7 +207,7 @@ function human_bytes(float $bytes): string
 
 function table_count(string $table): int
 {
-    $allowed = ['sites', 'folders', 'ftp_accounts', 'databases', 'bots', 'events'];
+    $allowed = ['sites', 'folders', 'ftp_accounts', 'databases', 'bots', 'events', 'backup_jobs', 'dns_zones', 'dns_records', 'cron_tasks', 'auth_logs'];
     if (!in_array($table, $allowed, true)) {
         return 0;
     }
@@ -350,5 +350,133 @@ function upsert_bot_row(string $name, string $runtime, string $path, string $com
         db()->prepare('UPDATE bots SET runtime = ?, path = ?, start_command = ? WHERE name = ?')->execute([$runtime, $path, $command, $name]);
     } else {
         db()->prepare('INSERT INTO bots(name, runtime, path, start_command) VALUES(?, ?, ?, ?)')->execute([$name, $runtime, $path, $command]);
+    }
+}
+
+
+function auth_log(string $username, string $status): void
+{
+    try {
+        $stmt = db()->prepare('INSERT INTO auth_logs(username, ip, user_agent, status, created_at) VALUES(?, ?, ?, ?, datetime("now", "localtime"))');
+        $stmt->execute([$username, $_SERVER['REMOTE_ADDR'] ?? '', substr($_SERVER['HTTP_USER_AGENT'] ?? '', 0, 240), $status]);
+    } catch (Throwable) {}
+}
+
+function ip_allowed(): bool
+{
+    $raw = trim(setting_get('security_ip_allowlist', ''));
+    if ($raw === '') return true;
+    $ip = $_SERVER['REMOTE_ADDR'] ?? '';
+    foreach (preg_split('/[\r\n,]+/', $raw) as $line) {
+        $line = trim($line);
+        if ($line === '') continue;
+        if ($line === $ip) return true;
+        if (str_ends_with($line, '.*') && str_starts_with($ip, substr($line, 0, -1))) return true;
+    }
+    return false;
+}
+
+function base32_random(int $length = 16): string
+{
+    $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    $out = '';
+    for ($i=0; $i<$length; $i++) $out .= $alphabet[random_int(0, strlen($alphabet)-1)];
+    return $out;
+}
+
+function base32_decode_hh(string $base32): string
+{
+    $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    $base32 = strtoupper(preg_replace('/[^A-Z2-7]/', '', $base32));
+    $bits = '';
+    for ($i=0; $i<strlen($base32); $i++) {
+        $v = strpos($alphabet, $base32[$i]);
+        if ($v === false) continue;
+        $bits .= str_pad(decbin($v), 5, '0', STR_PAD_LEFT);
+    }
+    $out = '';
+    for ($i=0; $i+8<=strlen($bits); $i+=8) $out .= chr(bindec(substr($bits, $i, 8)));
+    return $out;
+}
+
+function totp_code(string $secret, ?int $timeSlice = null): string
+{
+    $timeSlice ??= (int)floor(time() / 30);
+    $secretKey = base32_decode_hh($secret);
+    if ($secretKey === '') return '';
+    $time = pack('N*', 0) . pack('N*', $timeSlice);
+    $hash = hash_hmac('sha1', $time, $secretKey, true);
+    $offset = ord(substr($hash, -1)) & 0x0F;
+    $truncated = unpack('N', substr($hash, $offset, 4))[1] & 0x7FFFFFFF;
+    return str_pad((string)($truncated % 1000000), 6, '0', STR_PAD_LEFT);
+}
+
+function verify_totp(string $secret, string $code): bool
+{
+    $code = preg_replace('/\D/', '', $code);
+    if (strlen($code) !== 6) return false;
+    $slice = (int)floor(time() / 30);
+    for ($i=-1; $i<=1; $i++) if (hash_equals(totp_code($secret, $slice+$i), $code)) return true;
+    return false;
+}
+
+function safe_rel_path(string $path): string
+{
+    $path = str_replace("\0", '', $path);
+    $path = str_replace('\\', '/', $path);
+    $parts = [];
+    foreach (explode('/', $path) as $part) {
+        if ($part === '' || $part === '.') continue;
+        if ($part === '..') { array_pop($parts); continue; }
+        $parts[] = $part;
+    }
+    return implode('/', $parts);
+}
+
+function file_manager_roots(): array
+{
+    return [
+        'sites' => ['label' => 'Сайты', 'path' => (string)app_config('sites_dir')],
+        'bots' => ['label' => 'Боты', 'path' => (string)app_config('bots_dir')],
+        'ftp' => ['label' => 'FTP', 'path' => (string)app_config('ftp_dir', '/var/www/hyper-host-ftp')],
+        'backups' => ['label' => 'Backup', 'path' => setting_get('backup_dir', '/opt/hyper-host/backups')],
+    ];
+}
+
+function fm_resolve(string $rootKey, string $rel = ''): array
+{
+    $roots = file_manager_roots();
+    if (!isset($roots[$rootKey])) $rootKey = 'sites';
+    $root = rtrim($roots[$rootKey]['path'], '/');
+    $rel = safe_rel_path($rel);
+    $path = $root . ($rel !== '' ? '/' . $rel : '');
+    $rootReal = realpath($root) ?: $root;
+    $pathReal = realpath($path) ?: $path;
+    if (!str_starts_with($pathReal, $rootReal)) throw new RuntimeException('Неверный путь');
+    return [$rootKey, $root, $rel, $path];
+}
+
+function upsert_bot_row_v5(string $name, string $runtime, string $path, string $command, int $memory = 0, int $processLimit = 0): void
+{
+    $stmt = db()->prepare('SELECT id FROM bots WHERE name = ?');
+    $stmt->execute([$name]);
+    if ($stmt->fetch()) {
+        db()->prepare('UPDATE bots SET runtime=?, path=?, start_command=?, memory_limit_mb=?, process_limit=? WHERE name=?')->execute([$runtime, $path, $command, $memory, $processLimit, $name]);
+    } else {
+        db()->prepare('INSERT INTO bots(name, runtime, path, start_command, memory_limit_mb, process_limit) VALUES(?, ?, ?, ?, ?, ?)')->execute([$name, $runtime, $path, $command, $memory, $processLimit]);
+    }
+}
+
+function upsert_site_row_v5(string $domain, string $aliases, string $root, int $ssl = 0, string $phpVersion = '', int $diskLimit = 0): void
+{
+    $stmt = db()->prepare('SELECT id, php_version, disk_limit_mb FROM sites WHERE domain = ?');
+    $stmt->execute([$domain]);
+    $row = $stmt->fetch();
+    if ($row) {
+        if ($phpVersion === '') $phpVersion = (string)($row['php_version'] ?? '');
+        if ($diskLimit === 0) $diskLimit = (int)($row['disk_limit_mb'] ?? 0);
+        db()->prepare('UPDATE sites SET aliases=?, root_path=?, ssl_enabled=?, php_version=?, disk_limit_mb=? WHERE domain=?')->execute([$aliases, $root, $ssl, $phpVersion, $diskLimit, $domain]);
+    } else {
+        db()->prepare('INSERT INTO sites(domain, aliases, root_path, ssl_enabled, php_version, disk_limit_mb) VALUES(?, ?, ?, ?, ?, ?)')->execute([$domain, $aliases, $root, $ssl, $phpVersion, $diskLimit]);
     }
 }
