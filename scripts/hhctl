@@ -1,0 +1,371 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+CONF="/etc/hyper-host/hyper-host.conf"
+[[ -f "$CONF" ]] || { echo "Config not found: $CONF" >&2; exit 2; }
+# shellcheck disable=SC1090
+source "$CONF"
+
+NGINX_AVAILABLE="/etc/nginx/sites-available"
+NGINX_ENABLED="/etc/nginx/sites-enabled"
+BOT_SERVICE_PREFIX="hyperbot"
+
+log() { echo "[hhctl] $*"; }
+err() { echo "[hhctl error] $*" >&2; exit 1; }
+
+valid_domain() {
+  [[ "$1" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]
+}
+
+valid_name() {
+  [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{1,63}$ ]]
+}
+
+valid_db_name() {
+  [[ "$1" =~ ^[A-Za-z0-9_]{2,48}$ ]]
+}
+
+shell_quote() {
+  printf "%q" "$1"
+}
+
+sql_escape() {
+  printf "%s" "$1" | sed "s/'/''/g"
+}
+
+ensure_dirs() {
+  mkdir -p "$SITES_DIR" "$BOTS_DIR" "$BASE_DIR/templates"
+}
+
+nginx_reload() {
+  nginx -t >/dev/null
+  systemctl reload nginx
+}
+
+php_index_template() {
+  local domain="$1"
+  cat > "$SITES_DIR/$domain/public_html/index.php" <<EOPHP
+<?php
+http_response_code(200);
+?>
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${domain} — HYPER-HOST</title>
+  <style>
+    body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#090b12;color:#fff;font-family:Arial,sans-serif}
+    .box{max-width:720px;padding:38px;border:1px solid rgba(255,255,255,.12);border-radius:24px;background:linear-gradient(135deg,rgba(99,102,241,.22),rgba(14,165,233,.12));box-shadow:0 30px 90px rgba(0,0,0,.45)}
+    h1{margin:0 0 14px;font-size:42px}.muted{color:#aeb8d0}.badge{display:inline-block;margin-top:18px;padding:9px 14px;border-radius:999px;background:#111827;color:#7dd3fc}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>${domain} работает 🚀</h1>
+    <p class="muted">Сайт создан в панели HYPER-HOST. Загрузи свои файлы в public_html.</p>
+    <div class="badge">powered by memes4u1337</div>
+  </div>
+</body>
+</html>
+EOPHP
+}
+
+cmd_add_site() {
+  ensure_dirs
+  local domain="${1:-}"
+  local aliases="${2:-}"
+  [[ -n "$domain" ]] || err "Domain required"
+  valid_domain "$domain" || err "Invalid domain: $domain"
+
+  local root="$SITES_DIR/$domain/public_html"
+  mkdir -p "$root" "$SITES_DIR/$domain/logs"
+  if [[ ! -f "$root/index.php" && ! -f "$root/index.html" ]]; then
+    php_index_template "$domain"
+  fi
+  chown -R www-data:www-data "$SITES_DIR/$domain"
+  chmod -R u+rwX,g+rwX,o+rX "$SITES_DIR/$domain"
+
+  local server_names="$domain"
+  if [[ -n "$aliases" ]]; then
+    IFS=',' read -ra arr <<< "$aliases"
+    for a in "${arr[@]}"; do
+      a="$(echo "$a" | xargs)"
+      [[ -z "$a" ]] && continue
+      valid_domain "$a" || err "Invalid alias: $a"
+      server_names="$server_names $a"
+    done
+  fi
+
+  cat > "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" <<EONGINX
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${server_names};
+
+    root ${root};
+    index index.php index.html index.htm;
+    client_max_body_size 256M;
+
+    access_log ${SITES_DIR}/${domain}/logs/access.log;
+    error_log ${SITES_DIR}/${domain}/logs/error.log;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:${PHP_FPM_SOCK};
+    }
+
+    location ~ /\. {
+        deny all;
+    }
+}
+EONGINX
+
+  ln -sf "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" "$NGINX_ENABLED/hyper-host-site-$domain.conf"
+  nginx_reload
+  log "Site created: $domain -> $root"
+}
+
+cmd_delete_site() {
+  local domain="${1:-}"
+  local mode="${2:---keep-files}"
+  [[ -n "$domain" ]] || err "Domain required"
+  valid_domain "$domain" || err "Invalid domain: $domain"
+  rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
+  nginx_reload
+  if [[ "$mode" == "--delete-files" ]]; then
+    rm -rf "$SITES_DIR/$domain"
+    log "Site and files deleted: $domain"
+  else
+    log "Site config deleted, files kept: $SITES_DIR/$domain"
+  fi
+}
+
+cmd_ssl_site() {
+  local domain="${1:-}"
+  local email="${2:-}"
+  [[ -n "$domain" && -n "$email" ]] || err "Domain and email required"
+  valid_domain "$domain" || err "Invalid domain: $domain"
+  certbot --nginx -d "$domain" --non-interactive --agree-tos -m "$email" --redirect
+  nginx_reload
+  log "SSL issued for $domain"
+}
+
+cmd_create_ftp() {
+  local username="${1:-}"
+  local password="${2:-}"
+  local target="${3:-}"
+  [[ -n "$username" && -n "$password" && -n "$target" ]] || err "Username, password and target path required"
+  valid_name "$username" || err "Invalid ftp username"
+  [[ "$username" == hhftp_* ]] || username="hhftp_${username}"
+  [[ "$target" == "$SITES_DIR"/* || "$target" == "$BOTS_DIR"/* ]] || err "Target must be inside sites or bots dir"
+  mkdir -p "$target"
+  if id "$username" >/dev/null 2>&1; then
+    echo "$username:$password" | chpasswd
+  else
+    useradd -d "$target" -s /usr/sbin/nologin "$username"
+    echo "$username:$password" | chpasswd
+  fi
+  chown -R "$username":www-data "$target"
+  chmod -R u+rwX,g+rwX,o+rX "$target"
+  systemctl restart vsftpd
+  log "FTP user ready: $username -> $target"
+}
+
+cmd_delete_ftp() {
+  local username="${1:-}"
+  [[ -n "$username" ]] || err "Username required"
+  valid_name "$username" || err "Invalid username"
+  [[ "$username" == hhftp_* ]] || username="hhftp_${username}"
+  if id "$username" >/dev/null 2>&1; then
+    userdel "$username"
+  fi
+  log "FTP user deleted: $username"
+}
+
+cmd_create_db() {
+  local db="${1:-}"
+  local user="${2:-}"
+  local pass="${3:-}"
+  local remote="${4:-0}"
+  [[ -n "$db" && -n "$user" && -n "$pass" ]] || err "DB, user and password required"
+  valid_db_name "$db" || err "Invalid db name"
+  valid_db_name "$user" || err "Invalid db user"
+  local epass
+  epass="$(sql_escape "$pass")"
+
+  mysql <<SQL
+CREATE DATABASE IF NOT EXISTS \`${db}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '${user}'@'localhost' IDENTIFIED BY '${epass}';
+ALTER USER '${user}'@'localhost' IDENTIFIED BY '${epass}';
+GRANT ALL PRIVILEGES ON \`${db}\`.* TO '${user}'@'localhost';
+SQL
+
+  if [[ "$remote" == "1" ]]; then
+    mysql <<SQL
+CREATE USER IF NOT EXISTS '${user}'@'%' IDENTIFIED BY '${epass}';
+ALTER USER '${user}'@'%' IDENTIFIED BY '${epass}';
+GRANT ALL PRIVILEGES ON \`${db}\`.* TO '${user}'@'%';
+SQL
+  fi
+  mysql -e "FLUSH PRIVILEGES;"
+  log "Database created: $db / $user / remote=$remote"
+}
+
+cmd_delete_db() {
+  local db="${1:-}"
+  local user="${2:-}"
+  [[ -n "$db" && -n "$user" ]] || err "DB and user required"
+  valid_db_name "$db" || err "Invalid db name"
+  valid_db_name "$user" || err "Invalid db user"
+  mysql <<SQL
+DROP DATABASE IF EXISTS \`${db}\`;
+DROP USER IF EXISTS '${user}'@'localhost';
+DROP USER IF EXISTS '${user}'@'%';
+FLUSH PRIVILEGES;
+SQL
+  log "Database deleted: $db / $user"
+}
+
+cmd_mysql_external() {
+  local state="${1:-}"
+  [[ "$state" == "enable" || "$state" == "disable" ]] || err "Use enable or disable"
+  local file="/etc/mysql/mariadb.conf.d/50-server.cnf"
+  [[ -f "$file" ]] || file="/etc/mysql/my.cnf"
+  cp "$file" "$file.backup.$(date +%s)" || true
+  if [[ "$state" == "enable" ]]; then
+    if grep -qE '^\s*bind-address\s*=' "$file"; then
+      sed -i 's/^\s*bind-address\s*=.*/bind-address = 0.0.0.0/' "$file"
+    else
+      echo "bind-address = 0.0.0.0" >> "$file"
+    fi
+    ufw allow 3306/tcp >/dev/null 2>&1 || true
+  else
+    if grep -qE '^\s*bind-address\s*=' "$file"; then
+      sed -i 's/^\s*bind-address\s*=.*/bind-address = 127.0.0.1/' "$file"
+    else
+      echo "bind-address = 127.0.0.1" >> "$file"
+    fi
+    ufw delete allow 3306/tcp >/dev/null 2>&1 || true
+  fi
+  systemctl restart mariadb
+  log "MySQL external access: $state"
+}
+
+cmd_bot_create() {
+  local name="${1:-}"
+  local runtime="${2:-python}"
+  local command="${3:-}"
+  [[ -n "$name" && -n "$command" ]] || err "Bot name and command required"
+  valid_name "$name" || err "Invalid bot name"
+  [[ "$runtime" =~ ^(python|node|php|custom)$ ]] || err "Invalid bot runtime"
+
+  local path="$BOTS_DIR/$name"
+  local service="${BOT_SERVICE_PREFIX}-${name}.service"
+  mkdir -p "$path"
+  if [[ ! -f "$path/README.txt" ]]; then
+    cat > "$path/README.txt" <<EOTXT
+HYPER-HOST bot folder: ${name}
+Put your bot files here and set start command in panel.
+EOTXT
+  fi
+  chown -R hyperbot:www-data "$path"
+  chmod -R u+rwX,g+rwX,o+rX "$path"
+
+  local escaped_cmd
+  escaped_cmd="$(printf "%s" "$command" | sed "s/'/'\\\\''/g")"
+  cat > "/etc/systemd/system/${service}" <<EOSERVICE
+[Unit]
+Description=HYPER-HOST Telegram Bot ${name}
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyperbot
+Group=www-data
+WorkingDirectory=${path}
+ExecStart=/bin/bash -lc 'cd ${path} && exec ${escaped_cmd}'
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+EOSERVICE
+  systemctl daemon-reload
+  systemctl enable "$service" >/dev/null 2>&1 || true
+  log "Bot service created: $service"
+}
+
+cmd_bot_delete() {
+  local name="${1:-}"
+  local mode="${2:---keep-files}"
+  [[ -n "$name" ]] || err "Bot name required"
+  valid_name "$name" || err "Invalid bot name"
+  local service="${BOT_SERVICE_PREFIX}-${name}.service"
+  systemctl stop "$service" >/dev/null 2>&1 || true
+  systemctl disable "$service" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/$service"
+  systemctl daemon-reload
+  if [[ "$mode" == "--delete-files" ]]; then
+    rm -rf "$BOTS_DIR/$name"
+  fi
+  log "Bot deleted: $name"
+}
+
+cmd_bot_action() {
+  local action="${1:-}"
+  local name="${2:-}"
+  [[ "$action" =~ ^(start|stop|restart|status|logs)$ ]] || err "Invalid bot action"
+  [[ -n "$name" ]] || err "Bot name required"
+  valid_name "$name" || err "Invalid bot name"
+  local service="${BOT_SERVICE_PREFIX}-${name}.service"
+  case "$action" in
+    start|stop|restart)
+      systemctl "$action" "$service"
+      log "Bot $action: $name"
+      ;;
+    status)
+      systemctl is-active "$service" || true
+      ;;
+    logs)
+      journalctl -u "$service" -n 160 --no-pager || true
+      ;;
+  esac
+}
+
+case "${1:-}" in
+  add-site) shift; cmd_add_site "$@" ;;
+  delete-site) shift; cmd_delete_site "$@" ;;
+  ssl-site) shift; cmd_ssl_site "$@" ;;
+  create-ftp) shift; cmd_create_ftp "$@" ;;
+  delete-ftp) shift; cmd_delete_ftp "$@" ;;
+  create-db) shift; cmd_create_db "$@" ;;
+  delete-db) shift; cmd_delete_db "$@" ;;
+  mysql-external) shift; cmd_mysql_external "$@" ;;
+  bot-create) shift; cmd_bot_create "$@" ;;
+  bot-delete) shift; cmd_bot_delete "$@" ;;
+  bot) shift; cmd_bot_action "$@" ;;
+  *)
+    cat >&2 <<EOHELP
+Usage:
+  hyper-host-ctl add-site DOMAIN [ALIASES_COMMA]
+  hyper-host-ctl delete-site DOMAIN [--keep-files|--delete-files]
+  hyper-host-ctl ssl-site DOMAIN EMAIL
+  hyper-host-ctl create-ftp USER PASS TARGET_PATH
+  hyper-host-ctl delete-ftp USER
+  hyper-host-ctl create-db DB USER PASS [0|1]
+  hyper-host-ctl delete-db DB USER
+  hyper-host-ctl mysql-external enable|disable
+  hyper-host-ctl bot-create NAME python|node|php|custom COMMAND
+  hyper-host-ctl bot-delete NAME [--keep-files|--delete-files]
+  hyper-host-ctl bot start|stop|restart|status|logs NAME
+EOHELP
+    exit 1
+    ;;
+esac

@@ -1,0 +1,1 @@
+Конфиги Nginx/FTP генерируются install.sh и /usr/local/sbin/hyper-host-ctl во время установки.
