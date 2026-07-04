@@ -57,3 +57,23 @@ sudo hyper-host-ctl sync-json
 sudo nginx -t
 sudo systemctl reload nginx
 ```
+
+
+## HYPER-HOST v6
+
+Добавлено: загрузчик ботов (`bot.py`, `.env`, `requirements.txt`), автоустановка зависимостей перед запуском PM2 24/7, FTP структура `common/sites/bots`, проверка DNS перед SSL, улучшенный файловый менеджер и тёмный UI.
+
+Обновление сервера:
+
+```bash
+cd /root/hyper-hosting-panel
+git fetch origin main
+git checkout main
+git reset --hard origin/main
+git clean -fd
+sudo bash install.sh
+sudo hyper-host-ctl repair
+sudo hyper-host-ctl sync-json
+sudo nginx -t
+sudo systemctl reload nginx
+```

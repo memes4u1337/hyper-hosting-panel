@@ -125,7 +125,51 @@ EONGINX
   log "Site created: $domain -> $root"
 }
 cmd_delete_site() { local domain="${1:-}" mode="${2:---keep-files}"; [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain"; rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"; nginx_reload; [[ "$mode" == "--delete-files" ]] && rm -rf "$SITES_DIR/$domain"; log "Site deleted: $domain / $mode"; }
-cmd_ssl_site() { local domain="${1:-}" email="${2:-}"; [[ -n "$domain" && -n "$email" ]] || err "Domain and email required"; valid_domain "$domain" || err "Invalid domain"; certbot --nginx -d "$domain" --non-interactive --agree-tos -m "$email" --redirect; nginx_reload; log "SSL issued for $domain"; }
+public_ip() {
+  curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || curl -4 -fsS --max-time 5 https://ifconfig.me 2>/dev/null || echo "$SERVER_IP"
+}
+resolve_domain_ips() {
+  local domain="$1"
+  { dig +short A "$domain" 2>/dev/null; dig +short AAAA "$domain" 2>/dev/null; } | sed '/^$/d' | sort -u
+}
+dns_points_here() {
+  local domain="$1" pub ips
+  pub="$(public_ip)"; ips="$(resolve_domain_ips "$domain")"
+  [[ -n "$ips" ]] || return 2
+  echo "$ips" | grep -qxF "$pub" && return 0
+  echo "$ips" | grep -qxF "$SERVER_IP" && return 0
+  return 1
+}
+cmd_ssl_check_json() {
+  local domain="${1:-}"; [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain"
+  DOMAIN="$domain" SERVER_IP="$SERVER_IP" PUBLIC_IP="$(public_ip)" python3 - <<'PYSSL'
+import os,subprocess,json
+D=os.environ['DOMAIN']
+def dig(t):
+    try: return [x.strip() for x in subprocess.check_output(['dig','+short',t,D],text=True,stderr=subprocess.DEVNULL).splitlines() if x.strip()]
+    except Exception: return []
+a=dig('A'); aaaa=dig('AAAA')
+public=os.environ.get('PUBLIC_IP',''); server=os.environ.get('SERVER_IP','')
+points=bool(set(a+aaaa) & {public,server})
+print(json.dumps({'domain':D,'a':a,'aaaa':aaaa,'server_ip':server,'public_ip':public,'points_here':points,'has_records':bool(a or aaaa)},ensure_ascii=False))
+PYSSL
+}
+cmd_ssl_site() {
+  local domain="${1:-}" email="${2:-}"
+  [[ -n "$domain" && -n "$email" ]] || err "Domain and email required"
+  valid_domain "$domain" || err "Invalid domain"
+  local pub ips
+  pub="$(public_ip)"; ips="$(resolve_domain_ips "$domain")"
+  if [[ -z "$ips" ]]; then
+    err "SSL не выпущен: у домена $domain нет публичных A/AAAA записей. Добавь DNS A: $domain -> $pub, подожди обновления DNS и повтори выпуск SSL. Проверка: dig +short $domain"
+  fi
+  if ! dns_points_here "$domain"; then
+    err "SSL не выпущен: DNS $domain сейчас указывает не на этот сервер. Текущие DNS: ${ips//$'\n'/, }. IP сервера: $pub. Исправь A-запись на $pub и повтори."
+  fi
+  certbot --nginx -d "$domain" --non-interactive --agree-tos -m "$email" --redirect
+  nginx_reload
+  log "SSL issued for $domain"
+}
 
 cmd_site_php() {
   local domain="${1:-}" version="${2:-}"; [[ -n "$domain" && -n "$version" ]] || err "Domain and PHP version required"; valid_domain "$domain" || err "Invalid domain"
@@ -136,22 +180,34 @@ cmd_site_php() {
 
 cmd_create_ftp() {
   ensure_dirs; ensure_nologin_shell
-  local username="${1:-}" password="${2:-}" mode="${3:-all-sites}"
+  local username="${1:-}" password="${2:-}" mode="${3:-common}"
   [[ -n "$username" && -n "$password" ]] || err "Username and password required"; valid_name "$username" || err "Invalid ftp username"
   [[ "$username" == hhftp_* ]] || username="hhftp_${username}"
-  local home="$FTP_DIR/$username" common="$home/common" sites="$home/sites" bots="$home/bots"
-  mkdir -p "$common" "$sites" "$bots"
-  if id "$username" >/dev/null 2>&1; then usermod -d "$home" -s /usr/sbin/nologin "$username" || true; echo "$username:$password" | chpasswd; else useradd -m -d "$home" -s /usr/sbin/nologin "$username"; echo "$username:$password" | chpasswd; fi
+  local home="$FTP_DIR/$username" common="$home/common" sites="$common/sites" bots="$common/bots"
+  mkdir -p "$common" "$sites" "$bots" "$SITES_DIR" "$BOTS_DIR"
+  if id "$username" >/dev/null 2>&1; then
+    usermod -d "$home" -s /usr/sbin/nologin "$username" || true
+    echo "$username:$password" | chpasswd
+  else
+    useradd -m -d "$home" -s /usr/sbin/nologin "$username"
+    echo "$username:$password" | chpasswd
+  fi
+  usermod -aG www-data "$username" 2>/dev/null || true
   chown root:root "$home"; chmod 0755 "$home"
-  chown -R "$username":www-data "$common"; chmod -R u+rwX,g+rwX,o+rX "$common"; find "$common" -type d -exec chmod g+s {} + 2>/dev/null || true
+  chown -R "$username":www-data "$common"; chmod -R u+rwX,g+rwX,o+rX "$common"
+  find "$common" -type d -exec chmod g+s {} + 2>/dev/null || true
+  # В FTP пользователь видит одну общую папку common/, а внутри common/sites и common/bots.
   for pair in "$SITES_DIR:$sites" "$BOTS_DIR:$bots"; do
-    src="${pair%%:*}"; dst="${pair#*:}"; mkdir -p "$src" "$dst"
+    src="${pair%%:*}"; dst="${pair#*:}"
+    mkdir -p "$src" "$dst"
     if ! mountpoint -q "$dst"; then mount --bind "$src" "$dst" 2>/dev/null || true; fi
     if mountpoint -q "$dst" && ! grep -qs " $dst " /etc/fstab; then echo "$src $dst none bind 0 0" >> /etc/fstab; fi
   done
-  fix_web_permissions "$SITES_DIR" "$username"; fix_web_permissions "$BOTS_DIR" "$username"; fix_web_permissions "$FTP_DIR/$username" "$username"
+  fix_web_permissions "$SITES_DIR" "$username"
+  fix_web_permissions "$BOTS_DIR" "$username"
+  fix_web_permissions "$common" "$username"
   systemctl restart vsftpd
-  log "FTP user ready: $username -> $home (common/sites/bots)"
+  log "FTP user ready: $username -> $home/common (sites/bots inside common)"
 }
 cmd_delete_ftp() {
   local username="${1:-}"; [[ -n "$username" ]] || err "Username required"; valid_name "$username" || err "Invalid username"; [[ "$username" == hhftp_* ]] || username="hhftp_${username}"
@@ -183,45 +239,130 @@ cmd_delete_db() { local db="${1:-}" user="${2:-}"; [[ -n "$db" && -n "$user" ]] 
 cmd_mysql_external() { local state="${1:-}"; [[ "$state" == enable || "$state" == disable ]] || err "Use enable or disable"; local file="/etc/mysql/mariadb.conf.d/50-server.cnf"; [[ -f "$file" ]] || file="/etc/mysql/my.cnf"; cp "$file" "$file.backup.$(date +%s)" || true; if [[ "$state" == enable ]]; then sed -i 's/^\s*bind-address\s*=.*/bind-address = 0.0.0.0/' "$file" || true; grep -q '^bind-address' "$file" || echo 'bind-address = 0.0.0.0' >> "$file"; ufw allow 3306/tcp >/dev/null 2>&1 || true; else sed -i 's/^\s*bind-address\s*=.*/bind-address = 127.0.0.1/' "$file" || true; ufw delete allow 3306/tcp >/dev/null 2>&1 || true; fi; systemctl restart mariadb; log "MySQL external access: $state"; }
 
 ensure_pm2() {
+  command -v python3 >/dev/null 2>&1 || apt-get install -y python3
+  command -v pip3 >/dev/null 2>&1 || apt-get install -y python3-pip
   command -v node >/dev/null 2>&1 || apt-get install -y nodejs npm
   command -v pm2 >/dev/null 2>&1 || npm install -g pm2
 }
+make_bot_start_script() {
+  local name="$1" runtime="$2" main_file="$3" path="$BOTS_DIR/$name" mem="$4" interp=""
+  case "$runtime" in
+    python)
+      if [[ -x "$path/venv/bin/python" ]]; then interp="$path/venv/bin/python"; else interp="python3"; fi
+      cat > "$path/.hyper-start.sh" <<EOS
+#!/usr/bin/env bash
+set -Eeuo pipefail
+cd "$path"
+if [[ -f .env ]]; then set -a; source .env; set +a; fi
+exec "$interp" "$main_file"
+EOS
+      ;;
+    node)
+      cat > "$path/.hyper-start.sh" <<EOS
+#!/usr/bin/env bash
+set -Eeuo pipefail
+cd "$path"
+if [[ -f .env ]]; then set -a; source .env; set +a; fi
+exec node "$main_file"
+EOS
+      ;;
+    php)
+      cat > "$path/.hyper-start.sh" <<EOS
+#!/usr/bin/env bash
+set -Eeuo pipefail
+cd "$path"
+if [[ -f .env ]]; then set -a; source .env; set +a; fi
+exec php "$main_file"
+EOS
+      ;;
+    custom)
+      cat > "$path/.hyper-start.sh" <<EOS
+#!/usr/bin/env bash
+set -Eeuo pipefail
+cd "$path"
+if [[ -f .env ]]; then set -a; source .env; set +a; fi
+exec bash -lc "$main_file"
+EOS
+      ;;
+  esac
+  chmod +x "$path/.hyper-start.sh"
+}
+bot_install_deps_internal() {
+  local name="$1" runtime="${2:-python}" path="$BOTS_DIR/$name"
+  [[ -d "$path" ]] || err "Bot folder not found"
+  if [[ "$runtime" == "python" && -f "$path/requirements.txt" ]]; then
+    python3 -m venv "$path/venv"
+    "$path/venv/bin/python" -m pip install --upgrade pip wheel setuptools
+    "$path/venv/bin/pip" install -r "$path/requirements.txt"
+    log "Python requirements installed in venv for $name"
+  elif [[ "$runtime" == "node" && -f "$path/package.json" ]]; then
+    (cd "$path" && npm install)
+    log "Node packages installed for $name"
+  elif [[ "$runtime" == "php" && -f "$path/composer.json" ]]; then
+    if command -v composer >/dev/null 2>&1; then (cd "$path" && composer install --no-interaction); fi
+    log "PHP dependencies checked for $name"
+  else
+    log "No dependency file found for $name"
+  fi
+}
+bot_start_pm2() {
+  local name="$1" runtime="$2" main_file="$3" mem="${4:-0}" path="$BOTS_DIR/$name"
+  ensure_pm2
+  make_bot_start_script "$name" "$runtime" "$main_file" "$path" "$mem"
+  (cd "$path" && pm2 delete "$name" >/dev/null 2>&1 || true)
+  local mem_arg=(); [[ "$mem" =~ ^[0-9]+$ && "$mem" -gt 0 ]] && mem_arg+=(--max-memory-restart "${mem}M")
+  (cd "$path" && pm2 start ./.hyper-start.sh --name "$name" --interpreter bash "${mem_arg[@]}")
+  pm2 save >/dev/null || true
+}
 cmd_bot_create() {
   ensure_dirs; ensure_pm2
-  local name="${1:-}" runtime="${2:-python}" command="${3:-}" mem="${4:-0}" proc_limit="${5:-0}"
-  [[ -n "$name" && -n "$command" ]] || err "Bot name and command required"; valid_name "$name" || err "Invalid bot name"; [[ "$runtime" =~ ^(python|node|php|custom)$ ]] || err "Invalid runtime"
-  local path="$BOTS_DIR/$name"; mkdir -p "$path"; [[ -f "$path/.env" ]] || echo '# BOT_TOKEN=put_token_here' > "$path/.env"
-  if [[ "$runtime" == python && ! -f "$path/bot.py" && ! -f "$path/main.py" ]]; then cat > "$path/bot.py" <<'PYBOT'
+  local name="${1:-}" runtime="${2:-python}" main_file="${3:-}" mem="${4:-0}" proc_limit="${5:-0}"
+  [[ -n "$name" ]] || err "Bot name required"; valid_name "$name" || err "Invalid bot name"; [[ "$runtime" =~ ^(python|node|php|custom)$ ]] || err "Invalid runtime"
+  local path="$BOTS_DIR/$name"; mkdir -p "$path"
+  if [[ -z "$main_file" ]]; then
+    case "$runtime" in python) main_file="bot.py";; node) main_file="index.js";; php) main_file="bot.php";; custom) main_file="start.sh";; esac
+  fi
+  main_file="${main_file#python3 }"; main_file="${main_file#python }"; main_file="${main_file#node }"; main_file="${main_file#php }"; main_file="$(basename "$main_file")"
+  [[ -f "$path/.env" ]] || echo '# BOT_TOKEN=put_token_here' > "$path/.env"
+  if [[ "$runtime" == python && ! -f "$path/$main_file" ]]; then cat > "$path/$main_file" <<'PYBOT'
 import time
 print('HYPER-HOST bot template started', flush=True)
 while True:
     time.sleep(60)
 PYBOT
   fi
-  if [[ "$runtime" == node && ! -f "$path/index.js" ]]; then echo "setInterval(()=>console.log('HYPER-HOST node bot'),60000);" > "$path/index.js"; fi
+  if [[ "$runtime" == node && ! -f "$path/$main_file" ]]; then echo "setInterval(()=>console.log('HYPER-HOST node bot'),60000);" > "$path/$main_file"; fi
+  if [[ "$runtime" == php && ! -f "$path/$main_file" ]]; then echo "<?php while(true){ echo 'HYPER-HOST php bot'.PHP_EOL; sleep(60); }" > "$path/$main_file"; fi
   fix_web_permissions "$path"
-  (cd "$path" && pm2 delete "$name" >/dev/null 2>&1 || true)
-  local mem_arg=(); [[ "$mem" =~ ^[0-9]+$ && "$mem" -gt 0 ]] && mem_arg+=(--max-memory-restart "${mem}M")
-  case "$runtime" in
-    python)
-      # command can be "bot.py" or "python3 bot.py"
-      local file="$command"; file="${file#python3 }"; file="${file#python }"; (cd "$path" && pm2 start "$file" --interpreter python3 --name "$name" "${mem_arg[@]}") ;;
-    node)
-      local file="$command"; file="${file#node }"; (cd "$path" && pm2 start "$file" --name "$name" "${mem_arg[@]}") ;;
-    php)
-      local file="$command"; file="${file#php }"; (cd "$path" && pm2 start "$file" --interpreter php --name "$name" "${mem_arg[@]}") ;;
-    custom)
-      (cd "$path" && pm2 start bash --name "$name" "${mem_arg[@]}" -- -lc "$command") ;;
-  esac
-  pm2 save >/dev/null || true
-  log "PM2 bot created: $name"
+  bot_install_deps_internal "$name" "$runtime"
+  bot_start_pm2 "$name" "$runtime" "$main_file" "$mem"
+  fix_web_permissions "$path"
+  log "PM2 bot created: $name / main=$main_file"
 }
-cmd_bot_install_requirements() { local name="${1:-}"; [[ -n "$name" ]] || err "Bot name required"; valid_name "$name" || err "Invalid bot"; local path="$BOTS_DIR/$name"; [[ -d "$path" ]] || err "Bot folder not found"; if [[ -f "$path/requirements.txt" ]]; then (cd "$path" && pip3 install -r requirements.txt); log "Python requirements installed for $name"; elif [[ -f "$path/package.json" ]]; then (cd "$path" && npm install); log "Node packages installed for $name"; else log "No requirements.txt or package.json found for $name"; fi; fix_web_permissions "$path"; }
+cmd_bot_deploy() {
+  ensure_dirs; ensure_pm2
+  local name="${1:-}" runtime="${2:-python}" main_file="${3:-bot.py}" bot_tmp="${4:-}" env_tmp="${5:-}" req_tmp="${6:-}" mem="${7:-0}"
+  [[ -n "$name" ]] || err "Bot name required"; valid_name "$name" || err "Invalid bot name"; [[ "$runtime" =~ ^(python|node|php|custom)$ ]] || err "Invalid runtime"
+  main_file="${main_file#python3 }"; main_file="${main_file#python }"; main_file="${main_file#node }"; main_file="${main_file#php }"; main_file="$(basename "$main_file")"
+  local path="$BOTS_DIR/$name"; mkdir -p "$path"
+  if [[ -n "$bot_tmp" && -f "$bot_tmp" ]]; then cp "$bot_tmp" "$path/$main_file"; fi
+  if [[ -n "$env_tmp" && -f "$env_tmp" ]]; then cp "$env_tmp" "$path/.env"; elif [[ ! -f "$path/.env" ]]; then echo '# BOT_TOKEN=put_token_here' > "$path/.env"; fi
+  if [[ -n "$req_tmp" && -f "$req_tmp" ]]; then
+    if [[ "$runtime" == "node" ]]; then cp "$req_tmp" "$path/package.json"; else cp "$req_tmp" "$path/requirements.txt"; fi
+  fi
+  [[ -f "$path/$main_file" ]] || err "Главный файл бота не найден: $main_file. Загрузи bot.py / index.js / bot.php."
+  fix_web_permissions "$path"
+  bot_install_deps_internal "$name" "$runtime"
+  bot_start_pm2 "$name" "$runtime" "$main_file" "$mem"
+  fix_web_permissions "$path"
+  log "Bot deployed and started: $name / main=$main_file"
+}
+cmd_bot_install_requirements() { local name="${1:-}"; [[ -n "$name" ]] || err "Bot name required"; valid_name "$name" || err "Invalid bot"; local runtime="${2:-python}"; bot_install_deps_internal "$name" "$runtime"; fix_web_permissions "$BOTS_DIR/$name"; }
 cmd_bot_delete() { local name="${1:-}" mode="${2:---keep-files}"; [[ -n "$name" ]] || err "Bot name required"; valid_name "$name" || err "Invalid bot"; ensure_pm2; pm2 stop "$name" >/dev/null 2>&1 || true; pm2 delete "$name" >/dev/null 2>&1 || true; pm2 save >/dev/null 2>&1 || true; [[ "$mode" == "--delete-files" ]] && rm -rf "$BOTS_DIR/$name"; log "Bot deleted: $name"; }
-cmd_bot_action() { local action="${1:-}" name="${2:-}"; [[ "$action" =~ ^(start|stop|restart|status|logs)$ ]] || err "Invalid bot action"; [[ -n "$name" ]] || err "Bot name required"; valid_name "$name" || err "Invalid bot"; ensure_pm2; case "$action" in start|stop|restart) pm2 "$action" "$name"; pm2 save >/dev/null 2>&1 || true;; status) BOTNAME="$name" pm2 jlist | BOTNAME="$name" python3 -c 'import sys,json,os; data=json.load(sys.stdin); name=os.environ.get("BOTNAME",""); print(next((p.get("pm2_env",{}).get("status","") for p in data if p.get("name")==name), "not_found"))';; logs) pm2 logs "$name" --lines 200 --nostream || true;; esac; }
+cmd_bot_action() { local action="${1:-}" name="${2:-}"; [[ "$action" =~ ^(start|stop|restart|status|logs)$ ]] || err "Invalid bot action"; [[ -n "$name" ]] || err "Bot name required"; valid_name "$name" || err "Invalid bot"; ensure_pm2; case "$action" in start|stop|restart) pm2 "$action" "$name"; pm2 save >/dev/null 2>&1 || true;; status) BOTNAME="$name" pm2 jlist | BOTNAME="$name" python3 -c 'import sys,json,os; data=json.load(sys.stdin); name=os.environ.get("BOTNAME",""); print(next((p.get("pm2_env",{}).get("status","") for p in data if p.get("name")==name), "not_found"))';; logs) pm2 logs "$name" --lines 250 --nostream || true;; esac; }
 cmd_bot_list_json() {
   ensure_pm2
-  pm2 jlist 2>/dev/null | python3 -c 'import sys,json
+  pm2 jlist 2>/dev/null | python3 -c 'import sys,json,os
 try:
     data=json.load(sys.stdin)
 except Exception:
@@ -229,10 +370,14 @@ except Exception:
 out=[]
 for p in data:
     env=p.get("pm2_env",{})
-    out.append({"name":p.get("name",""),"status":env.get("status",""),"restarts":env.get("restart_time",0),"memory":p.get("monit",{}).get("memory",0),"cpu":p.get("monit",{}).get("cpu",0)})
+    cwd=env.get("pm_cwd","")
+    files=[]
+    if cwd and os.path.isdir(cwd):
+        for n in ("bot.py","main.py","index.js","bot.php",".env","requirements.txt","package.json"):
+            if os.path.exists(os.path.join(cwd,n)): files.append(n)
+    out.append({"name":p.get("name",""),"status":env.get("status",""),"restarts":env.get("restart_time",0),"memory":p.get("monit",{}).get("memory",0),"cpu":p.get("monit",{}).get("cpu",0),"cwd":cwd,"files":files})
 print(json.dumps(out, ensure_ascii=False))'
 }
-
 
 cmd_backup_run() {
   ensure_dirs
@@ -410,10 +555,10 @@ cmd_repair() {
   fix_web_permissions "$SITES_DIR"; fix_web_permissions "$BOTS_DIR"; chmod 0755 "$FTP_DIR" "$BACKUP_DIR" 2>/dev/null || true
   while IFS=: read -r user _ uid gid gecos home shell; do
     [[ "$user" == hhftp_* ]] || continue; [[ -n "$home" && -d "$home" ]] || continue
-    usermod -s /usr/sbin/nologin "$user" 2>/dev/null || true; chown root:root "$home" 2>/dev/null || true; chmod 0755 "$home" 2>/dev/null || true; mkdir -p "$home/common" "$home/sites" "$home/bots"
+    usermod -s /usr/sbin/nologin "$user" 2>/dev/null || true; chown root:root "$home" 2>/dev/null || true; chmod 0755 "$home" 2>/dev/null || true; mkdir -p "$home/common" "$home/common/sites" "$home/common/bots"
     chown -R "$user":www-data "$home/common" 2>/dev/null || true; chmod -R u+rwX,g+rwX,o+rX "$home/common" 2>/dev/null || true
-    for pair in "$SITES_DIR:$home/sites" "$BOTS_DIR:$home/bots"; do src="${pair%%:*}"; dst="${pair#*:}"; mkdir -p "$src" "$dst"; if ! mountpoint -q "$dst"; then mount --bind "$src" "$dst" 2>/dev/null || true; fi; if mountpoint -q "$dst" && ! grep -qs " $dst " /etc/fstab; then echo "$src $dst none bind 0 0" >> /etc/fstab; fi; done
-    fix_web_permissions "$SITES_DIR" "$user"; fix_web_permissions "$BOTS_DIR" "$user"
+    for pair in "$SITES_DIR:$home/common/sites" "$BOTS_DIR:$home/common/bots"; do src="${pair%%:*}"; dst="${pair#*:}"; mkdir -p "$src" "$dst"; if ! mountpoint -q "$dst"; then mount --bind "$src" "$dst" 2>/dev/null || true; fi; if mountpoint -q "$dst" && ! grep -qs " $dst " /etc/fstab; then echo "$src $dst none bind 0 0" >> /etc/fstab; fi; done
+    fix_web_permissions "$SITES_DIR" "$user"; fix_web_permissions "$BOTS_DIR" "$user"; fix_web_permissions "$home/common" "$user"
   done < /etc/passwd
   cat > /etc/sudoers.d/hyper-host <<EOSUDO
 www-data ALL=(root) NOPASSWD: /usr/local/sbin/hyper-host-ctl *
@@ -438,6 +583,7 @@ case "${1:-}" in
   delete-db) shift; cmd_delete_db "$@" ;;
   mysql-external) shift; cmd_mysql_external "$@" ;;
   bot-create) shift; cmd_bot_create "$@" ;;
+  bot-deploy) shift; cmd_bot_deploy "$@" ;;
   bot-install-requirements) shift; cmd_bot_install_requirements "$@" ;;
   bot-delete) shift; cmd_bot_delete "$@" ;;
   bot) shift; cmd_bot_action "$@" ;;
@@ -452,6 +598,7 @@ case "${1:-}" in
   cron-delete) shift; cmd_cron_delete "$@" ;;
   site-logs) shift; cmd_site_logs "$@" ;;
   ssl-status-json) shift; cmd_ssl_status_json "$@" ;;
+  ssl-check-json) shift; cmd_ssl_check_json "$@" ;;
   ssl-renew-all) shift; cmd_ssl_renew_all "$@" ;;
   php-list-json) shift; cmd_php_list_json "$@" ;;
   stats-json) shift; cmd_stats_json "$@" ;;
@@ -460,7 +607,8 @@ case "${1:-}" in
   *) cat >&2 <<EOHELP
 Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
        hyper-host-ctl create-ftp USER PASS [all-sites]
-       hyper-host-ctl bot-create NAME python|node|php|custom COMMAND [MEM_MB]
+       hyper-host-ctl bot-create NAME python|node|php|custom MAIN_FILE [MEM_MB]
+       hyper-host-ctl bot-deploy NAME python MAIN_FILE TMP_BOT TMP_ENV TMP_REQ [MEM_MB]
        hyper-host-ctl backup-run all|sites|bots|db|panel
        hyper-host-ctl dns-apply DOMAIN RECORDS_JSON [NS] [ADMIN]
        hyper-host-ctl cron-set NAME "* * * * *" COMMAND
