@@ -1,44 +1,6 @@
-# HYPER-HOST v7 — фикс PM2-ботов и FTP-mount
+# HYPER-HOST quick start
 
-## Что исправлено
-
-### Боты
-
-- PM2 теперь запускается не от случайного root-контекста, а через отдельного пользователя `hyperbot`.
-- Используется отдельный `PM2_HOME=/var/www/hyper-host-bots/.pm2`.
-- При создании/загрузке бота:
-  1. создаётся папка `/var/www/hyper-host-bots/ИМЯ_БОТА`;
-  2. загружается `bot.py` / `.env` / `requirements.txt`;
-  3. если есть `requirements.txt`, создаётся `venv`;
-  4. ставятся зависимости;
-  5. бот запускается через PM2 с `--name` равным имени бота;
-  6. выполняется `pm2 save`, чтобы бот жил после перезагрузки.
-- Добавлена диагностика:
-
-```bash
-sudo hyper-host-ctl bot-doctor
-```
-
-### Node.js / PM2
-
-Ubuntu 22.04 часто ставит Node.js 12 из стандартного репозитория. Для современного PM2 это плохо. В v7 установщик проверяет версию Node.js и при необходимости ставит Node.js 20.x, потом PM2:
-
-```bash
-npm install -g pm2@latest
-```
-
-### FTP mount
-
-- `repair` больше не использует старый home FTP-пользователя, если он был случайно выставлен в `public_html`.
-- FTP-пользователям принудительно выставляется home:
-
-```text
-/var/www/hyper-host-ftp/hhftp_USERNAME
-```
-
-- старые рекурсивные bind-mount'ы чистятся из `/etc/fstab` и снимаются.
-
-## Как обновить сервер после загрузки v7 в GitHub
+## Обновить сервер из GitHub
 
 ```bash
 cd /root/hyper-hosting-panel
@@ -48,51 +10,50 @@ git checkout main
 git reset --hard origin/main
 git clean -fd
 
+chmod +x install.sh uninstall.sh scripts/hhctl || true
+
 sudo bash install.sh
 sudo hyper-host-ctl repair
-sudo hyper-host-ctl bot-doctor
 sudo hyper-host-ctl sync-json
+sudo hyper-host-ctl bot-doctor
 
 sudo nginx -t
 sudo systemctl reload nginx
 sudo systemctl restart vsftpd
 ```
 
-## Как проверить ботов
+## Настроить SSL при NAT
 
 ```bash
+sudo hyper-host-ctl public-ip set 90.189.208.25
+sudo hyper-host-ctl ssl-check-json hyper-host.pw
+sudo hyper-host-ctl ssl-site hyper-host.pw admin@example.com
+```
+
+Проверь, что на роутере проброшены порты 80 и 443 на внутренний IP сервера.
+
+## Убрать конфликт Telegram getUpdates
+
+```bash
+sudo hyper-host-ctl bot kill-conflicts ИМЯ_БОТА
+sudo hyper-host-ctl bot restart ИМЯ_БОТА
+```
+
+## Обновление v11
+
+```bash
+cd /root/hyper-hosting-panel
+git fetch origin main
+git checkout main
+git reset --hard origin/main
+git clean -fd
+sudo bash install.sh
+sudo hyper-host-ctl repair
+sudo hyper-host-ctl public-ip set 90.189.208.25
+sudo hyper-host-ctl ssl-fix-site hyper-host.pw
+sudo hyper-host-ctl sync-json
 sudo hyper-host-ctl bot-doctor
-sudo hyper-host-ctl bot-list-json
-sudo -u hyperbot -H env HOME=/var/www/hyper-host-bots PM2_HOME=/var/www/hyper-host-bots/.pm2 pm2 list
-```
-
-## Как вручную запустить существующего Python-бота
-
-Допустим бот лежит тут:
-
-```text
-/var/www/hyper-host-bots/mystockbot
-```
-
-Команды:
-
-```bash
-sudo chown -R hyperbot:www-data /var/www/hyper-host-bots/mystockbot
-sudo chmod -R ug+rwX,o+rX /var/www/hyper-host-bots/mystockbot
-
-cd /var/www/hyper-host-bots/mystockbot
-sudo -u hyperbot -H python3 -m venv venv
-sudo -u hyperbot -H ./venv/bin/pip install --upgrade pip wheel setuptools
-sudo -u hyperbot -H ./venv/bin/pip install -r requirements.txt
-
-sudo -u hyperbot -H env HOME=/var/www/hyper-host-bots PM2_HOME=/var/www/hyper-host-bots/.pm2 pm2 delete mystockbot || true
-sudo -u hyperbot -H env HOME=/var/www/hyper-host-bots PM2_HOME=/var/www/hyper-host-bots/.pm2 pm2 start ./venv/bin/python --name mystockbot -- bot.py
-sudo -u hyperbot -H env HOME=/var/www/hyper-host-bots PM2_HOME=/var/www/hyper-host-bots/.pm2 pm2 save
-```
-
-Но после v7 лучше делать через панель или так:
-
-```bash
-sudo hyper-host-ctl bot-create mystockbot python bot.py 512
-sudo hyper-host-ctl bot logs mystockbot
+sudo nginx -t
+sudo systemctl reload nginx
+sudo systemctl restart vsftpd
 ```

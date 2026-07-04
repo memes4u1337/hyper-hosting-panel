@@ -96,3 +96,12 @@ sudo -u hyperbot -H env HOME=/var/www/hyper-host-bots PM2_HOME=/var/www/hyper-ho
 sudo hyper-host-ctl bot-create mystockbot python bot.py 512
 sudo hyper-host-ctl bot logs mystockbot
 ```
+
+
+## HYPER-HOST v8
+
+- В разделе **Боты** добавлено удаление через модальное окно с подтверждением.
+- Можно удалить только PM2-процесс и оставить файлы.
+- Можно удалить PM2-процесс и всю папку бота с сервера; для этого нужно ввести точное имя бота.
+- Установщик перед `chown` автоматически снимает старые рекурсивные FTP bind-mount'ы, из-за которых была ошибка `Circular directory structure`.
+- `repair` больше не должен оставлять mount'ы внутри `public_html/common/...`.

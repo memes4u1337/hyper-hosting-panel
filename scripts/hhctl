@@ -45,6 +45,54 @@ ensure_nologin_shell() {
 ensure_dirs() { mkdir -p "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$BACKUP_DIR" "$BASE_DIR/templates" "$BASE_DIR/data"; }
 nginx_reload() { nginx -t >/dev/null; systemctl reload nginx; }
 
+ensure_acme_location_for_conf() {
+  # Добавляет явное разрешение /.well-known/acme-challenge/ перед запретом dot-папок.
+  # Без этого nginx правило "location ~ /\." может блокировать Let's Encrypt challenge.
+  local conf="$1" root_path="$2"
+  [[ -f "$conf" ]] || return 0
+  grep -q 'HYPER-HOST ACME CHALLENGE' "$conf" && return 0
+  python3 - "$conf" "$root_path" <<'PYACME'
+import sys, pathlib
+conf = pathlib.Path(sys.argv[1])
+root = sys.argv[2]
+text = conf.read_text(encoding='utf-8', errors='ignore')
+block = '''
+    # HYPER-HOST ACME CHALLENGE
+    location ^~ /.well-known/acme-challenge/ {
+        root %s;
+        default_type "text/plain";
+        try_files $uri =404;
+        allow all;
+    }
+''' % root
+needle = '    location ~ /\\. { deny all; }'
+if needle in text:
+    text = text.replace(needle, block + '\n' + needle, 1)
+else:
+    pos = text.rfind('}')
+    if pos != -1:
+        text = text[:pos] + block + text[pos:]
+conf.write_text(text, encoding='utf-8')
+PYACME
+}
+
+ensure_acme_location_for_domain() {
+  local domain="$1" root="$2" conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
+  ensure_acme_location_for_conf "$conf" "$root"
+}
+
+ensure_acme_locations_all() {
+  local conf domain root
+  shopt -s nullglob
+  for conf in "$NGINX_AVAILABLE"/hyper-host-site-*.conf; do
+    domain="${conf##*/hyper-host-site-}"; domain="${domain%.conf}"
+    root="$(awk '/^[[:space:]]*root[[:space:]]+/ {gsub(";", "", $2); print $2; exit}' "$conf" 2>/dev/null || true)"
+    [[ -n "$root" ]] || root="$SITES_DIR/$domain/public_html"
+    ensure_acme_location_for_conf "$conf" "$root"
+  done
+  shopt -u nullglob
+}
+
 
 cleanup_hyper_host_mounts() {
   # Безопасно снимает старые/сломанные bind-mount'ы HYPER-HOST, особенно те,
@@ -156,6 +204,13 @@ server {
     access_log ${SITES_DIR}/${domain}/logs/access.log;
     error_log ${SITES_DIR}/${domain}/logs/error.log;
     location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+    # HYPER-HOST ACME CHALLENGE
+    location ^~ /.well-known/acme-challenge/ {
+        root ${root};
+        default_type "text/plain";
+        try_files \$uri =404;
+        allow all;
+    }
     location ~ \.php$ { include snippets/fastcgi-php.conf; fastcgi_pass unix:${sock}; }
     location ~ /\. { deny all; }
 }
@@ -256,15 +311,20 @@ nginx_domains_for_site() {
 }
 
 local_http_challenge_check() {
-  local domain="$1" root="$2" token body
+  local domain="$1" root="$2" token body url
   [[ -d "$root" ]] || return 2
+  ensure_acme_location_for_domain "$domain" "$root"
+  nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
   mkdir -p "$root/.well-known/acme-challenge"
   token="hyper-host-ssl-test-$(date +%s)-$$"
   printf 'ok-%s' "$token" > "$root/.well-known/acme-challenge/$token"
   chmod -R a+rX "$root/.well-known" 2>/dev/null || true
-  body="$(curl -fsS --max-time 8 -H "Host: $domain" "http://127.0.0.1/.well-known/acme-challenge/$token" 2>/dev/null || true)"
+  for url in "http://127.0.0.1/.well-known/acme-challenge/$token" "http://${SERVER_IP}/.well-known/acme-challenge/$token"; do
+    body="$(curl -fsS --max-time 8 -H "Host: $domain" "$url" 2>/dev/null || true)"
+    [[ "$body" == "ok-$token" ]] && { rm -f "$root/.well-known/acme-challenge/$token" 2>/dev/null || true; return 0; }
+  done
   rm -f "$root/.well-known/acme-challenge/$token" 2>/dev/null || true
-  [[ "$body" == "ok-$token" ]]
+  return 1
 }
 
 ssl_preflight_json() {
@@ -384,6 +444,20 @@ EOFIP
 }
 
 
+
+cmd_ssl_fix_site() {
+  local domain="${1:-}"
+  [[ -n "$domain" ]] || err "Domain required"
+  valid_domain "$domain" || err "Invalid domain"
+  local root="$(site_root_for_domain "$domain")"
+  ensure_acme_location_for_domain "$domain" "$root"
+  mkdir -p "$root/.well-known/acme-challenge"
+  chown -R www-data:www-data "$root/.well-known" 2>/dev/null || true
+  chmod -R a+rX "$root/.well-known" 2>/dev/null || true
+  nginx_reload
+  log "SSL ACME location fixed for $domain -> $root"
+}
+
 cmd_ssl_site() {
   local domain="${1:-}" email="${2:-}"
   [[ -n "$domain" && -n "$email" ]] || err "Domain and email required"
@@ -394,6 +468,9 @@ cmd_ssl_site() {
   ufw allow 443/tcp >/dev/null 2>&1 || true
 
   local check ready problem root log_file d candidates=() cert_domains=() args=()
+  root="$(site_root_for_domain "$domain")"
+  ensure_acme_location_for_domain "$domain" "$root"
+  nginx_reload >/dev/null 2>&1 || true
   check="$(ssl_preflight_json "$domain")"
   ready="$(printf '%s' "$check" | python3 -c 'import sys,json; print(1 if json.load(sys.stdin).get("certbot_ready") else 0)' 2>/dev/null || echo 0)"
   if [[ "$ready" != 1 ]]; then
@@ -545,6 +622,9 @@ make_bot_start_script() {
       cat > "$path/.hyper-start.sh" <<EOS
 #!/usr/bin/env bash
 set -Eeuo pipefail
+LOCK="$path/.hyper-bot.lock"
+exec 9>"$LOCK"
+if ! flock -n 9; then echo "HYPER-HOST: bot $name already running, exit duplicate"; exit 0; fi
 cd "$path"
 if [[ -f .env ]]; then set -a; source .env; set +a; fi
 exec "$interp" "$main_file"
@@ -554,6 +634,9 @@ EOS
       cat > "$path/.hyper-start.sh" <<EOS
 #!/usr/bin/env bash
 set -Eeuo pipefail
+LOCK="$path/.hyper-bot.lock"
+exec 9>"$LOCK"
+if ! flock -n 9; then echo "HYPER-HOST: bot $name already running, exit duplicate"; exit 0; fi
 cd "$path"
 if [[ -f .env ]]; then set -a; source .env; set +a; fi
 exec node "$main_file"
@@ -563,6 +646,9 @@ EOS
       cat > "$path/.hyper-start.sh" <<EOS
 #!/usr/bin/env bash
 set -Eeuo pipefail
+LOCK="$path/.hyper-bot.lock"
+exec 9>"$LOCK"
+if ! flock -n 9; then echo "HYPER-HOST: bot $name already running, exit duplicate"; exit 0; fi
 cd "$path"
 if [[ -f .env ]]; then set -a; source .env; set +a; fi
 exec php "$main_file"
@@ -572,6 +658,9 @@ EOS
       cat > "$path/.hyper-start.sh" <<EOS
 #!/usr/bin/env bash
 set -Eeuo pipefail
+LOCK="$path/.hyper-bot.lock"
+exec 9>"$LOCK"
+if ! flock -n 9; then echo "HYPER-HOST: bot $name already running, exit duplicate"; exit 0; fi
 cd "$path"
 if [[ -f .env ]]; then set -a; source .env; set +a; fi
 exec bash -lc "$main_file"
@@ -603,6 +692,39 @@ bot_install_deps_internal() {
   fi
   fix_web_permissions "$path" "$BOT_USER"
 }
+bot_token_from_path() {
+  local path="$1"
+  [[ -d "$path" ]] || return 0
+  grep -RhoE '[0-9]{8,12}:[A-Za-z0-9_-]{25,}' "$path" 2>/dev/null | head -n1 || true
+}
+
+telegram_delete_webhook_for_token() {
+  local token="$1"
+  [[ -n "$token" ]] || return 0
+  curl -fsS --max-time 6 "https://api.telegram.org/bot${token}/deleteWebhook?drop_pending_updates=true" >/dev/null 2>&1 || true
+}
+
+bot_stop_same_token_local() {
+  local name="$1" path="$2" token other other_name
+  token="$(bot_token_from_path "$path")"
+  [[ -n "$token" ]] || return 0
+  telegram_delete_webhook_for_token "$token"
+  shopt -s nullglob
+  for other in "$BOTS_DIR"/*; do
+    [[ -d "$other" ]] || continue
+    [[ "$other" == "$path" ]] && continue
+    if grep -RqsF "$token" "$other" 2>/dev/null; then
+      other_name="$(basename "$other")"
+      pm2_as_bot stop "$other_name" >/dev/null 2>&1 || true
+      pm2_as_bot delete "$other_name" >/dev/null 2>&1 || true
+      pm2 stop "$other_name" >/dev/null 2>&1 || true
+      pm2 delete "$other_name" >/dev/null 2>&1 || true
+      pkill -f "$other" >/dev/null 2>&1 || true
+    fi
+  done
+  shopt -u nullglob
+}
+
 bot_stop_duplicates() {
   local name="$1" path="$BOTS_DIR/$name"
   # TelegramConflictError возникает, когда один и тот же токен запущен в двух процессах.
@@ -708,12 +830,13 @@ cmd_bot_action() {
   ensure_pm2
   case "$action" in
     start|restart)
-      # Если процесс уже есть, PM2 restart безопасен. Если нет — пробуем запустить через сохранённый .hyper-start.sh.
-      if pm2_as_bot describe "$name" >/dev/null 2>&1; then
-        pm2_as_bot restart "$name"
-      elif [[ -x "$BOTS_DIR/$name/.hyper-start.sh" ]]; then
+      # HYPER-HOST v11: при старте/рестарте всегда гасим локальные дубли,
+      # чтобы Telegram polling не ловил getUpdates conflict из-за второго PM2/systemd процесса.
+      if [[ -x "$BOTS_DIR/$name/.hyper-start.sh" ]]; then
         bot_stop_duplicates "$name"
         (cd "$BOTS_DIR/$name" && pm2_as_bot start ./.hyper-start.sh --name "$name" --interpreter bash)
+      elif pm2_as_bot describe "$name" >/dev/null 2>&1; then
+        pm2_as_bot restart "$name"
       else
         err "PM2 process not found and .hyper-start.sh missing. Создай/запусти бота заново."
       fi
@@ -936,7 +1059,7 @@ PY
 }
 
 cmd_repair() {
-  ensure_dirs; ensure_nologin_shell; ensure_bot_user; cleanup_hyper_host_mounts
+  ensure_dirs; ensure_nologin_shell; ensure_bot_user; cleanup_hyper_host_mounts; ensure_acme_locations_all
   mkdir -p "$BASE_DIR/data" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$BACKUP_DIR" "$BASE_DIR/templates" /etc/hyper-host
   safe_chown_tree www-data:www-data "$PANEL_DIR"
   safe_chown_tree www-data:www-data "$BASE_DIR/data"
@@ -983,6 +1106,7 @@ case "${1:-}" in
   add-site) shift; cmd_add_site "$@" ;;
   delete-site) shift; cmd_delete_site "$@" ;;
   ssl-site) shift; cmd_ssl_site "$@" ;;
+  ssl-fix-site) shift; cmd_ssl_fix_site "$@" ;;
   ssl-ip-selfsigned) shift; cmd_ssl_ip_selfsigned "$@" ;;
   public-ip) shift; cmd_public_ip "$@" ;;
   site-php) shift; cmd_site_php "$@" ;;
@@ -1024,6 +1148,7 @@ Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
        hyper-host-ctl dns-apply DOMAIN RECORDS_JSON [NS] [ADMIN]
        hyper-host-ctl cron-set NAME "* * * * *" COMMAND
        hyper-host-ctl public-ip set 90.189.208.25
+       hyper-host-ctl ssl-fix-site DOMAIN
        hyper-host-ctl ssl-ip-selfsigned 192.168.0.179
        hyper-host-ctl repair
 EOHELP

@@ -9,6 +9,7 @@ SITES_DIR="/var/www/hyper-host-sites"
 BOTS_DIR="/var/www/hyper-host-bots"
 FTP_DIR="/var/www/hyper-host-ftp"
 BACKUP_DIR="/opt/hyper-host/backups"
+CACHE_DIR="/opt/hyper-host/cache"
 DNS_DIR="/etc/bind/hyper-host-zones"
 CONF_DIR="/etc/hyper-host"
 CONTROL_BIN="/usr/local/sbin/hyper-host-ctl"
@@ -106,7 +107,7 @@ fi
 [[ -n "$PHP_FPM_SOCK" ]] || fail "Не найден PHP-FPM socket. Проверь установку php-fpm."
 
 log "Создание папок..."
-mkdir -p "$BASE_DIR/data" "$BASE_DIR/templates" "$BACKUP_DIR" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$DNS_DIR" "$CONF_DIR"
+mkdir -p "$BASE_DIR/data" "$BASE_DIR/templates" "$BACKUP_DIR" "$CACHE_DIR" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$DNS_DIR" "$CONF_DIR"
 
 log "Очистка старых сломанных FTP bind-mount'ов..."
 cleanup_hyper_host_mounts
@@ -129,6 +130,7 @@ SITES_DIR="${SITES_DIR}"
 BOTS_DIR="${BOTS_DIR}"
 FTP_DIR="${FTP_DIR}"
 BACKUP_DIR="${BACKUP_DIR}"
+CACHE_DIR="${CACHE_DIR}"
 DNS_DIR="${DNS_DIR}"
 PHP_FPM_SOCK="${PHP_FPM_SOCK}"
 PHPMYADMIN_PATH="/usr/share/phpmyadmin"
@@ -149,6 +151,7 @@ return [
     'bots_dir' => '${BOTS_DIR}',
     'ftp_dir' => '${FTP_DIR}',
     'backup_dir' => '${BACKUP_DIR}',
+    'cache_dir' => '${CACHE_DIR}',
     'dns_dir' => '${DNS_DIR}',
     'db_path' => '${BASE_DIR}/data/hyperhost.sqlite',
     'php_fpm_sock' => '${PHP_FPM_SOCK}',
@@ -166,6 +169,7 @@ usermod -d "$BOTS_DIR" -s /usr/sbin/nologin hyperbot || true
 usermod -aG www-data hyperbot || true
 safe_chown_tree www-data:www-data "$PANEL_DIR"
 safe_chown_tree www-data:www-data "$BASE_DIR/data"
+safe_chown_tree www-data:www-data "$CACHE_DIR"
 safe_chown_tree www-data:www-data "$SITES_DIR"
 chown root:root "$FTP_DIR" "$BACKUP_DIR"
 safe_chown_tree hyperbot:www-data "$BOTS_DIR"

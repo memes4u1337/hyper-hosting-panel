@@ -264,6 +264,48 @@ function run_ctl_json(array $args, int $timeout = 60): array
     return ['_error' => 'Некорректный JSON от hyper-host-ctl: ' . mb_substr($json ?: (string)$result['output'], 0, 500), '_code' => 1];
 }
 
+
+function hh_cache_dir(): string
+{
+    $dir = (string)app_config('cache_dir', '/opt/hyper-host/cache');
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    return $dir;
+}
+
+function hh_cache_key(array $args): string
+{
+    return hash('sha256', json_encode($args, JSON_UNESCAPED_UNICODE));
+}
+
+function run_ctl_json_cached(array $args, int $timeout = 20, int $ttl = 8): array
+{
+    $dir = hh_cache_dir();
+    $file = $dir . '/' . hh_cache_key($args) . '.json';
+    if ($ttl > 0 && is_file($file) && (time() - filemtime($file) <= $ttl)) {
+        $raw = @file_get_contents($file);
+        $data = json_decode((string)$raw, true);
+        if (is_array($data)) {
+            $data['_cached'] = true;
+            return $data;
+        }
+    }
+    $data = run_ctl_json($args, $timeout);
+    if (!isset($data['_error'])) {
+        @file_put_contents($file, json_encode($data, JSON_UNESCAPED_UNICODE));
+    }
+    return $data;
+}
+
+function hh_clear_cache(): void
+{
+    $dir = hh_cache_dir();
+    foreach (glob($dir . '/*.json') ?: [] as $f) {
+        @unlink($f);
+    }
+}
+
 function percent(float $used, float $total): int
 {
     if ($total <= 0) {
