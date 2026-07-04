@@ -130,6 +130,7 @@ if ! id hyperbot >/dev/null 2>&1; then
   useradd --system --home "$BOTS_DIR" --shell /usr/sbin/nologin hyperbot
 fi
 ensure_nologin_shell
+usermod -d "$BOTS_DIR" -s /usr/sbin/nologin hyperbot || true
 usermod -aG www-data hyperbot || true
 chown -R www-data:www-data "$PANEL_DIR"
 chown -R www-data:www-data "$BASE_DIR/data"
@@ -234,13 +235,23 @@ EOFTP
 systemctl enable vsftpd >/dev/null 2>&1 || true
 systemctl restart vsftpd
 
-log "Настройка PM2 для ботов 24/7..."
-if ! command -v pm2 >/dev/null 2>&1; then
-  npm install -g pm2 || warn "PM2 не установился через npm. Проверь Node/NPM."
+log "Настройка Node.js + PM2 для ботов 24/7..."
+NODE_MAJOR="$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 | grep -E '^[0-9]+$' || echo 0)"
+if [[ "$NODE_MAJOR" -lt 18 ]]; then
+  log "Node.js старый: $(node -v 2>/dev/null || echo none). Ставлю Node.js 20.x для стабильного PM2..."
+  apt-get install -y curl ca-certificates gnupg
+  curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/tmp/hyper-host-nodesource.log 2>&1 || warn "NodeSource setup не отработал, будет fallback на apt nodejs/npm"
+  apt-get install -y nodejs || apt-get install -y nodejs npm
 fi
+if ! command -v pm2 >/dev/null 2>&1; then
+  npm install -g pm2@latest || warn "PM2 не установился через npm. Проверь Node/NPM."
+fi
+mkdir -p "$BOTS_DIR/.pm2"
+chown -R hyperbot:www-data "$BOTS_DIR"
+chmod 2775 "$BOTS_DIR" "$BOTS_DIR/.pm2" 2>/dev/null || true
 if command -v pm2 >/dev/null 2>&1; then
-  pm2 startup systemd -u root --hp /root >/dev/null 2>&1 || true
-  pm2 save >/dev/null 2>&1 || true
+  sudo -u hyperbot -H env HOME="$BOTS_DIR" PM2_HOME="$BOTS_DIR/.pm2" PATH="/usr/local/bin:/usr/bin:/bin" pm2 startup systemd -u hyperbot --hp "$BOTS_DIR" >/dev/null 2>&1 || true
+  sudo -u hyperbot -H env HOME="$BOTS_DIR" PM2_HOME="$BOTS_DIR/.pm2" PATH="/usr/local/bin:/usr/bin:/bin" pm2 save >/dev/null 2>&1 || true
 fi
 
 log "Настройка DNS сервиса bind9..."

@@ -1,4 +1,4 @@
-# HYPER-HOST
+# HYPER-HOST v7
 
 **HYPER-HOST** — личная хостинг-панель для своего Ubuntu/VDS сервера.
 
@@ -77,3 +77,13 @@ sudo hyper-host-ctl sync-json
 sudo nginx -t
 sudo systemctl reload nginx
 ```
+
+
+## v7: PM2-боты исправлены
+
+- PM2 запускается через пользователя `hyperbot`.
+- `PM2_HOME=/var/www/hyper-host-bots/.pm2`.
+- `bot.py`, `.env`, `requirements.txt` загружаются из панели.
+- Перед стартом ставятся зависимости в `venv`.
+- PM2 `--name` равен названию бота.
+- Диагностика: `sudo hyper-host-ctl bot-doctor`.
