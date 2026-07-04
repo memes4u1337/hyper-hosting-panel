@@ -43,6 +43,32 @@ PMA_APP_PASS="$(openssl rand -base64 24 | tr -d '\n')"
 
 export DEBIAN_FRONTEND=noninteractive
 
+
+cleanup_hyper_host_mounts() {
+  local mp pass
+  for pass in 1 2 3 4 5; do
+    mapfile -t _hh_bad_mounts < <(
+      awk '{print $5}' /proc/self/mountinfo 2>/dev/null         | sed 's/\040/ /g'         | grep -E '^/var/www/hyper-host-(ftp|sites)/'         | grep -E '/(common|sites|bots|site)(/|$)'         | sort -r || true
+    )
+    [[ ${#_hh_bad_mounts[@]} -eq 0 ]] && break
+    for mp in "${_hh_bad_mounts[@]}"; do
+      case "$mp" in
+        "/"|"/var"|"/var/www"|"$SITES_DIR"|"$BOTS_DIR"|"$FTP_DIR") continue ;;
+      esac
+      umount -lf "$mp" 2>/dev/null || true
+    done
+  done
+  if [[ -f /etc/fstab ]]; then
+    sed -i.bak -E '/hyper-host-ftp|hyper-host-sites\/.*\/(common|sites|bots|site)|public_html\/(common|sites|bots|site)/d' /etc/fstab 2>/dev/null || true
+  fi
+}
+
+safe_chown_tree() {
+  local owner="$1" path="$2"
+  [[ -e "$path" ]] || return 0
+  cleanup_hyper_host_mounts
+  find "$path" -xdev -exec chown -h "$owner" {} + 2>/dev/null || true
+}
 ensure_nologin_shell() {
   if [[ -x /usr/sbin/nologin ]] && ! grep -qxF /usr/sbin/nologin /etc/shells 2>/dev/null; then
     echo /usr/sbin/nologin >> /etc/shells
@@ -80,6 +106,9 @@ fi
 
 log "Создание папок..."
 mkdir -p "$BASE_DIR/data" "$BASE_DIR/templates" "$BACKUP_DIR" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$DNS_DIR" "$CONF_DIR"
+
+log "Очистка старых сломанных FTP bind-mount'ов..."
+cleanup_hyper_host_mounts
 
 log "Копирование файлов панели..."
 rsync -a --delete "$PROJECT_DIR/src/" "$PANEL_DIR/"
@@ -132,11 +161,11 @@ fi
 ensure_nologin_shell
 usermod -d "$BOTS_DIR" -s /usr/sbin/nologin hyperbot || true
 usermod -aG www-data hyperbot || true
-chown -R www-data:www-data "$PANEL_DIR"
-chown -R www-data:www-data "$BASE_DIR/data"
-chown -R www-data:www-data "$SITES_DIR"
+safe_chown_tree www-data:www-data "$PANEL_DIR"
+safe_chown_tree www-data:www-data "$BASE_DIR/data"
+safe_chown_tree www-data:www-data "$SITES_DIR"
 chown root:root "$FTP_DIR" "$BACKUP_DIR"
-chown -R hyperbot:www-data "$BOTS_DIR"
+safe_chown_tree hyperbot:www-data "$BOTS_DIR"
 chmod 0755 "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$BACKUP_DIR"
 chmod 0770 "$BASE_DIR/data"
 
@@ -247,7 +276,7 @@ if ! command -v pm2 >/dev/null 2>&1; then
   npm install -g pm2@latest || warn "PM2 не установился через npm. Проверь Node/NPM."
 fi
 mkdir -p "$BOTS_DIR/.pm2"
-chown -R hyperbot:www-data "$BOTS_DIR"
+safe_chown_tree hyperbot:www-data "$BOTS_DIR"
 chmod 2775 "$BOTS_DIR" "$BOTS_DIR/.pm2" 2>/dev/null || true
 if command -v pm2 >/dev/null 2>&1; then
   sudo -u hyperbot -H env HOME="$BOTS_DIR" PM2_HOME="$BOTS_DIR/.pm2" PATH="/usr/local/bin:/usr/bin:/bin" pm2 startup systemd -u hyperbot --hp "$BOTS_DIR" >/dev/null 2>&1 || true

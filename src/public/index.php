@@ -113,7 +113,19 @@ function handle_post(string $action): void
                 $id=(int)($_POST['id']??0); $act=(string)($_POST['bot_action']??''); $st=db()->prepare('SELECT * FROM bots WHERE id=?'); $st->execute([$id]); $b=$st->fetch(); if(!$b) throw new RuntimeException('Бот не найден'); $res=($act==='install')?run_ctl(['bot-install-requirements',$b['name'],$b['runtime']],600):run_ctl(['bot',$act,$b['name']],120); if($res['code']!==0) throw new RuntimeException($res['output']); flash('Команда выполнена: '.$act,'success'); redirect('/?page=bots');
             }
             case 'delete_bot': {
-                $id=(int)($_POST['id']??0); $mode=!empty($_POST['delete_files'])?'--delete-files':'--keep-files'; $st=db()->prepare('SELECT * FROM bots WHERE id=?'); $st->execute([$id]); $b=$st->fetch(); if(!$b) throw new RuntimeException('Бот не найден'); $res=run_ctl(['bot-delete',$b['name'],$mode],120); if($res['code']!==0) throw new RuntimeException($res['output']); db()->prepare('DELETE FROM bots WHERE id=?')->execute([$id]); redirect('/?page=bots');
+                $id=(int)($_POST['id']??0);
+                $deleteFiles=!empty($_POST['delete_files']);
+                $st=db()->prepare('SELECT * FROM bots WHERE id=?'); $st->execute([$id]); $b=$st->fetch(); if(!$b) throw new RuntimeException('Бот не найден');
+                if($deleteFiles){
+                    $confirm=trim((string)($_POST['confirm_name']??''));
+                    if($confirm !== (string)$b['name']) throw new RuntimeException('Для удаления файлов введи точное имя бота: '.$b['name']);
+                }
+                $mode=$deleteFiles?'--delete-files':'--keep-files';
+                $res=run_ctl(['bot-delete',$b['name'],$mode],180); if($res['code']!==0) throw new RuntimeException($res['output']);
+                db()->prepare('DELETE FROM bots WHERE id=?')->execute([$id]);
+                add_event('bot', $deleteFiles ? 'Удалён бот с файлами: '.$b['name'] : 'Удалён бот из PM2, файлы сохранены: '.$b['name']);
+                flash($deleteFiles ? 'Бот удалён из PM2 и файлы удалены с сервера' : 'Бот удалён из PM2, файлы оставлены на сервере','success');
+                redirect('/?page=bots');
             }
             case 'save_file': { fm_save_file(); back_to_current(); }
             case 'upload_file': { fm_upload_file(); back_to_current(); }
@@ -268,7 +280,69 @@ function view_ftp(): void
 function pm2_status_map(): array { $d=run_ctl_json(['bot-list-json'],30); $m=[]; if(!isset($d['_error'])) foreach($d as $p) $m[$p['name']]=$p; return $m; }
 function view_bots(): void
 { $bots=db()->query('SELECT * FROM bots ORDER BY id DESC')->fetchAll(); $status=pm2_status_map(); ?>
-<div class="row g-4"><div class="col-lg-4"><div class="panel-card"><h2>Загрузить и запустить бота</h2><p class="muted">Загрузи <code>bot.py</code>, при необходимости <code>.env</code> и <code>requirements.txt</code>. Панель сначала поставит зависимости, потом запустит PM2 24/7 с именем бота.</p><form method="post" enctype="multipart/form-data" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_bot"><input class="form-control" name="name" placeholder="mystockbot" required><select class="form-select" name="runtime"><option value="python">Python</option><option value="node">Node.js</option><option value="php">PHP</option><option value="custom">Custom bash</option></select><input class="form-control" name="main_file" value="bot.py" placeholder="bot.py"><label class="form-label mb-0">Основной файл</label><input class="form-control" type="file" name="bot_file" accept=".py,.js,.php,.sh,.txt"><label class="form-label mb-0">.env — можно пропустить</label><input class="form-control" type="file" name="env_file" accept=".env,.txt"><label class="form-label mb-0">requirements.txt / package.json — можно пропустить</label><input class="form-control" type="file" name="requirements_file" accept=".txt,.json"><input class="form-control" type="number" name="memory_limit_mb" placeholder="RAM лимит, MB, например 512"><button class="btn btn-primary">Загрузить, поставить зависимости и запустить</button></form></div></div><div class="col-lg-8"><div class="panel-card"><h2>Список ботов PM2</h2><div class="table-responsive"><table class="table table-dark-soft align-middle"><thead><tr><th>Бот</th><th>Статус</th><th>Файлы</th><th>Управление</th></tr></thead><tbody><?php foreach($bots as $b): $pm=$status[$b['name']]??[]; $st=$pm['status']??'not_found'; $files=$pm['files']??[]; ?><tr><td><b><?= e($b['name']) ?></b><div class="small muted"><code><?= e($b['path']) ?></code></div><div class="small muted">PM2 name: <code><?= e($b['name']) ?></code></div></td><td><span class="badge text-bg-<?= $st==='online'?'success':'danger' ?>"><?= e($st) ?></span><div class="small muted">RAM: <?= isset($pm['memory'])?e(human_bytes((float)$pm['memory'])):'?' ?></div></td><td><?php if($files): foreach($files as $f): ?><span class="badge text-bg-secondary me-1"><?= e($f) ?></span><?php endforeach; else: ?><span class="muted">нет данных</span><?php endif; ?></td><td class="text-end"><div class="btn-group btn-group-sm"><?php foreach(['start'=>'Start','stop'=>'Stop','restart'=>'Restart','install'=>'Deps'] as $cmd=>$label): ?><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="bot_action"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="bot_action" value="<?= e($cmd) ?>"><button class="btn btn-outline-primary"><?= e($label) ?></button></form><?php endforeach; ?><a class="btn btn-outline-light" href="/?page=bot_logs&id=<?= (int)$b['id'] ?>">Logs</a><a class="btn btn-outline-light" href="/?page=files&root=bots&path=<?= e($b['name']) ?>">Files</a></div></td></tr><?php endforeach; if(!$bots): ?><tr><td colspan="4" class="empty">Ботов пока нет</td></tr><?php endif; ?></tbody></table></div></div></div></div><?php }
+<div class="row g-4">
+  <div class="col-lg-4">
+    <div class="panel-card">
+      <h2>Загрузить и запустить бота</h2>
+      <p class="muted">Загрузи <code>bot.py</code>, при необходимости <code>.env</code> и <code>requirements.txt</code>. Панель сначала поставит зависимости, потом запустит PM2 24/7 с именем бота.</p>
+      <form method="post" enctype="multipart/form-data" class="vstack gap-3">
+        <?= csrf_field() ?><input type="hidden" name="action" value="create_bot">
+        <input class="form-control" name="name" placeholder="mystockbot" required>
+        <select class="form-select" name="runtime"><option value="python">Python</option><option value="node">Node.js</option><option value="php">PHP</option><option value="custom">Custom bash</option></select>
+        <input class="form-control" name="main_file" value="bot.py" placeholder="bot.py">
+        <label class="form-label mb-0">Основной файл</label><input class="form-control" type="file" name="bot_file" accept=".py,.js,.php,.sh,.txt">
+        <label class="form-label mb-0">.env — можно пропустить</label><input class="form-control" type="file" name="env_file" accept=".env,.txt">
+        <label class="form-label mb-0">requirements.txt / package.json — можно пропустить</label><input class="form-control" type="file" name="requirements_file" accept=".txt,.json">
+        <input class="form-control" type="number" name="memory_limit_mb" placeholder="RAM лимит, MB, например 512">
+        <button class="btn btn-primary">Загрузить, поставить зависимости и запустить</button>
+      </form>
+    </div>
+  </div>
+  <div class="col-lg-8">
+    <div class="panel-card">
+      <h2>Список ботов PM2</h2>
+      <div class="table-responsive"><table class="table table-dark-soft align-middle"><thead><tr><th>Бот</th><th>Статус</th><th>Файлы</th><th>Управление</th></tr></thead><tbody>
+      <?php foreach($bots as $b): $pm=$status[$b['name']]??[]; $st=$pm['status']??'not_found'; $files=$pm['files']??[]; ?>
+        <tr>
+          <td><b><?= e($b['name']) ?></b><div class="small muted"><code><?= e($b['path']) ?></code></div><div class="small muted">PM2 name: <code><?= e($b['name']) ?></code></div></td>
+          <td><span class="badge text-bg-<?= $st==='online'?'success':'danger' ?>"><?= e($st) ?></span><div class="small muted">RAM: <?= isset($pm['memory'])?e(human_bytes((float)$pm['memory'])):'?' ?></div></td>
+          <td><?php if($files): foreach($files as $f): ?><span class="badge text-bg-secondary me-1"><?= e($f) ?></span><?php endforeach; else: ?><span class="muted">нет данных</span><?php endif; ?></td>
+          <td class="text-end">
+            <div class="btn-group btn-group-sm flex-wrap">
+              <?php foreach(['start'=>'Start','stop'=>'Stop','restart'=>'Restart','install'=>'Deps'] as $cmd=>$label): ?>
+                <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="bot_action"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="bot_action" value="<?= e($cmd) ?>"><button class="btn btn-outline-primary"><?= e($label) ?></button></form>
+              <?php endforeach; ?>
+              <a class="btn btn-outline-light" href="/?page=bot_logs&id=<?= (int)$b['id'] ?>">Logs</a>
+              <a class="btn btn-outline-light" href="/?page=files&root=bots&path=<?= e($b['name']) ?>">Files</a>
+              <button class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#deleteBot<?= (int)$b['id'] ?>">Delete</button>
+            </div>
+          </td>
+        </tr>
+        <div class="modal fade" id="deleteBot<?= (int)$b['id'] ?>" tabindex="-1">
+          <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+            <div class="modal-header"><h5 class="modal-title">Удалить бота <?= e($b['name']) ?>?</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body">
+              <div class="alert alert-warning">Можно удалить только процесс из PM2 и оставить файлы, либо удалить процесс и всю папку бота с сервера.</div>
+              <div class="small muted mb-2">Папка бота: <code><?= e($b['path']) ?></code></div>
+              <form method="post" class="vstack gap-3">
+                <?= csrf_field() ?><input type="hidden" name="action" value="delete_bot"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>">
+                <button class="btn btn-outline-warning" onclick="return confirm('Удалить бота только из PM2? Файлы останутся на сервере.')">Удалить только из PM2, файлы оставить</button>
+              </form>
+              <hr>
+              <form method="post" class="vstack gap-3">
+                <?= csrf_field() ?><input type="hidden" name="action" value="delete_bot"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="delete_files" value="1">
+                <label class="form-label">Чтобы удалить файлы, введи точное имя бота:</label>
+                <input class="form-control" name="confirm_name" placeholder="<?= e($b['name']) ?>" required>
+                <button class="btn btn-danger" onclick="return confirm('ТОЧНО удалить PM2-процесс и все файлы этого бота с сервера?')">Удалить PM2 + файлы с сервера</button>
+              </form>
+            </div>
+          </div></div>
+        </div>
+      <?php endforeach; if(!$bots): ?><tr><td colspan="4" class="empty">Ботов пока нет</td></tr><?php endif; ?>
+      </tbody></table></div>
+    </div>
+  </div>
+</div><?php }
 function view_bot_logs(): void { $id=(int)($_GET['id']??0); $st=db()->prepare('SELECT * FROM bots WHERE id=?'); $st->execute([$id]); $b=$st->fetch(); if(!$b){echo '<div class="panel-card empty">Бот не найден</div>';return;} $res=run_ctl(['bot','logs',$b['name']],30); ?><div class="panel-card"><div class="card-title-row"><h2>Логи PM2: <?= e($b['name']) ?></h2><a class="btn btn-soft" href="/?page=bots">Назад</a></div><pre class="logs"><?= e($res['output']?:'Логов пока нет') ?></pre></div><?php }
 
 function view_backups(): void { $jobs=db()->query('SELECT * FROM backup_jobs ORDER BY id DESC')->fetchAll(); $files=run_ctl_json(['backup-list-json'],30); ?>

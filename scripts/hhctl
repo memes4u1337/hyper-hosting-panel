@@ -44,12 +44,48 @@ ensure_nologin_shell() {
 ensure_dirs() { mkdir -p "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$BACKUP_DIR" "$BASE_DIR/templates" "$BASE_DIR/data"; }
 nginx_reload() { nginx -t >/dev/null; systemctl reload nginx; }
 
+
+cleanup_hyper_host_mounts() {
+  # Безопасно снимает старые/сломанные bind-mount'ы HYPER-HOST, особенно те,
+  # которые попали внутрь public_html и создают циклы common/sites/.../common/bots.
+  local mp pass
+  for pass in 1 2 3 4 5; do
+    mapfile -t _hh_bad_mounts < <(
+      awk '{print $5}' /proc/self/mountinfo 2>/dev/null         | sed 's/\040/ /g'         | grep -E '^/var/www/hyper-host-(ftp|sites)/'         | grep -E '/(common|sites|bots|site)(/|$)'         | sort -r || true
+    )
+    [[ ${#_hh_bad_mounts[@]} -eq 0 ]] && break
+    for mp in "${_hh_bad_mounts[@]}"; do
+      case "$mp" in
+        "/"|"/var"|"/var/www"|"$SITES_DIR"|"$BOTS_DIR"|"$FTP_DIR") continue ;;
+      esac
+      umount -lf "$mp" 2>/dev/null || true
+    done
+  done
+  if [[ -f /etc/fstab ]]; then
+    sed -i.bak -E '/hyper-host-ftp|hyper-host-sites\/.*\/(common|sites|bots|site)|public_html\/(common|sites|bots|site)/d' /etc/fstab 2>/dev/null || true
+  fi
+}
+
+safe_chown_tree() {
+  local owner="$1" path="$2"
+  [[ -e "$path" ]] || return 0
+  cleanup_hyper_host_mounts
+  find "$path" -xdev -exec chown -h "$owner" {} + 2>/dev/null || true
+}
+
+safe_chmod_tree() {
+  local mode="$1" path="$2"
+  [[ -e "$path" ]] || return 0
+  cleanup_hyper_host_mounts
+  find "$path" -xdev -exec chmod "$mode" {} + 2>/dev/null || true
+}
 fix_web_permissions() {
   local path="$1" user="${2:-}"
   [[ -e "$path" ]] || return 0
-  chgrp -R www-data "$path" 2>/dev/null || true
-  chmod -R u+rwX,g+rwX,o+rX "$path" 2>/dev/null || true
-  find "$path" -type d -exec chmod g+s {} + 2>/dev/null || true
+  cleanup_hyper_host_mounts
+  find "$path" -xdev -exec chgrp www-data {} + 2>/dev/null || true
+  find "$path" -xdev -exec chmod u+rwX,g+rwX,o+rX {} + 2>/dev/null || true
+  find "$path" -xdev -type d -exec chmod g+s {} + 2>/dev/null || true
   if command -v setfacl >/dev/null 2>&1; then
     setfacl -R -m u:www-data:rwx,g:www-data:rwx "$path" 2>/dev/null || true
     setfacl -R -d -m u:www-data:rwx,g:www-data:rwx "$path" 2>/dev/null || true
@@ -182,7 +218,7 @@ cmd_site_php() {
 }
 
 cmd_create_ftp() {
-  ensure_dirs; ensure_nologin_shell
+  ensure_dirs; ensure_nologin_shell; cleanup_hyper_host_mounts
   local username="${1:-}" password="${2:-}" mode="${3:-common}"
   [[ -n "$username" && -n "$password" ]] || err "Username and password required"; valid_name "$username" || err "Invalid ftp username"
   [[ "$username" == hhftp_* ]] || username="hhftp_${username}"
@@ -404,7 +440,23 @@ cmd_bot_deploy() {
   log "Bot deployed and started: $name / main=$main_file"
 }
 cmd_bot_install_requirements() { local name="${1:-}"; [[ -n "$name" ]] || err "Bot name required"; valid_name "$name" || err "Invalid bot"; local runtime="${2:-python}"; ensure_pm2; bot_install_deps_internal "$name" "$runtime"; fix_web_permissions "$BOTS_DIR/$name" "$BOT_USER"; }
-cmd_bot_delete() { local name="${1:-}" mode="${2:---keep-files}"; [[ -n "$name" ]] || err "Bot name required"; valid_name "$name" || err "Invalid bot"; ensure_pm2; pm2_as_bot stop "$name" >/dev/null 2>&1 || true; pm2_as_bot delete "$name" >/dev/null 2>&1 || true; pm2_as_bot save >/dev/null 2>&1 || true; [[ "$mode" == "--delete-files" ]] && rm -rf "$BOTS_DIR/$name"; log "Bot deleted: $name"; }
+cmd_bot_delete() {
+  local name="${1:-}" mode="${2:---keep-files}"
+  [[ -n "$name" ]] || err "Bot name required"; valid_name "$name" || err "Invalid bot"
+  ensure_pm2
+  pm2_as_bot stop "$name" >/dev/null 2>&1 || true
+  pm2_as_bot delete "$name" >/dev/null 2>&1 || true
+  pm2_as_bot save >/dev/null 2>&1 || true
+  if [[ "$mode" == "--delete-files" || "$mode" == "--purge" ]]; then
+    local bot_path="$BOTS_DIR/$name"
+    if [[ -d "$bot_path" && "$bot_path" == "$BOTS_DIR/"* ]]; then
+      rm -rf --one-file-system "$bot_path"
+    fi
+    log "Bot deleted: $name / files removed"
+  else
+    log "Bot deleted from PM2 only: $name / files kept"
+  fi
+}
 cmd_bot_action() { local action="${1:-}" name="${2:-}"; [[ "$action" =~ ^(start|stop|restart|status|logs)$ ]] || err "Invalid bot action"; [[ -n "$name" ]] || err "Bot name required"; valid_name "$name" || err "Invalid bot"; ensure_pm2; case "$action" in start|stop|restart) pm2_as_bot "$action" "$name"; pm2_as_bot save >/dev/null 2>&1 || true;; status) BOTNAME="$name" pm2_as_bot jlist | BOTNAME="$name" python3 -c 'import sys,json,os; data=json.load(sys.stdin); name=os.environ.get("BOTNAME",""); print(next((p.get("pm2_env",{}).get("status","") for p in data if p.get("name")==name), "not_found"))';; logs) pm2_as_bot logs "$name" --lines 250 --nostream || true;; esac; }
 cmd_bot_list_json() {
   ensure_pm2
@@ -606,9 +658,10 @@ PY
 }
 
 cmd_repair() {
-  ensure_dirs; ensure_nologin_shell; ensure_bot_user
+  ensure_dirs; ensure_nologin_shell; ensure_bot_user; cleanup_hyper_host_mounts
   mkdir -p "$BASE_DIR/data" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$BACKUP_DIR" "$BASE_DIR/templates" /etc/hyper-host
-  chown -R www-data:www-data "$PANEL_DIR" "$BASE_DIR/data" 2>/dev/null || true
+  safe_chown_tree www-data:www-data "$PANEL_DIR"
+  safe_chown_tree www-data:www-data "$BASE_DIR/data"
   chmod 0770 "$BASE_DIR/data" 2>/dev/null || true
   if [[ -f "$BASE_DIR/data/hyperhost.sqlite" ]]; then chown www-data:www-data "$BASE_DIR/data/hyperhost.sqlite" "$BASE_DIR/data/hyperhost.sqlite"-* 2>/dev/null || true; chmod 0660 "$BASE_DIR/data/hyperhost.sqlite" "$BASE_DIR/data/hyperhost.sqlite"-* 2>/dev/null || true; fi
   fix_web_permissions "$SITES_DIR"; fix_web_permissions "$BOTS_DIR" "$BOT_USER"; chmod 0755 "$FTP_DIR" "$BACKUP_DIR" 2>/dev/null || true
