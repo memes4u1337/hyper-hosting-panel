@@ -85,7 +85,7 @@ apt-get install -y \
   ca-certificates curl git unzip rsync sudo openssl ufw \
   nginx mariadb-server \
   php-fpm php-cli php-sqlite3 php-mysql php-curl php-mbstring php-xml php-zip php-gd \
-  vsftpd certbot python3-certbot-nginx python3 python3-venv python3-pip nodejs npm acl cron bind9 dnsutils
+  vsftpd certbot python3-certbot-nginx python3 python3-venv python3-pip acl cron bind9 dnsutils
 
 log "Установка phpMyAdmin..."
 if ! dpkg -s phpmyadmin >/dev/null 2>&1; then
@@ -265,14 +265,30 @@ systemctl enable vsftpd >/dev/null 2>&1 || true
 systemctl restart vsftpd
 
 log "Настройка Node.js + PM2 для ботов 24/7..."
-NODE_MAJOR="$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 | grep -E '^[0-9]+$' || echo 0)"
-if [[ "$NODE_MAJOR" -lt 18 ]]; then
-  log "Node.js старый: $(node -v 2>/dev/null || echo none). Ставлю Node.js 20.x для стабильного PM2..."
-  apt-get install -y curl ca-certificates gnupg
-  curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/tmp/hyper-host-nodesource.log 2>&1 || warn "NodeSource setup не отработал, будет fallback на apt nodejs/npm"
-  apt-get install -y nodejs || apt-get install -y nodejs npm
+node_major() { node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 | grep -E '^[0-9]+$' || echo 0; }
+fix_node_packages() {
+  dpkg --configure -a >/tmp/hyper-host-dpkg-configure.log 2>&1 || true
+  apt-get -f install -y >/tmp/hyper-host-apt-fix.log 2>&1 || true
+  local major; major="$(node_major)"
+  if [[ "$major" -lt 18 ]]; then
+    log "Node.js старый или сломан: $(node -v 2>/dev/null || echo none). Чищу старые node/npm/libnode-dev и ставлю Node.js 20.x..."
+    apt-get remove -y npm nodejs libnode-dev node-gyp nodejs-doc >/tmp/hyper-host-node-remove.log 2>&1 || true
+    apt-get autoremove -y >/tmp/hyper-host-node-autoremove.log 2>&1 || true
+    rm -f /etc/apt/sources.list.d/nodesource*.list /etc/apt/keyrings/nodesource.gpg 2>/dev/null || true
+    apt-get install -y curl ca-certificates gnupg >/dev/null 2>&1 || true
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/tmp/hyper-host-nodesource.log 2>&1 || warn "NodeSource setup не отработал. Лог: /tmp/hyper-host-nodesource.log"
+    apt-get update -y >/dev/null 2>&1 || true
+    apt-get install -y nodejs >/tmp/hyper-host-node-install.log 2>&1 || {
+      warn "Node.js 20 не установился. Лог: /tmp/hyper-host-node-install.log. Пробую fallback apt nodejs/npm."
+      apt-get install -y nodejs npm || true
+    }
+  fi
+}
+fix_node_packages
+if ! command -v npm >/dev/null 2>&1; then
+  apt-get install -y npm || true
 fi
-if ! command -v pm2 >/dev/null 2>&1; then
+if command -v npm >/dev/null 2>&1 && ! command -v pm2 >/dev/null 2>&1; then
   npm install -g pm2@latest || warn "PM2 не установился через npm. Проверь Node/NPM."
 fi
 mkdir -p "$BOTS_DIR/.pm2"

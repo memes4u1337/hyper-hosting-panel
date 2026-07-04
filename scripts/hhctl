@@ -179,35 +179,127 @@ dns_points_here() {
   echo "$ips" | grep -qxF "$SERVER_IP" && return 0
   return 1
 }
-cmd_ssl_check_json() {
-  local domain="${1:-}"; [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain"
-  DOMAIN="$domain" SERVER_IP="$SERVER_IP" PUBLIC_IP="$(public_ip)" python3 - <<'PYSSL'
-import os,subprocess,json
-D=os.environ['DOMAIN']
-def dig(t):
-    try: return [x.strip() for x in subprocess.check_output(['dig','+short',t,D],text=True,stderr=subprocess.DEVNULL).splitlines() if x.strip()]
-    except Exception: return []
-a=dig('A'); aaaa=dig('AAAA')
-public=os.environ.get('PUBLIC_IP',''); server=os.environ.get('SERVER_IP','')
-points=bool(set(a+aaaa) & {public,server})
-print(json.dumps({'domain':D,'a':a,'aaaa':aaaa,'server_ip':server,'public_ip':public,'points_here':points,'has_records':bool(a or aaaa)},ensure_ascii=False))
+site_root_for_domain() {
+  local domain="$1" conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf" root=""
+  if [[ -f "$conf" ]]; then
+    root="$(awk '/^[[:space:]]*root[[:space:]]+/ {gsub(";", "", $2); print $2; exit}' "$conf" 2>/dev/null || true)"
+  fi
+  [[ -n "$root" ]] || root="$SITES_DIR/$domain/public_html"
+  echo "$root"
+}
+
+nginx_domains_for_site() {
+  local domain="$1" conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
+  if [[ -f "$conf" ]]; then
+    awk '/^[[:space:]]*server_name[[:space:]]+/ {for(i=2;i<=NF;i++){gsub(";", "", $i); print $i}}' "$conf" 2>/dev/null | sort -u
+  else
+    echo "$domain"
+  fi
+}
+
+local_http_challenge_check() {
+  local domain="$1" root="$2" token body
+  [[ -d "$root" ]] || return 2
+  mkdir -p "$root/.well-known/acme-challenge"
+  token="hyper-host-ssl-test-$(date +%s)-$$"
+  printf 'ok-%s' "$token" > "$root/.well-known/acme-challenge/$token"
+  chmod -R a+rX "$root/.well-known" 2>/dev/null || true
+  body="$(curl -fsS --max-time 8 -H "Host: $domain" "http://127.0.0.1/.well-known/acme-challenge/$token" 2>/dev/null || true)"
+  rm -f "$root/.well-known/acme-challenge/$token" 2>/dev/null || true
+  [[ "$body" == "ok-$token" ]]
+}
+
+ssl_preflight_json() {
+  local domain="$1" root pub arec aaaarec ips dns_status nginx_ok http_ok has_site certbot_ready problem required_a
+  root="$(site_root_for_domain "$domain")"
+  pub="$(public_ip)"
+  arec="$(dig +short A "$domain" 2>/dev/null | sed '/^$/d' | sort -u || true)"
+  aaaarec="$(dig +short AAAA "$domain" 2>/dev/null | sed '/^$/d' | sort -u || true)"
+  ips="$(printf '%s\n%s\n' "$arec" "$aaaarec" | sed '/^$/d' | sort -u)"
+  dns_status="bad"
+  if [[ -z "$ips" ]]; then dns_status="missing"; elif dns_points_here "$domain"; then dns_status="ok"; else dns_status="wrong_ip"; fi
+  nginx_ok=0; nginx -t >/dev/null 2>&1 && nginx_ok=1
+  has_site=0; [[ -f "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" || -d "$root" ]] && has_site=1
+  http_ok=0; [[ "$nginx_ok" == 1 ]] && local_http_challenge_check "$domain" "$root" && http_ok=1
+  certbot_ready=0; [[ "$dns_status" == ok && "$nginx_ok" == 1 && "$http_ok" == 1 && "$has_site" == 1 ]] && certbot_ready=1
+  problem=""
+  required_a="A    $domain    $pub"
+  if [[ "$dns_status" == missing ]]; then problem="У домена нет публичных A/AAAA записей. Добавь запись: $required_a"; fi
+  if [[ "$dns_status" == wrong_ip ]]; then problem="DNS домена указывает не на этот сервер. Сейчас: ${ips//$'\n'/, }. Нужно: $required_a"; fi
+  if [[ "$nginx_ok" != 1 ]]; then problem="Nginx config не проходит проверку: sudo nginx -t"; fi
+  if [[ "$has_site" != 1 ]]; then problem="Сайт не найден в HYPER-HOST. Сначала создай сайт: $domain"; fi
+  if [[ "$http_ok" != 1 && "$dns_status" == ok && "$nginx_ok" == 1 ]]; then problem="Nginx локально не отдаёт /.well-known/acme-challenge для Host: $domain. Проверь root сайта и конфиг."; fi
+  DOMAIN="$domain" ROOT="$root" PUBLIC_IP="$pub" SERVER_IP="$SERVER_IP" A_RECORDS="$arec" AAAA_RECORDS="$aaaarec" DNS_STATUS="$dns_status" NGINX_OK="$nginx_ok" HTTP_OK="$http_ok" HAS_SITE="$has_site" CERTBOT_READY="$certbot_ready" PROBLEM="$problem" REQUIRED_A="$required_a" python3 - <<'PYSSL'
+import os,json
+split=lambda s:[x for x in s.splitlines() if x.strip()]
+print(json.dumps({
+ 'domain':os.environ['DOMAIN'],
+ 'root':os.environ['ROOT'],
+ 'server_ip':os.environ.get('SERVER_IP',''),
+ 'public_ip':os.environ.get('PUBLIC_IP',''),
+ 'a':split(os.environ.get('A_RECORDS','')),
+ 'aaaa':split(os.environ.get('AAAA_RECORDS','')),
+ 'dns_status':os.environ.get('DNS_STATUS'),
+ 'points_here':os.environ.get('DNS_STATUS')=='ok',
+ 'nginx_ok':os.environ.get('NGINX_OK')=='1',
+ 'http_challenge_ok':os.environ.get('HTTP_OK')=='1',
+ 'site_exists':os.environ.get('HAS_SITE')=='1',
+ 'certbot_ready':os.environ.get('CERTBOT_READY')=='1',
+ 'required_a':os.environ.get('REQUIRED_A',''),
+ 'problem':os.environ.get('PROBLEM',''),
+}, ensure_ascii=False))
 PYSSL
 }
+
+cmd_ssl_check_json() {
+  local domain="${1:-}"
+  [[ -n "$domain" ]] || err "Domain required"
+  valid_domain "$domain" || err "Invalid domain"
+  ssl_preflight_json "$domain"
+}
+
 cmd_ssl_site() {
   local domain="${1:-}" email="${2:-}"
   [[ -n "$domain" && -n "$email" ]] || err "Domain and email required"
   valid_domain "$domain" || err "Invalid domain"
-  local pub ips
-  pub="$(public_ip)"; ips="$(resolve_domain_ips "$domain")"
-  if [[ -z "$ips" ]]; then
-    err "SSL не выпущен: у домена $domain нет публичных A/AAAA записей. Добавь DNS A: $domain -> $pub, подожди обновления DNS и повтори выпуск SSL. Проверка: dig +short $domain"
+  cleanup_hyper_host_mounts
+  ensure_dirs
+  ufw allow 80/tcp >/dev/null 2>&1 || true
+  ufw allow 443/tcp >/dev/null 2>&1 || true
+
+  local check ready problem root log_file d candidates=() cert_domains=() args=()
+  check="$(ssl_preflight_json "$domain")"
+  ready="$(printf '%s' "$check" | python3 -c 'import sys,json; print(1 if json.load(sys.stdin).get("certbot_ready") else 0)' 2>/dev/null || echo 0)"
+  if [[ "$ready" != 1 ]]; then
+    problem="$(printf '%s' "$check" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("problem","SSL preflight failed"))' 2>/dev/null || echo "SSL preflight failed")"
+    echo "$check" >&2
+    err "SSL не выпущен: $problem"
   fi
-  if ! dns_points_here "$domain"; then
-    err "SSL не выпущен: DNS $domain сейчас указывает не на этот сервер. Текущие DNS: ${ips//$'\n'/, }. IP сервера: $pub. Исправь A-запись на $pub и повтори."
+
+  root="$(site_root_for_domain "$domain")"
+  while read -r d; do
+    [[ -z "$d" ]] && continue
+    valid_domain "$d" || continue
+    if dns_points_here "$d" && local_http_challenge_check "$d" "$root"; then
+      candidates+=("$d")
+    fi
+  done < <(nginx_domains_for_site "$domain")
+  candidates+=("$domain")
+  mapfile -t cert_domains < <(printf '%s\n' "${candidates[@]}" | sed '/^$/d' | sort -u)
+  [[ ${#cert_domains[@]} -gt 0 ]] || cert_domains=("$domain")
+
+  log_file="/var/log/letsencrypt/hyper-host-${domain}-$(date +%F-%H%M%S).log"
+  mkdir -p /var/log/letsencrypt
+  args=(certbot --nginx --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --expand --redirect --preferred-challenges http --cert-name "$domain")
+  for d in "${cert_domains[@]}"; do args+=(-d "$d"); done
+
+  log "SSL preflight OK: ${cert_domains[*]} -> $root"
+  if ! "${args[@]}" >"$log_file" 2>&1; then
+    tail -n 120 "$log_file" >&2 || true
+    err "SSL не выпущен: Certbot вернул ошибку. Лог: $log_file. Проверь DNS, 80/443 порты и что домен доступен из интернета."
   fi
-  certbot --nginx -d "$domain" --non-interactive --agree-tos -m "$email" --redirect
   nginx_reload
-  log "SSL issued for $domain"
+  log "SSL issued for ${cert_domains[*]} / log: $log_file"
 }
 
 cmd_site_php() {
@@ -289,13 +381,19 @@ node_major() { node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 | grep -E '^[0-9
 ensure_node_runtime() {
   apt-get update -y >/dev/null 2>&1 || true
   apt-get install -y curl ca-certificates gnupg >/dev/null 2>&1 || true
+  dpkg --configure -a >/tmp/hyper-host-dpkg-configure.log 2>&1 || true
+  apt-get -f install -y >/tmp/hyper-host-apt-fix.log 2>&1 || true
   local major; major="$(node_major)"
   if [[ "$major" -lt "$NODE_MAJOR_MIN" ]]; then
-    log "Node.js слишком старый или не установлен: $(node -v 2>/dev/null || echo none). Ставлю Node.js 20.x для PM2."
+    log "Node.js слишком старый или сломан: $(node -v 2>/dev/null || echo none). Чищу старые node/npm/libnode-dev и ставлю Node.js 20.x."
+    apt-get remove -y npm nodejs libnode-dev node-gyp nodejs-doc >/tmp/hyper-host-node-remove.log 2>&1 || true
+    apt-get autoremove -y >/tmp/hyper-host-node-autoremove.log 2>&1 || true
+    rm -f /etc/apt/sources.list.d/nodesource*.list /etc/apt/keyrings/nodesource.gpg 2>/dev/null || true
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/tmp/hyper-host-nodesource.log 2>&1 || true
-    apt-get install -y nodejs >/tmp/hyper-host-node-install.log 2>&1 || apt-get install -y nodejs npm
+    apt-get update -y >/dev/null 2>&1 || true
+    apt-get install -y nodejs >/tmp/hyper-host-node-install.log 2>&1 || apt-get install -y nodejs npm || true
   fi
-  command -v npm >/dev/null 2>&1 || apt-get install -y npm
+  command -v npm >/dev/null 2>&1 || apt-get install -y npm || true
 }
 ensure_pm2() {
   command -v python3 >/dev/null 2>&1 || apt-get install -y python3

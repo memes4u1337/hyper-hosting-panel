@@ -96,3 +96,17 @@ sudo systemctl reload nginx
 - Можно удалить PM2-процесс и всю папку бота с сервера; для этого нужно ввести точное имя бота.
 - Установщик перед `chown` автоматически снимает старые рекурсивные FTP bind-mount'ы, из-за которых была ошибка `Circular directory structure`.
 - `repair` больше не должен оставлять mount'ы внутри `public_html/common/...`.
+
+## v9: SSL preflight
+
+В v9 выпуск SSL стал безопаснее: перед Certbot панель проверяет DNS, публичный IP, Nginx, HTTP challenge и только потом запускает Certbot. Проверка:
+
+```bash
+sudo hyper-host-ctl ssl-check-json example.com
+```
+
+Выпуск:
+
+```bash
+sudo hyper-host-ctl ssl-site example.com admin@example.com
+```
