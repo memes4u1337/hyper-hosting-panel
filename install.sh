@@ -116,12 +116,14 @@ chown -R www-data:www-data "$BASE_DIR/data"
 chown -R www-data:www-data "$SITES_DIR"
 chown -R hyperbot:www-data "$BOTS_DIR"
 chmod 0755 "$SITES_DIR" "$BOTS_DIR"
-chmod 0750 "$BASE_DIR/data"
+chmod 0770 "$BASE_DIR/data"
 
 log "Инициализация базы панели..."
 php "$PANEL_DIR/app/setup_db.php" "$ADMIN_USER" "$ADMIN_PASS"
 chown www-data:www-data "$BASE_DIR/data/hyperhost.sqlite"
-chmod 0640 "$BASE_DIR/data/hyperhost.sqlite"
+chmod 0660 "$BASE_DIR/data/hyperhost.sqlite"
+chown www-data:www-data "$BASE_DIR/data/hyperhost.sqlite"-* 2>/dev/null || true
+chmod 0660 "$BASE_DIR/data/hyperhost.sqlite"-* 2>/dev/null || true
 
 log "Настройка sudo для панели..."
 cat > /etc/sudoers.d/hyper-host <<EOSUDO
@@ -222,6 +224,9 @@ ufw allow 443/tcp >/dev/null 2>&1 || true
 ufw allow 21/tcp >/dev/null 2>&1 || true
 ufw allow 40000:40100/tcp >/dev/null 2>&1 || true
 # 3306 открывается через настройки панели, когда включаешь внешние подключения.
+
+log "Финальный ремонт прав и сервисов..."
+/usr/local/sbin/hyper-host-ctl repair >/dev/null || warn "Repair-команда не выполнилась, проверь вручную: sudo hyper-host-ctl repair"
 
 log "Проверка панели..."
 php -l "$PANEL_DIR/public/index.php" >/dev/null

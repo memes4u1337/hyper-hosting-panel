@@ -5,6 +5,7 @@ CONF="/etc/hyper-host/hyper-host.conf"
 [[ -f "$CONF" ]] || { echo "Config not found: $CONF" >&2; exit 2; }
 # shellcheck disable=SC1090
 source "$CONF"
+export PANEL_NAME POWERED_BY SERVER_IP PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR PHP_FPM_SOCK PHPMYADMIN_PATH
 
 NGINX_AVAILABLE="/etc/nginx/sites-available"
 NGINX_ENABLED="/etc/nginx/sites-enabled"
@@ -339,6 +340,185 @@ cmd_bot_action() {
   esac
 }
 
+
+cmd_stats_json() {
+  python3 - <<'PY'
+import os, json, subprocess, shutil
+
+def run(cmd):
+    try:
+        return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        return ""
+
+def service(name):
+    out = run(f"systemctl is-active {name}")
+    return out or "inactive"
+
+def meminfo():
+    data = {}
+    try:
+        with open('/proc/meminfo', 'r', encoding='utf-8') as f:
+            for line in f:
+                k, v = line.split(':', 1)
+                data[k] = int(v.strip().split()[0]) * 1024
+    except Exception:
+        pass
+    total = data.get('MemTotal', 0)
+    available = data.get('MemAvailable', 0)
+    used = max(0, total - available)
+    return total, used, available
+
+def cpu_model():
+    try:
+        for line in open('/proc/cpuinfo', 'r', encoding='utf-8', errors='ignore'):
+            if line.lower().startswith('model name'):
+                return line.split(':', 1)[1].strip()
+    except Exception:
+        pass
+    return run('uname -m') or 'unknown'
+
+def uptime_text():
+    try:
+        sec = int(float(open('/proc/uptime').read().split()[0]))
+        d, sec = divmod(sec, 86400)
+        h, sec = divmod(sec, 3600)
+        m, _ = divmod(sec, 60)
+        if d:
+            return f"{d}д {h}ч {m}м"
+        return f"{h}ч {m}м"
+    except Exception:
+        return "unknown"
+
+du = shutil.disk_usage('/')
+mt, mu, ma = meminfo()
+load = os.getloadavg() if hasattr(os, 'getloadavg') else (0,0,0)
+php_units = run("systemctl list-units --type=service --state=running --no-legend 'php*-fpm.service' | awk '{print $1}' | head -n1")
+php_service = php_units or 'php-fpm'
+
+result = {
+    'server_ip': os.environ.get('SERVER_IP', ''),
+    'panel_domain': os.environ.get('PANEL_DOMAIN', ''),
+    'cpu_model': cpu_model(),
+    'cpu_cores': os.cpu_count() or 0,
+    'load1': load[0], 'load5': load[1], 'load15': load[2],
+    'uptime': uptime_text(),
+    'disk_total': du.total, 'disk_used': du.used, 'disk_free': du.free,
+    'mem_total': mt, 'mem_used': mu, 'mem_available': ma,
+    'services': {
+        'nginx': service('nginx'),
+        'mariadb': service('mariadb'),
+        'vsftpd': service('vsftpd'),
+        'php_fpm': service(php_service),
+    },
+    'paths': {
+        'panel': os.environ.get('PANEL_DIR', ''),
+        'sites': os.environ.get('SITES_DIR', ''),
+        'bots': os.environ.get('BOTS_DIR', ''),
+        'phpmyadmin': os.environ.get('PHPMYADMIN_PATH', '/usr/share/phpmyadmin'),
+    }
+}
+print(json.dumps(result, ensure_ascii=False))
+PY
+}
+
+cmd_sync_json() {
+  python3 - <<'PY'
+import os, json, glob, pwd, re, subprocess
+
+SITES_DIR=os.environ.get('SITES_DIR','/var/www/hyper-host-sites')
+BOTS_DIR=os.environ.get('BOTS_DIR','/var/www/hyper-host-bots')
+NGINX_AVAILABLE='/etc/nginx/sites-available'
+
+sites=[]
+for public_html in sorted(glob.glob(os.path.join(SITES_DIR, '*', 'public_html'))):
+    domain=os.path.basename(os.path.dirname(public_html))
+    if not re.match(r'^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$', domain):
+        continue
+    aliases=[]
+    conf=os.path.join(NGINX_AVAILABLE, f'hyper-host-site-{domain}.conf')
+    if os.path.exists(conf):
+        text=open(conf, encoding='utf-8', errors='ignore').read()
+        m=re.search(r'server_name\s+([^;]+);', text)
+        if m:
+            names=[x.strip() for x in m.group(1).split() if x.strip()]
+            aliases=[x for x in names if x != domain]
+    ssl=1 if os.path.exists(f'/etc/letsencrypt/live/{domain}/fullchain.pem') else 0
+    sites.append({'domain':domain,'aliases':','.join(aliases),'root_path':public_html,'ssl_enabled':ssl})
+
+ftp=[]
+for u in pwd.getpwall():
+    if u.pw_name.startswith('hhftp_'):
+        ftp.append({'username':u.pw_name,'target_path':u.pw_dir})
+
+bots=[]
+for svc in sorted(glob.glob('/etc/systemd/system/hyperbot-*.service')):
+    name=os.path.basename(svc)[len('hyperbot-'):-len('.service')]
+    if not re.match(r'^[A-Za-z0-9_][A-Za-z0-9_-]{1,63}$', name):
+        continue
+    text=open(svc, encoding='utf-8', errors='ignore').read()
+    mpath=re.search(r'^WorkingDirectory=(.+)$', text, re.M)
+    mcmd=re.search(r"^ExecStart=/bin/bash -lc 'cd [^']+ && exec (.*)'$", text, re.M)
+    path=mpath.group(1).strip() if mpath else os.path.join(BOTS_DIR,name)
+    cmd=mcmd.group(1).strip() if mcmd else ''
+    runtime='custom'
+    if cmd.startswith('python') or 'python' in cmd: runtime='python'
+    elif cmd.startswith('node') or 'node ' in cmd: runtime='node'
+    elif cmd.startswith('php') or 'php ' in cmd: runtime='php'
+    bots.append({'name':name,'runtime':runtime,'path':path,'start_command':cmd})
+
+databases=[]
+try:
+    out=subprocess.check_output("mysql -N -B -e \"SELECT Db, User, MAX(Host <> 'localhost') AS remote FROM mysql.db WHERE Db NOT IN ('mysql','performance_schema','information_schema','sys') GROUP BY Db, User ORDER BY Db\"", shell=True, text=True, stderr=subprocess.DEVNULL)
+    for line in out.splitlines():
+        parts=line.split('\t')
+        if len(parts) >= 3:
+            db,user,remote=parts[0],parts[1],parts[2]
+            if db and user and not db.startswith('phpmyadmin'):
+                databases.append({'db_name':db,'db_user':user,'remote_allowed':1 if remote in ('1','true','TRUE') else 0})
+except Exception:
+    pass
+
+print(json.dumps({'sites':sites,'ftp':ftp,'databases':databases,'bots':bots}, ensure_ascii=False))
+PY
+}
+
+cmd_repair() {
+  ensure_dirs
+  mkdir -p "$BASE_DIR/data" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$BASE_DIR/templates" /etc/hyper-host
+  chown -R www-data:www-data "$PANEL_DIR" "$BASE_DIR/data"
+  chown www-data:www-data "$SITES_DIR" 2>/dev/null || true
+  chmod 0755 "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR"
+  chmod 0770 "$BASE_DIR/data"
+  if [[ -f "$BASE_DIR/data/hyperhost.sqlite" ]]; then
+    chown www-data:www-data "$BASE_DIR/data/hyperhost.sqlite" "$BASE_DIR/data/hyperhost.sqlite"-* 2>/dev/null || true
+    chmod 0660 "$BASE_DIR/data/hyperhost.sqlite" "$BASE_DIR/data/hyperhost.sqlite"-* 2>/dev/null || true
+  fi
+  if ! id hyperbot >/dev/null 2>&1; then
+    useradd --system --home "$BOTS_DIR" --shell /usr/sbin/nologin hyperbot
+  fi
+  chown -R hyperbot:www-data "$BOTS_DIR"
+  chmod -R u+rwX,g+rwX,o+rX "$BOTS_DIR"
+  while IFS=: read -r user _ uid gid gecos home shell; do
+    [[ "$user" == hhftp_* ]] || continue
+    [[ -n "$home" && -d "$home" ]] || continue
+    chown -R "$user":www-data "$home" 2>/dev/null || true
+    chmod -R u+rwX,g+rwX,o+rX "$home" 2>/dev/null || true
+  done < /etc/passwd
+  cat > /etc/sudoers.d/hyper-host <<EOSUDO
+www-data ALL=(root) NOPASSWD: /usr/local/sbin/hyper-host-ctl *
+EOSUDO
+  chmod 0440 /etc/sudoers.d/hyper-host
+  visudo -cf /etc/sudoers.d/hyper-host >/dev/null
+  ufw allow 80/tcp >/dev/null 2>&1 || true
+  ufw allow 443/tcp >/dev/null 2>&1 || true
+  ufw allow 21/tcp >/dev/null 2>&1 || true
+  ufw allow 40000:40100/tcp >/dev/null 2>&1 || true
+  systemctl restart vsftpd 2>/dev/null || true
+  systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+  log "Repair finished: permissions, sudoers, FTP ports and services checked"
+}
+
 case "${1:-}" in
   add-site) shift; cmd_add_site "$@" ;;
   delete-site) shift; cmd_delete_site "$@" ;;
@@ -351,6 +531,9 @@ case "${1:-}" in
   bot-create) shift; cmd_bot_create "$@" ;;
   bot-delete) shift; cmd_bot_delete "$@" ;;
   bot) shift; cmd_bot_action "$@" ;;
+  stats-json) shift; cmd_stats_json "$@" ;;
+  sync-json) shift; cmd_sync_json "$@" ;;
+  repair) shift; cmd_repair "$@" ;;
   *)
     cat >&2 <<EOHELP
 Usage:
@@ -365,6 +548,9 @@ Usage:
   hyper-host-ctl bot-create NAME python|node|php|custom COMMAND
   hyper-host-ctl bot-delete NAME [--keep-files|--delete-files]
   hyper-host-ctl bot start|stop|restart|status|logs NAME
+  hyper-host-ctl stats-json
+  hyper-host-ctl sync-json
+  hyper-host-ctl repair
 EOHELP
     exit 1
     ;;

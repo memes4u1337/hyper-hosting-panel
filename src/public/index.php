@@ -259,6 +259,22 @@ function handle_post(string $action): void
                 flash('Бот удалён: ' . $bot['name']);
                 redirect('/?page=bots');
 
+
+            case 'sync_resources':
+                $synced = sync_resources_from_server();
+                add_event('sync', 'Синхронизация ресурсов: ' . $synced);
+                flash('Синхронизация готова: ' . $synced);
+                redirect($_SERVER['HTTP_REFERER'] ?? '/');
+
+            case 'repair_panel':
+                $result = run_ctl(['repair'], 180);
+                if ($result['code'] !== 0) {
+                    throw new RuntimeException($result['output']);
+                }
+                add_event('repair', 'Исправлены права, sudoers, FTP-порты и сервисы');
+                flash("Ремонт выполнен.\n" . $result['output']);
+                redirect('/?page=settings');
+
             case 'change_password':
                 $current = (string)($_POST['current_password'] ?? '');
                 $new = (string)($_POST['new_password'] ?? '');
@@ -283,6 +299,41 @@ function handle_post(string $action): void
         $referer = $_SERVER['HTTP_REFERER'] ?? '/';
         redirect($referer);
     }
+}
+
+
+function sync_resources_from_server(): string
+{
+    $data = run_ctl_json(['sync-json'], 60);
+    if (isset($data['_error'])) {
+        throw new RuntimeException((string)$data['_error']);
+    }
+    $counts = ['sites' => 0, 'ftp' => 0, 'databases' => 0, 'bots' => 0];
+    foreach (($data['sites'] ?? []) as $site) {
+        if (!empty($site['domain']) && !empty($site['root_path'])) {
+            upsert_site_row((string)$site['domain'], (string)($site['aliases'] ?? ''), (string)$site['root_path'], (int)($site['ssl_enabled'] ?? 0));
+            $counts['sites']++;
+        }
+    }
+    foreach (($data['ftp'] ?? []) as $ftp) {
+        if (!empty($ftp['username']) && !empty($ftp['target_path'])) {
+            upsert_ftp_row((string)$ftp['username'], (string)$ftp['target_path']);
+            $counts['ftp']++;
+        }
+    }
+    foreach (($data['databases'] ?? []) as $row) {
+        if (!empty($row['db_name']) && !empty($row['db_user'])) {
+            upsert_db_row((string)$row['db_name'], (string)$row['db_user'], (int)($row['remote_allowed'] ?? 0));
+            $counts['databases']++;
+        }
+    }
+    foreach (($data['bots'] ?? []) as $bot) {
+        if (!empty($bot['name']) && !empty($bot['path'])) {
+            upsert_bot_row((string)$bot['name'], (string)($bot['runtime'] ?? 'custom'), (string)$bot['path'], (string)($bot['start_command'] ?? ''));
+            $counts['bots']++;
+        }
+    }
+    return "сайты {$counts['sites']}, FTP {$counts['ftp']}, базы {$counts['databases']}, боты {$counts['bots']}";
 }
 
 function render_login(): void
@@ -404,36 +455,83 @@ function csrf_field(): string
 
 function view_dashboard(): void
 {
-    $diskTotal = @disk_total_space('/') ?: 0;
-    $diskFree = @disk_free_space('/') ?: 0;
-    $diskUsed = max(0, $diskTotal - $diskFree);
-    $events = db()->query('SELECT * FROM events ORDER BY id DESC LIMIT 10')->fetchAll();
-    $nginx = system_service_status('nginx');
-    $mysql = system_service_status('mariadb');
-    $ftp = system_service_status('vsftpd');
+    $stats = run_ctl_json(['stats-json'], 25);
+    $statErr = $stats['_error'] ?? null;
+    $services = $stats['services'] ?? [];
+    $paths = $stats['paths'] ?? [];
+    $diskTotal = (float)($stats['disk_total'] ?? (@disk_total_space('/') ?: 0));
+    $diskUsed = (float)($stats['disk_used'] ?? 0);
+    if ($diskUsed <= 0 && $diskTotal > 0) {
+        $diskUsed = $diskTotal - (float)(@disk_free_space('/') ?: 0);
+    }
+    $memTotal = (float)($stats['mem_total'] ?? 0);
+    $memUsed = (float)($stats['mem_used'] ?? 0);
+    $diskPct = percent($diskUsed, $diskTotal);
+    $memPct = percent($memUsed, $memTotal);
+    $dbStatus = db_writable_status();
+    $events = db()->query('SELECT * FROM events ORDER BY id DESC LIMIT 12')->fetchAll();
     ?>
+<section class="hero">
+    <div>
+        <span class="hero-kicker">HYPER-HOST CONTROL CENTER</span>
+        <h2>Сервер под сайты и Telegram-ботов</h2>
+        <p>IP: <code><?= e(app_config('server_ip')) ?></code> · uptime: <code><?= e((string)($stats['uptime'] ?? 'unknown')) ?></code></p>
+    </div>
+    <form method="post" class="hero-actions">
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="sync_resources">
+        <button class="btn primary" type="submit">Синхронизировать ресурсы</button>
+        <a class="btn ghost" href="/?page=ftp">FTP подключения</a>
+    </form>
+</section>
+
+<?php if ($statErr): ?>
+    <div class="alert err">Статистика пока недоступна: <?= e((string)$statErr) ?></div>
+<?php endif; ?>
+
 <section class="grid cards4">
-    <div class="card stat"><span>Сайты</span><strong><?= table_count('sites') ?></strong></div>
-    <div class="card stat"><span>FTP</span><strong><?= table_count('ftp_accounts') ?></strong></div>
-    <div class="card stat"><span>Базы</span><strong><?= table_count('databases') ?></strong></div>
-    <div class="card stat"><span>Боты</span><strong><?= table_count('bots') ?></strong></div>
+    <div class="card stat gradient"><span>Сайты</span><strong><?= table_count('sites') ?></strong><em><?= e(app_config('sites_dir')) ?></em></div>
+    <div class="card stat gradient"><span>FTP</span><strong><?= table_count('ftp_accounts') ?></strong><em>порт 21 / passive 40000-40100</em></div>
+    <div class="card stat gradient"><span>Базы</span><strong><?= table_count('databases') ?></strong><em>MariaDB + phpMyAdmin</em></div>
+    <div class="card stat gradient"><span>Боты</span><strong><?= table_count('bots') ?></strong><em>systemd services</em></div>
 </section>
 
 <section class="grid two">
     <div class="card">
-        <h2>Состояние сервера</h2>
-        <div class="status-row"><span>Nginx</span><b class="pill <?= e($nginx) ?>"><?= e($nginx) ?></b></div>
-        <div class="status-row"><span>MariaDB</span><b class="pill <?= e($mysql) ?>"><?= e($mysql) ?></b></div>
-        <div class="status-row"><span>FTP</span><b class="pill <?= e($ftp) ?>"><?= e($ftp) ?></b></div>
-        <div class="status-row"><span>IP сервера</span><code><?= e(app_config('server_ip')) ?></code></div>
-        <div class="status-row"><span>PHP-FPM</span><code><?= e(app_config('php_fpm_sock')) ?></code></div>
+        <div class="split-head"><h2>Железо сервера</h2><span class="tag">live</span></div>
+        <div class="status-row"><span>CPU</span><code><?= e((string)($stats['cpu_model'] ?? 'unknown')) ?></code></div>
+        <div class="status-row"><span>Ядра</span><b><?= e((string)($stats['cpu_cores'] ?? '0')) ?></b></div>
+        <div class="status-row"><span>Load average</span><code><?= e(number_format((float)($stats['load1'] ?? 0), 2)) ?> / <?= e(number_format((float)($stats['load5'] ?? 0), 2)) ?> / <?= e(number_format((float)($stats['load15'] ?? 0), 2)) ?></code></div>
+        <div class="status-row"><span>RAM</span><b><?= e(human_bytes($memUsed)) ?> / <?= e(human_bytes($memTotal)) ?></b></div>
+        <div class="meter big"><i style="width: <?= $memPct ?>%"></i></div>
     </div>
     <div class="card">
+        <div class="split-head"><h2>Сервисы</h2><a class="btn tiny ghost" href="/?page=settings">ремонт</a></div>
+        <?php foreach (['nginx' => 'Nginx', 'mariadb' => 'MariaDB', 'vsftpd' => 'FTP / VSFTPD', 'php_fpm' => 'PHP-FPM'] as $key => $label): $status = (string)($services[$key] ?? 'unknown'); ?>
+            <div class="status-row"><span><?= e($label) ?></span><b class="pill <?= e($status) ?>"><?= e($status) ?></b></div>
+        <?php endforeach; ?>
+        <div class="status-row"><span>SQLite панели</span><b class="pill <?= $dbStatus['file_writable'] && $dbStatus['dir_writable'] ? 'active' : 'failed' ?>"><?= $dbStatus['file_writable'] && $dbStatus['dir_writable'] ? 'writable' : 'problem' ?></b></div>
+        <div class="hint"><code><?= e($dbStatus['path']) ?></code></div>
+    </div>
+</section>
+
+<section class="grid two">
+    <div class="card">
         <h2>Диск</h2>
-        <div class="meter"><i style="width: <?= $diskTotal ? (int)(($diskUsed / $diskTotal) * 100) : 0 ?>%"></i></div>
-        <p class="muted">Использовано <?= e(human_bytes((float)$diskUsed)) ?> из <?= e(human_bytes((float)$diskTotal)) ?></p>
-        <div class="hint">Сайты: <code><?= e(app_config('sites_dir')) ?></code></div>
-        <div class="hint">Боты: <code><?= e(app_config('bots_dir')) ?></code></div>
+        <div class="meter big"><i style="width: <?= $diskPct ?>%"></i></div>
+        <p class="muted">Использовано <?= e(human_bytes($diskUsed)) ?> из <?= e(human_bytes($diskTotal)) ?> · свободно <?= e(human_bytes((float)($stats['disk_free'] ?? 0))) ?></p>
+        <div class="hint">Сайты: <code><?= e((string)($paths['sites'] ?? app_config('sites_dir'))) ?></code></div>
+        <div class="hint">Боты: <code><?= e((string)($paths['bots'] ?? app_config('bots_dir'))) ?></code></div>
+    </div>
+    <div class="card quick-card">
+        <h2>Быстрые действия</h2>
+        <div class="quick-actions">
+            <a class="btn primary" href="/?page=sites">Добавить сайт</a>
+            <a class="btn primary" href="/?page=ftp">Создать FTP</a>
+            <a class="btn primary" href="/?page=databases">Создать базу</a>
+            <a class="btn primary" href="/?page=bots">Создать бота</a>
+            <a class="btn ghost" href="/phpmyadmin" target="_blank">phpMyAdmin</a>
+        </div>
     </div>
 </section>
 
@@ -538,14 +636,35 @@ function view_ftp(): void
 {
     $accounts = db()->query('SELECT * FROM ftp_accounts ORDER BY id DESC')->fetchAll();
     $targets = available_targets();
+    $ftpStatus = system_service_status('vsftpd');
+    $host = app_config('server_ip');
     ?>
+<section class="hero small-hero">
+    <div>
+        <span class="hero-kicker">FTP ACCESS</span>
+        <h2>FTP подключения к сайтам и ботам</h2>
+        <p>Host: <code><?= e($host) ?></code> · Port: <code>21</code> · Passive: <code>40000-40100</code></p>
+    </div>
+    <form method="post" class="hero-actions">
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="sync_resources">
+        <button class="btn ghost" type="submit">Обновить список FTP</button>
+    </form>
+</section>
+
+<section class="grid three">
+    <div class="card mini"><span>Статус FTP</span><b class="pill <?= e($ftpStatus) ?>"><?= e($ftpStatus) ?></b></div>
+    <div class="card mini"><span>Хост</span><code><?= e($host) ?></code></div>
+    <div class="card mini"><span>Порты</span><code>21, 40000-40100</code></div>
+</section>
+
 <section class="grid two">
     <div class="card">
         <h2>Создать FTP</h2>
         <form method="post" class="form-grid">
             <?= csrf_field() ?>
             <input type="hidden" name="action" value="create_ftp">
-            <label>Логин<input name="username" placeholder="site_user" required></label>
+            <label>Логин <span class="muted">без префикса, панель сама добавит hhftp_</span><input name="username" placeholder="site_user" required></label>
             <label>Пароль<input name="password" type="password" minlength="8" required></label>
             <label>Папка
                 <select name="target_path" required>
@@ -554,28 +673,36 @@ function view_ftp(): void
                     <?php endforeach; ?>
                 </select>
             </label>
-            <?php if (!$targets): ?><p class="muted">Сначала создай сайт или бота, потом FTP.</p><?php endif; ?>
+            <?php if (!$targets): ?><p class="muted">Сначала создай сайт или бота, потом тут появится папка для FTP.</p><?php endif; ?>
             <button class="btn primary" type="submit" <?= !$targets ? 'disabled' : '' ?>>Создать FTP</button>
         </form>
     </div>
     <div class="card accent-card">
-        <h2>Данные подключения</h2>
-        <p>Host: <code><?= e(app_config('server_ip')) ?></code></p>
-        <p>Port: <code>21</code></p>
-        <p>Passive ports: <code>40000-40100</code></p>
-        <p class="muted">Логин автоматически будет с префиксом <code>hhftp_</code>, если ты не указал его сам.</p>
+        <h2>Как подключаться</h2>
+        <div class="connect-box">
+            <div><span>Protocol</span><code>FTP</code></div>
+            <div><span>Host</span><code><?= e($host) ?></code><button class="btn tiny" data-copy="<?= e($host) ?>">копировать</button></div>
+            <div><span>Port</span><code>21</code></div>
+            <div><span>Passive mode</span><code>ON</code></div>
+            <div><span>Passive ports</span><code>40000-40100</code></div>
+        </div>
+        <p class="muted">В FileZilla / WinSCP выбирай обычный FTP. Логин будет вида <code>hhftp_site_user</code>.</p>
     </div>
 </section>
 
 <section class="card">
-    <h2>FTP аккаунты</h2>
+    <div class="split-head">
+        <h2>FTP аккаунты</h2>
+        <span class="tag"><?= count($accounts) ?> шт.</span>
+    </div>
     <div class="table-wrap">
         <table>
-            <thead><tr><th>Логин</th><th>Папка</th><th>Дата</th><th></th></tr></thead>
+            <thead><tr><th>Логин</th><th>Подключение</th><th>Папка</th><th>Дата</th><th></th></tr></thead>
             <tbody>
-            <?php foreach ($accounts as $acc): ?>
+            <?php foreach ($accounts as $acc): $line = 'ftp://' . $acc['username'] . '@' . $host . ':21'; ?>
                 <tr>
                     <td><code><?= e($acc['username']) ?></code></td>
+                    <td><div class="copy-line"><code><?= e($line) ?></code><button class="btn tiny" data-copy="<?= e($line) ?>">копировать</button></div></td>
                     <td><code><?= e($acc['target_path']) ?></code></td>
                     <td><?= e($acc['created_at']) ?></td>
                     <td>
@@ -588,7 +715,7 @@ function view_ftp(): void
                     </td>
                 </tr>
             <?php endforeach; ?>
-            <?php if (!$accounts): ?><tr><td colspan="4" class="empty">FTP аккаунтов пока нет</td></tr><?php endif; ?>
+            <?php if (!$accounts): ?><tr><td colspan="5" class="empty">FTP аккаунтов пока нет. Создай сайт, потом создай FTP к его public_html.</td></tr><?php endif; ?>
             </tbody>
         </table>
     </div>
@@ -749,6 +876,7 @@ function view_bot_logs(): void
 function view_settings(): void
 {
     $mysqlExternal = setting_get('mysql_external', '0');
+    $dbStatus = db_writable_status();
     ?>
 <section class="grid two">
     <div class="card">
@@ -765,6 +893,23 @@ function view_settings(): void
         <p class="muted">Команда меняет bind-address MariaDB и открывает/закрывает порт 3306 в UFW.</p>
     </div>
     <div class="card">
+        <h2>Ремонт панели</h2>
+        <p class="muted">Если кнопки не сохраняют, FTP не показывается или права слетели — нажми ремонт. Он чинит права SQLite, sudoers, FTP-порты и перезапускает сервисы.</p>
+        <form method="post" class="inline-form" onsubmit="return confirm('Запустить ремонт панели?');">
+            <?= csrf_field() ?>
+            <input type="hidden" name="action" value="repair_panel">
+            <button class="btn primary" type="submit">Починить права и сервисы</button>
+        </form>
+        <form method="post" class="inline-form" style="margin-top:10px">
+            <?= csrf_field() ?>
+            <input type="hidden" name="action" value="sync_resources">
+            <button class="btn ghost" type="submit">Синхронизировать сайты / FTP / базы / боты</button>
+        </form>
+    </div>
+</section>
+
+<section class="grid two">
+    <div class="card">
         <h2>Сменить пароль панели</h2>
         <form method="post" class="form-grid">
             <?= csrf_field() ?>
@@ -773,6 +918,12 @@ function view_settings(): void
             <label>Новый пароль<input type="password" name="new_password" minlength="10" required></label>
             <button class="btn primary" type="submit">Сменить пароль</button>
         </form>
+    </div>
+    <div class="card">
+        <h2>SQLite панели</h2>
+        <div class="status-row"><span>Файл</span><b class="pill <?= $dbStatus['file_writable'] ? 'active' : 'failed' ?>"><?= $dbStatus['file_writable'] ? 'writable' : 'not writable' ?></b></div>
+        <div class="status-row"><span>Папка</span><b class="pill <?= $dbStatus['dir_writable'] ? 'active' : 'failed' ?>"><?= $dbStatus['dir_writable'] ? 'writable' : 'not writable' ?></b></div>
+        <div class="hint"><code><?= e($dbStatus['path']) ?></code></div>
     </div>
 </section>
 

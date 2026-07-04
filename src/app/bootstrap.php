@@ -207,3 +207,81 @@ function system_service_status(string $service): string
     exec('systemctl is-active ' . escapeshellarg($service) . ' 2>/dev/null', $out, $code);
     return trim($out[0] ?? 'inactive') ?: 'inactive';
 }
+
+
+function run_ctl_json(array $args, int $timeout = 60): array
+{
+    $result = run_ctl($args, $timeout);
+    if ($result['code'] !== 0) {
+        return ['_error' => $result['output'], '_code' => $result['code']];
+    }
+    $json = trim($result['output']);
+    $data = json_decode($json, true);
+    if (!is_array($data)) {
+        return ['_error' => 'Некорректный JSON от hyper-host-ctl: ' . mb_substr($json, 0, 500), '_code' => 1];
+    }
+    return $data;
+}
+
+function percent(float $used, float $total): int
+{
+    if ($total <= 0) {
+        return 0;
+    }
+    return max(0, min(100, (int)round(($used / $total) * 100)));
+}
+
+function db_writable_status(): array
+{
+    $path = (string)app_config('db_path');
+    return [
+        'path' => $path,
+        'exists' => is_file($path),
+        'file_writable' => is_file($path) ? is_writable($path) : false,
+        'dir_writable' => is_writable(dirname($path)),
+    ];
+}
+
+function upsert_site_row(string $domain, string $aliases, string $root, int $ssl = 0): void
+{
+    $stmt = db()->prepare('SELECT id FROM sites WHERE domain = ?');
+    $stmt->execute([$domain]);
+    if ($stmt->fetch()) {
+        db()->prepare('UPDATE sites SET aliases = ?, root_path = ?, ssl_enabled = ? WHERE domain = ?')->execute([$aliases, $root, $ssl, $domain]);
+    } else {
+        db()->prepare('INSERT INTO sites(domain, aliases, root_path, ssl_enabled) VALUES(?, ?, ?, ?)')->execute([$domain, $aliases, $root, $ssl]);
+    }
+}
+
+function upsert_ftp_row(string $username, string $target): void
+{
+    $stmt = db()->prepare('SELECT id FROM ftp_accounts WHERE username = ?');
+    $stmt->execute([$username]);
+    if ($stmt->fetch()) {
+        db()->prepare('UPDATE ftp_accounts SET target_path = ? WHERE username = ?')->execute([$target, $username]);
+    } else {
+        db()->prepare('INSERT INTO ftp_accounts(username, target_path) VALUES(?, ?)')->execute([$username, $target]);
+    }
+}
+
+function upsert_db_row(string $dbName, string $dbUser, int $remote): void
+{
+    $stmt = db()->prepare('SELECT id FROM databases WHERE db_name = ?');
+    $stmt->execute([$dbName]);
+    if ($stmt->fetch()) {
+        db()->prepare('UPDATE databases SET db_user = ?, remote_allowed = ? WHERE db_name = ?')->execute([$dbUser, $remote, $dbName]);
+    } else {
+        db()->prepare('INSERT INTO databases(db_name, db_user, remote_allowed) VALUES(?, ?, ?)')->execute([$dbName, $dbUser, $remote]);
+    }
+}
+
+function upsert_bot_row(string $name, string $runtime, string $path, string $command): void
+{
+    $stmt = db()->prepare('SELECT id FROM bots WHERE name = ?');
+    $stmt->execute([$name]);
+    if ($stmt->fetch()) {
+        db()->prepare('UPDATE bots SET runtime = ?, path = ?, start_command = ? WHERE name = ?')->execute([$runtime, $path, $command, $name]);
+    } else {
+        db()->prepare('INSERT INTO bots(name, runtime, path, start_command) VALUES(?, ?, ?, ?)')->execute([$name, $runtime, $path, $command]);
+    }
+}
