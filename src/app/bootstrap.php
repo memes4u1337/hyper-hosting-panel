@@ -139,16 +139,25 @@ function run_ctl(array $args, int $timeout = 120): array
     stream_set_blocking($pipes[2], false);
 
     $output = '';
+    $exitCode = null;
     $start = time();
     while (true) {
         $output .= stream_get_contents($pipes[1]);
         $output .= stream_get_contents($pipes[2]);
         $status = proc_get_status($process);
         if (!$status['running']) {
+            $exitCode = is_int($status['exitcode'] ?? null) ? (int)$status['exitcode'] : null;
             break;
         }
         if (time() - $start > $timeout) {
             proc_terminate($process, 9);
+            foreach ([1, 2] as $i) {
+                if (isset($pipes[$i]) && is_resource($pipes[$i])) {
+                    $output .= stream_get_contents($pipes[$i]);
+                    fclose($pipes[$i]);
+                }
+            }
+            proc_close($process);
             return ['code' => 124, 'output' => trim($output . "\nTimeout")];
         }
         usleep(100000);
@@ -157,7 +166,11 @@ function run_ctl(array $args, int $timeout = 120): array
     $output .= stream_get_contents($pipes[2]);
     fclose($pipes[1]);
     fclose($pipes[2]);
-    $code = proc_close($process);
+    $closeCode = proc_close($process);
+
+    // В PHP proc_close часто возвращает -1, если до этого вызывался proc_get_status().
+    // Из-за этого панель считала успешные root-команды ошибками и не сохраняла записи.
+    $code = ($exitCode !== null && $exitCode >= 0) ? $exitCode : (($closeCode >= 0) ? $closeCode : 0);
     return ['code' => $code, 'output' => trim($output)];
 }
 
@@ -209,18 +222,41 @@ function system_service_status(string $service): string
 }
 
 
+function extract_json_payload(string $text): string
+{
+    $text = trim($text);
+    if ($text === '') {
+        return '';
+    }
+    $firstObj = strpos($text, '{');
+    $firstArr = strpos($text, '[');
+    $starts = array_filter([$firstObj, $firstArr], static fn($v) => $v !== false);
+    if (!$starts) {
+        return $text;
+    }
+    $start = min($starts);
+    $lastObj = strrpos($text, '}');
+    $lastArr = strrpos($text, ']');
+    $ends = array_filter([$lastObj, $lastArr], static fn($v) => $v !== false);
+    if (!$ends) {
+        return substr($text, $start);
+    }
+    $end = max($ends);
+    return substr($text, $start, $end - $start + 1);
+}
+
 function run_ctl_json(array $args, int $timeout = 60): array
 {
     $result = run_ctl($args, $timeout);
+    $json = extract_json_payload((string)$result['output']);
+    $data = json_decode($json, true);
+    if (is_array($data)) {
+        return $data;
+    }
     if ($result['code'] !== 0) {
         return ['_error' => $result['output'], '_code' => $result['code']];
     }
-    $json = trim($result['output']);
-    $data = json_decode($json, true);
-    if (!is_array($data)) {
-        return ['_error' => 'Некорректный JSON от hyper-host-ctl: ' . mb_substr($json, 0, 500), '_code' => 1];
-    }
-    return $data;
+    return ['_error' => 'Некорректный JSON от hyper-host-ctl: ' . mb_substr($json ?: (string)$result['output'], 0, 500), '_code' => 1];
 }
 
 function percent(float $used, float $total): int
@@ -253,15 +289,29 @@ function upsert_site_row(string $domain, string $aliases, string $root, int $ssl
     }
 }
 
-function upsert_ftp_row(string $username, string $target): void
+function upsert_ftp_row(string $username, string $target, string $passwordPlain = ''): void
 {
-    $stmt = db()->prepare('SELECT id FROM ftp_accounts WHERE username = ?');
+    $stmt = db()->prepare('SELECT id, password_plain FROM ftp_accounts WHERE username = ?');
     $stmt->execute([$username]);
-    if ($stmt->fetch()) {
-        db()->prepare('UPDATE ftp_accounts SET target_path = ? WHERE username = ?')->execute([$target, $username]);
+    $row = $stmt->fetch();
+    if ($row) {
+        if ($passwordPlain !== '') {
+            db()->prepare('UPDATE ftp_accounts SET target_path = ?, password_plain = ? WHERE username = ?')->execute([$target, $passwordPlain, $username]);
+        } else {
+            db()->prepare('UPDATE ftp_accounts SET target_path = ? WHERE username = ?')->execute([$target, $username]);
+        }
     } else {
-        db()->prepare('INSERT INTO ftp_accounts(username, target_path) VALUES(?, ?)')->execute([$username, $target]);
+        db()->prepare('INSERT INTO ftp_accounts(username, target_path, password_plain) VALUES(?, ?, ?)')->execute([$username, $target, $passwordPlain]);
     }
+}
+
+function panel_host_for_connections(): string
+{
+    $domain = trim((string)app_config('panel_domain', ''));
+    if ($domain !== '' && $domain !== '_') {
+        return $domain;
+    }
+    return (string)app_config('server_ip');
 }
 
 function upsert_db_row(string $dbName, string $dbUser, int $remote): void

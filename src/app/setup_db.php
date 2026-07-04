@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS ftp_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
     target_path TEXT NOT NULL,
+    password_plain TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
@@ -68,6 +69,20 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 SQL);
+
+
+// Миграции для уже установленных панелей.
+$columns = $pdo->query("PRAGMA table_info(ftp_accounts)")->fetchAll(PDO::FETCH_ASSOC);
+$hasPasswordPlain = false;
+foreach ($columns as $column) {
+    if (($column['name'] ?? '') === 'password_plain') {
+        $hasPasswordPlain = true;
+        break;
+    }
+}
+if (!$hasPasswordPlain) {
+    $pdo->exec("ALTER TABLE ftp_accounts ADD COLUMN password_plain TEXT NOT NULL DEFAULT ''");
+}
 
 $stmt = $pdo->prepare('SELECT id FROM users WHERE username = ?');
 $stmt->execute([$adminUser]);

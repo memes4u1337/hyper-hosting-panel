@@ -124,10 +124,9 @@ function handle_post(string $action): void
                     throw new RuntimeException($result['output']);
                 }
                 $finalUser = str_starts_with($username, 'hhftp_') ? $username : 'hhftp_' . $username;
-                $stmt = db()->prepare('INSERT INTO ftp_accounts(username, target_path) VALUES(?, ?) ON CONFLICT(username) DO UPDATE SET target_path = excluded.target_path');
-                $stmt->execute([$finalUser, $target]);
+                upsert_ftp_row($finalUser, $target, $password);
                 add_event('ftp', 'Создан FTP: ' . $finalUser);
-                flash('FTP создан: ' . $finalUser);
+                flash("FTP создан.\nХост: " . panel_host_for_connections() . "\nИмя пользователя: " . $finalUser . "\nПароль: " . $password);
                 redirect('/?page=ftp');
 
             case 'delete_ftp':
@@ -145,6 +144,27 @@ function handle_post(string $action): void
                 db()->prepare('DELETE FROM ftp_accounts WHERE id = ?')->execute([$id]);
                 add_event('ftp', 'Удалён FTP: ' . $ftp['username']);
                 flash('FTP удалён: ' . $ftp['username']);
+                redirect('/?page=ftp');
+
+            case 'reset_ftp_password':
+                $id = (int)($_POST['id'] ?? 0);
+                $password = (string)($_POST['password'] ?? '');
+                if (strlen($password) < 8) {
+                    throw new RuntimeException('Пароль FTP минимум 8 символов');
+                }
+                $stmt = db()->prepare('SELECT * FROM ftp_accounts WHERE id = ?');
+                $stmt->execute([$id]);
+                $ftp = $stmt->fetch();
+                if (!$ftp) {
+                    throw new RuntimeException('FTP не найден');
+                }
+                $result = run_ctl(['ftp-password', $ftp['username'], $password]);
+                if ($result['code'] !== 0) {
+                    throw new RuntimeException($result['output']);
+                }
+                upsert_ftp_row((string)$ftp['username'], (string)$ftp['target_path'], $password);
+                add_event('ftp', 'Обновлён пароль FTP: ' . $ftp['username']);
+                flash("Пароль FTP обновлён.\nХост: " . panel_host_for_connections() . "\nИмя пользователя: " . $ftp['username'] . "\nПароль: " . $password);
                 redirect('/?page=ftp');
 
             case 'create_db':
@@ -317,7 +337,7 @@ function sync_resources_from_server(): string
     }
     foreach (($data['ftp'] ?? []) as $ftp) {
         if (!empty($ftp['username']) && !empty($ftp['target_path'])) {
-            upsert_ftp_row((string)$ftp['username'], (string)$ftp['target_path']);
+            upsert_ftp_row((string)$ftp['username'], (string)$ftp['target_path'], (string)($ftp['password_plain'] ?? ''));
             $counts['ftp']++;
         }
     }
@@ -637,35 +657,43 @@ function view_ftp(): void
     $accounts = db()->query('SELECT * FROM ftp_accounts ORDER BY id DESC')->fetchAll();
     $targets = available_targets();
     $ftpStatus = system_service_status('vsftpd');
-    $host = app_config('server_ip');
+    $host = panel_host_for_connections();
     ?>
-<section class="hero small-hero">
+<section class="hero small-hero ftp-hero">
     <div>
         <span class="hero-kicker">FTP ACCESS</span>
-        <h2>FTP подключения к сайтам и ботам</h2>
-        <p>Host: <code><?= e($host) ?></code> · Port: <code>21</code> · Passive: <code>40000-40100</code></p>
+        <h2>FTP подключения без головной боли</h2>
+        <p>Нужные данные для FileZilla / WinSCP: <b>хост</b>, <b>имя пользователя</b>, <b>пароль</b>.</p>
     </div>
-    <form method="post" class="hero-actions">
-        <?= csrf_field() ?>
-        <input type="hidden" name="action" value="sync_resources">
-        <button class="btn ghost" type="submit">Обновить список FTP</button>
-    </form>
+    <div class="ftp-main-card">
+        <div><span>Хост</span><code><?= e($host) ?></code><button class="btn tiny" data-copy="<?= e($host) ?>">копировать</button></div>
+        <div><span>Порт</span><code>21</code></div>
+        <div><span>Режим</span><code>Passive / 40000-40100</code></div>
+    </div>
 </section>
 
 <section class="grid three">
     <div class="card mini"><span>Статус FTP</span><b class="pill <?= e($ftpStatus) ?>"><?= e($ftpStatus) ?></b></div>
-    <div class="card mini"><span>Хост</span><code><?= e($host) ?></code></div>
-    <div class="card mini"><span>Порты</span><code>21, 40000-40100</code></div>
+    <div class="card mini"><span>Аккаунтов</span><b><?= count($accounts) ?></b></div>
+    <div class="card mini"><span>Папок доступно</span><b><?= count($targets) ?></b></div>
 </section>
 
 <section class="grid two">
-    <div class="card">
+    <div class="card create-card">
         <h2>Создать FTP</h2>
         <form method="post" class="form-grid">
             <?= csrf_field() ?>
             <input type="hidden" name="action" value="create_ftp">
-            <label>Логин <span class="muted">без префикса, панель сама добавит hhftp_</span><input name="username" placeholder="site_user" required></label>
-            <label>Пароль<input name="password" type="password" minlength="8" required></label>
+            <label>Имя пользователя
+                <input name="username" placeholder="hyperhost" required>
+                <small>Панель сама добавит префикс <code>hhftp_</code>. В FTP будет логин вида <code>hhftp_hyperhost</code>.</small>
+            </label>
+            <label>Пароль
+                <div class="password-line">
+                    <input name="password" type="text" minlength="8" required placeholder="StrongFTPPassword123!">
+                    <button class="btn ghost" type="button" data-generate-password>сгенерировать</button>
+                </div>
+            </label>
             <label>Папка
                 <select name="target_path" required>
                     <?php foreach ($targets as $target): ?>
@@ -674,19 +702,22 @@ function view_ftp(): void
                 </select>
             </label>
             <?php if (!$targets): ?><p class="muted">Сначала создай сайт или бота, потом тут появится папка для FTP.</p><?php endif; ?>
-            <button class="btn primary" type="submit" <?= !$targets ? 'disabled' : '' ?>>Создать FTP</button>
+            <button class="btn primary wide" type="submit" <?= !$targets ? 'disabled' : '' ?>>Создать FTP-доступ</button>
         </form>
     </div>
     <div class="card accent-card">
         <h2>Как подключаться</h2>
-        <div class="connect-box">
-            <div><span>Protocol</span><code>FTP</code></div>
-            <div><span>Host</span><code><?= e($host) ?></code><button class="btn tiny" data-copy="<?= e($host) ?>">копировать</button></div>
-            <div><span>Port</span><code>21</code></div>
-            <div><span>Passive mode</span><code>ON</code></div>
-            <div><span>Passive ports</span><code>40000-40100</code></div>
+        <div class="connect-box simple">
+            <div><span>Хост</span><code><?= e($host) ?></code><button class="btn tiny" data-copy="<?= e($host) ?>">копировать</button></div>
+            <div><span>Имя пользователя</span><code>hhftp_твой_логин</code></div>
+            <div><span>Пароль</span><code>тот, который указал при создании</code></div>
         </div>
-        <p class="muted">В FileZilla / WinSCP выбирай обычный FTP. Логин будет вида <code>hhftp_site_user</code>.</p>
+        <p class="muted">Порт: <code>21</code>. Тип подключения: обычный FTP. Passive mode должен быть включён.</p>
+        <form method="post" class="inline-form">
+            <?= csrf_field() ?>
+            <input type="hidden" name="action" value="sync_resources">
+            <button class="btn ghost" type="submit">Обновить список FTP</button>
+        </form>
     </div>
 </section>
 
@@ -695,29 +726,46 @@ function view_ftp(): void
         <h2>FTP аккаунты</h2>
         <span class="tag"><?= count($accounts) ?> шт.</span>
     </div>
-    <div class="table-wrap">
-        <table>
-            <thead><tr><th>Логин</th><th>Подключение</th><th>Папка</th><th>Дата</th><th></th></tr></thead>
-            <tbody>
-            <?php foreach ($accounts as $acc): $line = 'ftp://' . $acc['username'] . '@' . $host . ':21'; ?>
-                <tr>
-                    <td><code><?= e($acc['username']) ?></code></td>
-                    <td><div class="copy-line"><code><?= e($line) ?></code><button class="btn tiny" data-copy="<?= e($line) ?>">копировать</button></div></td>
-                    <td><code><?= e($acc['target_path']) ?></code></td>
-                    <td><?= e($acc['created_at']) ?></td>
-                    <td>
-                        <form method="post" onsubmit="return confirm('Удалить FTP? Файлы не удаляются.');">
+    <div class="ftp-list">
+        <?php foreach ($accounts as $acc):
+            $password = (string)($acc['password_plain'] ?? '');
+            $line = 'Host: ' . $host . "\nUsername: " . $acc['username'] . "\nPassword: " . ($password !== '' ? $password : 'пароль не сохранён, задай новый в панели');
+        ?>
+            <div class="ftp-account-card">
+                <div class="ftp-account-head">
+                    <div>
+                        <span class="tag">FTP</span>
+                        <h3><?= e($acc['username']) ?></h3>
+                        <p class="muted"><code><?= e($acc['target_path']) ?></code></p>
+                    </div>
+                    <form method="post" onsubmit="return confirm('Удалить FTP? Файлы не удаляются.');">
+                        <?= csrf_field() ?>
+                        <input type="hidden" name="action" value="delete_ftp">
+                        <input type="hidden" name="id" value="<?= (int)$acc['id'] ?>">
+                        <button class="btn tiny danger" type="submit">удалить</button>
+                    </form>
+                </div>
+                <div class="ftp-credentials">
+                    <div><span>Хост</span><code><?= e($host) ?></code><button class="btn tiny" data-copy="<?= e($host) ?>">копировать</button></div>
+                    <div><span>Имя пользователя</span><code><?= e($acc['username']) ?></code><button class="btn tiny" data-copy="<?= e($acc['username']) ?>">копировать</button></div>
+                    <div><span>Пароль</span><code><?= $password !== '' ? e($password) : 'не сохранён' ?></code><?php if ($password !== ''): ?><button class="btn tiny" data-copy="<?= e($password) ?>">копировать</button><?php endif; ?></div>
+                </div>
+                <div class="ftp-actions-row">
+                    <button class="btn ghost" data-copy="<?= e($line) ?>">Скопировать всё</button>
+                    <details class="reset-box">
+                        <summary class="btn ghost">Задать новый пароль</summary>
+                        <form method="post" class="inline-form">
                             <?= csrf_field() ?>
-                            <input type="hidden" name="action" value="delete_ftp">
+                            <input type="hidden" name="action" value="reset_ftp_password">
                             <input type="hidden" name="id" value="<?= (int)$acc['id'] ?>">
-                            <button class="btn tiny danger" type="submit">удалить</button>
+                            <input name="password" type="text" minlength="8" placeholder="Новый пароль" required>
+                            <button class="btn primary" type="submit">Сохранить</button>
                         </form>
-                    </td>
-                </tr>
-            <?php endforeach; ?>
-            <?php if (!$accounts): ?><tr><td colspan="5" class="empty">FTP аккаунтов пока нет. Создай сайт, потом создай FTP к его public_html.</td></tr><?php endif; ?>
-            </tbody>
-        </table>
+                    </details>
+                </div>
+            </div>
+        <?php endforeach; ?>
+        <?php if (!$accounts): ?><div class="empty">FTP аккаунтов пока нет. Создай сайт, потом создай FTP к его public_html.</div><?php endif; ?>
     </div>
 </section>
 <?php

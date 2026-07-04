@@ -188,6 +188,17 @@ cmd_delete_ftp() {
   log "FTP user deleted: $username"
 }
 
+cmd_ftp_password() {
+  local username="${1:-}"
+  local password="${2:-}"
+  [[ -n "$username" && -n "$password" ]] || err "Username and password required"
+  valid_name "$username" || err "Invalid username"
+  [[ "$username" == hhftp_* ]] || username="hhftp_${username}"
+  id "$username" >/dev/null 2>&1 || err "FTP user not found: $username"
+  echo "$username:$password" | chpasswd
+  log "FTP password updated: $username"
+}
+
 cmd_create_db() {
   local db="${1:-}"
   local user="${2:-}"
@@ -420,6 +431,7 @@ result = {
 }
 print(json.dumps(result, ensure_ascii=False))
 PY
+  exit 0
 }
 
 cmd_sync_json() {
@@ -481,6 +493,7 @@ except Exception:
 
 print(json.dumps({'sites':sites,'ftp':ftp,'databases':databases,'bots':bots}, ensure_ascii=False))
 PY
+  exit 0
 }
 
 cmd_repair() {
@@ -525,6 +538,7 @@ case "${1:-}" in
   ssl-site) shift; cmd_ssl_site "$@" ;;
   create-ftp) shift; cmd_create_ftp "$@" ;;
   delete-ftp) shift; cmd_delete_ftp "$@" ;;
+  ftp-password) shift; cmd_ftp_password "$@" ;;
   create-db) shift; cmd_create_db "$@" ;;
   delete-db) shift; cmd_delete_db "$@" ;;
   mysql-external) shift; cmd_mysql_external "$@" ;;
@@ -542,6 +556,7 @@ Usage:
   hyper-host-ctl ssl-site DOMAIN EMAIL
   hyper-host-ctl create-ftp USER PASS TARGET_PATH
   hyper-host-ctl delete-ftp USER
+  hyper-host-ctl ftp-password USER PASS
   hyper-host-ctl create-db DB USER PASS [0|1]
   hyper-host-ctl delete-db DB USER
   hyper-host-ctl mysql-external enable|disable
