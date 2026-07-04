@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -Eeo pipefail
 
 CONF="/etc/hyper-host/hyper-host.conf"
 [[ -f "$CONF" ]] || { echo "Config not found: $CONF" >&2; exit 2; }
@@ -9,6 +9,7 @@ source "$CONF"
 PANEL_NAME="${PANEL_NAME:-HYPER-HOST}"
 POWERED_BY="${POWERED_BY:-powered by memes4u1337}"
 SERVER_IP="${SERVER_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
+PUBLIC_IP="${PUBLIC_IP:-${SERVER_PUBLIC_IP:-}}"
 PANEL_DOMAIN="${PANEL_DOMAIN:-_}"
 BASE_DIR="${BASE_DIR:-/opt/hyper-host}"
 PANEL_DIR="${PANEL_DIR:-/var/www/hyper-host}"
@@ -23,7 +24,7 @@ CRON_DIR="/etc/cron.d"
 NGINX_AVAILABLE="/etc/nginx/sites-available"
 NGINX_ENABLED="/etc/nginx/sites-enabled"
 
-export PANEL_NAME POWERED_BY SERVER_IP PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR
+export PANEL_NAME POWERED_BY SERVER_IP PUBLIC_IP PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR
 BOT_USER="${BOT_USER:-hyperbot}"
 PM2_HOME_DIR="${PM2_HOME_DIR:-$BOTS_DIR/.pm2}"
 NODE_MAJOR_MIN="${NODE_MAJOR_MIN:-18}"
@@ -164,21 +165,78 @@ EONGINX
   log "Site created: $domain -> $root"
 }
 cmd_delete_site() { local domain="${1:-}" mode="${2:---keep-files}"; [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain"; rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"; nginx_reload; [[ "$mode" == "--delete-files" ]] && rm -rf "$SITES_DIR/$domain"; log "Site deleted: $domain / $mode"; }
-public_ip() {
-  curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || curl -4 -fsS --max-time 5 https://ifconfig.me 2>/dev/null || echo "$SERVER_IP"
+is_private_ipv4() {
+  local ip="$1"
+  [[ "$ip" =~ ^10\. ]] && return 0
+  [[ "$ip" =~ ^192\.168\. ]] && return 0
+  [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] && return 0
+  [[ "$ip" =~ ^127\. ]] && return 0
+  return 1
 }
+
+outbound_public_ip() {
+  curl -4 -fsS --max-time 4 https://api.ipify.org 2>/dev/null || \
+  curl -4 -fsS --max-time 4 https://ifconfig.me 2>/dev/null || \
+  echo ""
+}
+
+configured_public_ip() {
+  local ip="${PUBLIC_IP:-}"
+  [[ -z "$ip" && -f /etc/hyper-host/public_ip ]] && ip="$(tr -d '[:space:]' </etc/hyper-host/public_ip 2>/dev/null || true)"
+  [[ -z "$ip" ]] && ip="${SERVER_PUBLIC_IP:-}"
+  echo "$ip"
+}
+
+public_ip() {
+  # Это IP, который панель будет рекомендовать для DNS.
+  # Важно: если сервер стоит за роутером/NAT, исходящий IP через ifconfig.me может быть не тем,
+  # на который у тебя смотрит домен. Поэтому есть ручная настройка PUBLIC_IP.
+  local cfg out
+  cfg="$(configured_public_ip)"
+  if [[ -n "$cfg" ]]; then echo "$cfg"; return; fi
+  if [[ -n "$SERVER_IP" ]] && ! is_private_ipv4 "$SERVER_IP"; then echo "$SERVER_IP"; return; fi
+  out="$(outbound_public_ip)"
+  [[ -n "$out" ]] && { echo "$out"; return; }
+  echo "$SERVER_IP"
+}
+
 resolve_domain_ips() {
   local domain="$1"
   { dig +short A "$domain" 2>/dev/null; dig +short AAAA "$domain" 2>/dev/null; } | sed '/^$/d' | sort -u
 }
+
+resolve_domain_a() {
+  local domain="$1"
+  dig +short A "$domain" 2>/dev/null | sed '/^$/d' | sort -u
+}
+
+choose_ssl_expected_ip() {
+  local domain="$1" cfg arec first_a out
+  cfg="$(configured_public_ip)"
+  [[ -n "$cfg" ]] && { echo "$cfg"; return; }
+  arec="$(resolve_domain_a "$domain")"
+  first_a="$(printf '%s\n' "$arec" | head -n1)"
+  # Если сервер за NAT и DNS уже смотрит на публичный IP роутера — считаем его ожидаемым.
+  if [[ -n "$first_a" && -n "$SERVER_IP" ]] && is_private_ipv4 "$SERVER_IP"; then echo "$first_a"; return; fi
+  if [[ -n "$SERVER_IP" ]] && ! is_private_ipv4 "$SERVER_IP"; then echo "$SERVER_IP"; return; fi
+  out="$(outbound_public_ip)"
+  [[ -n "$out" ]] && { echo "$out"; return; }
+  echo "$SERVER_IP"
+}
+
 dns_points_here() {
-  local domain="$1" pub ips
-  pub="$(public_ip)"; ips="$(resolve_domain_ips "$domain")"
+  local domain="$1" expected ips
+  expected="$(choose_ssl_expected_ip "$domain")"
+  ips="$(resolve_domain_ips "$domain")"
   [[ -n "$ips" ]] || return 2
-  echo "$ips" | grep -qxF "$pub" && return 0
-  echo "$ips" | grep -qxF "$SERVER_IP" && return 0
+  if [[ -n "$expected" ]] && echo "$ips" | grep -qxF "$expected"; then return 0; fi
+  # Для локального сервера за NAT разрешаем A-запись на публичный IP роутера,
+  # даже если outbound IP отличается. Главное — чтобы порты 80/443 были проброшены.
+  if [[ -z "$(configured_public_ip)" && -n "$SERVER_IP" ]] && is_private_ipv4 "$SERVER_IP" && [[ -n "$(resolve_domain_a "$domain")" ]]; then return 0; fi
+  [[ -n "$SERVER_IP" ]] && echo "$ips" | grep -qxF "$SERVER_IP" && return 0
   return 1
 }
+
 site_root_for_domain() {
   local domain="$1" conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf" root=""
   if [[ -f "$conf" ]]; then
@@ -210,26 +268,38 @@ local_http_challenge_check() {
 }
 
 ssl_preflight_json() {
-  local domain="$1" root pub arec aaaarec ips dns_status nginx_ok http_ok has_site certbot_ready problem required_a
+  local domain="$1" root pub configured outbound expected arec aaaarec ips dns_status nginx_ok http_ok has_site certbot_ready problem required_a nat_mode warning
   root="$(site_root_for_domain "$domain")"
-  pub="$(public_ip)"
+  configured="$(configured_public_ip)"
+  outbound="$(outbound_public_ip)"
+  expected="$(choose_ssl_expected_ip "$domain")"
+  pub="$expected"
   arec="$(dig +short A "$domain" 2>/dev/null | sed '/^$/d' | sort -u || true)"
   aaaarec="$(dig +short AAAA "$domain" 2>/dev/null | sed '/^$/d' | sort -u || true)"
   ips="$(printf '%s\n%s\n' "$arec" "$aaaarec" | sed '/^$/d' | sort -u)"
   dns_status="bad"
-  if [[ -z "$ips" ]]; then dns_status="missing"; elif dns_points_here "$domain"; then dns_status="ok"; else dns_status="wrong_ip"; fi
+  nat_mode=0
+  [[ -n "$SERVER_IP" ]] && is_private_ipv4 "$SERVER_IP" && nat_mode=1
+  if [[ -z "$ips" ]]; then
+    dns_status="missing"
+  elif dns_points_here "$domain"; then
+    dns_status="ok"
+  else
+    dns_status="wrong_ip"
+  fi
   nginx_ok=0; nginx -t >/dev/null 2>&1 && nginx_ok=1
   has_site=0; [[ -f "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" || -d "$root" ]] && has_site=1
   http_ok=0; [[ "$nginx_ok" == 1 ]] && local_http_challenge_check "$domain" "$root" && http_ok=1
   certbot_ready=0; [[ "$dns_status" == ok && "$nginx_ok" == 1 && "$http_ok" == 1 && "$has_site" == 1 ]] && certbot_ready=1
-  problem=""
-  required_a="A    $domain    $pub"
+  problem=""; warning=""
+  required_a="A    $domain    $expected"
+  if [[ "$nat_mode" == 1 ]]; then warning="Сервер имеет внутренний IP $SERVER_IP. Для SSL домен должен смотреть на публичный IP роутера/сервера, а порты 80/443 должны быть проброшены на $SERVER_IP."; fi
   if [[ "$dns_status" == missing ]]; then problem="У домена нет публичных A/AAAA записей. Добавь запись: $required_a"; fi
-  if [[ "$dns_status" == wrong_ip ]]; then problem="DNS домена указывает не на этот сервер. Сейчас: ${ips//$'\n'/, }. Нужно: $required_a"; fi
+  if [[ "$dns_status" == wrong_ip ]]; then problem="DNS домена указывает не на нужный IP. Сейчас: ${ips//$'\n'/, }. Нужно: $required_a"; fi
   if [[ "$nginx_ok" != 1 ]]; then problem="Nginx config не проходит проверку: sudo nginx -t"; fi
   if [[ "$has_site" != 1 ]]; then problem="Сайт не найден в HYPER-HOST. Сначала создай сайт: $domain"; fi
   if [[ "$http_ok" != 1 && "$dns_status" == ok && "$nginx_ok" == 1 ]]; then problem="Nginx локально не отдаёт /.well-known/acme-challenge для Host: $domain. Проверь root сайта и конфиг."; fi
-  DOMAIN="$domain" ROOT="$root" PUBLIC_IP="$pub" SERVER_IP="$SERVER_IP" A_RECORDS="$arec" AAAA_RECORDS="$aaaarec" DNS_STATUS="$dns_status" NGINX_OK="$nginx_ok" HTTP_OK="$http_ok" HAS_SITE="$has_site" CERTBOT_READY="$certbot_ready" PROBLEM="$problem" REQUIRED_A="$required_a" python3 - <<'PYSSL'
+  DOMAIN="$domain" ROOT="$root" PUBLIC_IP="$pub" CONFIGURED_PUBLIC_IP="$configured" OUTBOUND_PUBLIC_IP="$outbound" EXPECTED_PUBLIC_IP="$expected" SERVER_IP="$SERVER_IP" A_RECORDS="$arec" AAAA_RECORDS="$aaaarec" DNS_STATUS="$dns_status" NGINX_OK="$nginx_ok" HTTP_OK="$http_ok" HAS_SITE="$has_site" CERTBOT_READY="$certbot_ready" PROBLEM="$problem" WARNING="$warning" REQUIRED_A="$required_a" NAT_MODE="$nat_mode" python3 - <<'PYSSL'
 import os,json
 split=lambda s:[x for x in s.splitlines() if x.strip()]
 print(json.dumps({
@@ -237,6 +307,10 @@ print(json.dumps({
  'root':os.environ['ROOT'],
  'server_ip':os.environ.get('SERVER_IP',''),
  'public_ip':os.environ.get('PUBLIC_IP',''),
+ 'expected_public_ip':os.environ.get('EXPECTED_PUBLIC_IP',''),
+ 'configured_public_ip':os.environ.get('CONFIGURED_PUBLIC_IP',''),
+ 'outbound_public_ip':os.environ.get('OUTBOUND_PUBLIC_IP',''),
+ 'nat_mode':os.environ.get('NAT_MODE')=='1',
  'a':split(os.environ.get('A_RECORDS','')),
  'aaaa':split(os.environ.get('AAAA_RECORDS','')),
  'dns_status':os.environ.get('DNS_STATUS'),
@@ -247,6 +321,7 @@ print(json.dumps({
  'certbot_ready':os.environ.get('CERTBOT_READY')=='1',
  'required_a':os.environ.get('REQUIRED_A',''),
  'problem':os.environ.get('PROBLEM',''),
+ 'warning':os.environ.get('WARNING',''),
 }, ensure_ascii=False))
 PYSSL
 }
@@ -257,6 +332,57 @@ cmd_ssl_check_json() {
   valid_domain "$domain" || err "Invalid domain"
   ssl_preflight_json "$domain"
 }
+
+cmd_public_ip() {
+  local action="${1:-get}" ip="${2:-}"
+  mkdir -p /etc/hyper-host
+  case "$action" in
+    get)
+      echo "$(public_ip)"
+      ;;
+    set)
+      [[ -n "$ip" ]] || err "Public IP required"
+      [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || err "Invalid IPv4: $ip"
+      echo "$ip" > /etc/hyper-host/public_ip
+      if [[ -f "$CONF" ]]; then
+        if grep -q '^PUBLIC_IP=' "$CONF"; then sed -i "s#^PUBLIC_IP=.*#PUBLIC_IP=\"$ip\"#" "$CONF"; else echo "PUBLIC_IP=\"$ip\"" >> "$CONF"; fi
+      fi
+      log "Public IP saved: $ip"
+      ;;
+    clear)
+      rm -f /etc/hyper-host/public_ip
+      [[ -f "$CONF" ]] && sed -i '/^PUBLIC_IP=/d' "$CONF" || true
+      log "Public IP override cleared"
+      ;;
+    *) err "Use: public-ip get|set IP|clear" ;;
+  esac
+}
+
+cmd_ssl_ip_selfsigned() {
+  local ip="${1:-$SERVER_IP}"
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || err "Invalid IP: $ip"
+  local dir="/etc/ssl/hyper-host-ip-$ip" key="$dir/privkey.pem" crt="$dir/fullchain.pem" conf="$dir/openssl.cnf"
+  mkdir -p "$dir"
+  cat > "$conf" <<EOFIP
+[req]
+default_bits = 2048
+prompt = no
+default_md = sha256
+distinguished_name = dn
+x509_extensions = v3_req
+[dn]
+CN = $ip
+[v3_req]
+subjectAltName = @alt_names
+[alt_names]
+IP.1 = $ip
+EOFIP
+  openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout "$key" -out "$crt" -config "$conf" >/dev/null 2>&1
+  chmod 0600 "$key"; chmod 0644 "$crt"
+  log "Self-signed IP certificate created: $crt / $key"
+  echo "WARNING: это self-signed сертификат для IP. Браузер будет показывать предупреждение, пока сертификат не добавлен в доверенные. Для публичного доверенного SSL лучше использовать домен."
+}
+
 
 cmd_ssl_site() {
   local domain="${1:-}" email="${2:-}"
@@ -343,8 +469,8 @@ cmd_create_ftp() {
 cmd_delete_ftp() {
   local username="${1:-}"; [[ -n "$username" ]] || err "Username required"; valid_name "$username" || err "Invalid username"; [[ "$username" == hhftp_* ]] || username="hhftp_${username}"
   local home="$FTP_DIR/$username"
-  for d in "$home/sites" "$home/bots" "$home/site"; do mountpoint -q "$d" && umount "$d" || true; done
-  if [[ -f /etc/fstab ]]; then tmp="$(mktemp)"; grep -vF " $home/sites " /etc/fstab | grep -vF " $home/bots " | grep -vF " $home/site " > "$tmp" || true; cat "$tmp" > /etc/fstab; rm -f "$tmp"; fi
+  for d in "$home/common/sites" "$home/common/bots" "$home/sites" "$home/bots" "$home/site"; do mountpoint -q "$d" && umount -lf "$d" || true; done
+  if [[ -f /etc/fstab ]]; then tmp="$(mktemp)"; grep -vF " $home/common/sites " /etc/fstab | grep -vF " $home/common/bots " | grep -vF " $home/sites " | grep -vF " $home/bots " | grep -vF " $home/site " > "$tmp" || true; cat "$tmp" > /etc/fstab; rm -f "$tmp"; fi
   id "$username" >/dev/null 2>&1 && userdel "$username" || true
   rm -rf "$home"; systemctl restart vsftpd || true; log "FTP user deleted: $username"
 }
@@ -477,12 +603,32 @@ bot_install_deps_internal() {
   fi
   fix_web_permissions "$path" "$BOT_USER"
 }
+bot_stop_duplicates() {
+  local name="$1" path="$BOTS_DIR/$name"
+  # TelegramConflictError возникает, когда один и тот же токен запущен в двух процессах.
+  # Перед стартом нового бота гасим старые локальные копии с таким же именем/папкой в PM2 root и PM2 hyperbot.
+  pm2_as_bot stop "$name" >/dev/null 2>&1 || true
+  pm2_as_bot delete "$name" >/dev/null 2>&1 || true
+  if command -v pm2 >/dev/null 2>&1; then
+    PM2_HOME=/root/.pm2 pm2 stop "$name" >/dev/null 2>&1 || true
+    PM2_HOME=/root/.pm2 pm2 delete "$name" >/dev/null 2>&1 || true
+    pm2 stop "$name" >/dev/null 2>&1 || true
+    pm2 delete "$name" >/dev/null 2>&1 || true
+  fi
+  systemctl stop "hyperbot-$name.service" >/dev/null 2>&1 || true
+  systemctl disable "hyperbot-$name.service" >/dev/null 2>&1 || true
+  # Убиваем только процессы, которые запущены из папки конкретного бота.
+  if [[ -d "$path" ]]; then
+    pkill -f "$path/.*(bot\.py|main\.py|index\.py|\.hyper-start\.sh)" >/dev/null 2>&1 || true
+  fi
+}
+
 bot_start_pm2() {
   local name="$1" runtime="$2" main_file="$3" mem="${4:-0}" path="$BOTS_DIR/$name"
   ensure_pm2
   [[ -f "$path/$main_file" ]] || err "Главный файл не найден: $path/$main_file"
+  bot_stop_duplicates "$name"
   make_bot_start_script "$name" "$runtime" "$main_file" "$path" "$mem"
-  pm2_as_bot delete "$name" >/dev/null 2>&1 || true
   local mem_arg=(); [[ "$mem" =~ ^[0-9]+$ && "$mem" -gt 0 ]] && mem_arg+=(--max-memory-restart "${mem}M")
   (cd "$path" && pm2_as_bot start ./.hyper-start.sh --name "$name" --interpreter bash "${mem_arg[@]}")
   pm2_as_bot save >/dev/null || true
@@ -555,7 +701,41 @@ cmd_bot_delete() {
     log "Bot deleted from PM2 only: $name / files kept"
   fi
 }
-cmd_bot_action() { local action="${1:-}" name="${2:-}"; [[ "$action" =~ ^(start|stop|restart|status|logs)$ ]] || err "Invalid bot action"; [[ -n "$name" ]] || err "Bot name required"; valid_name "$name" || err "Invalid bot"; ensure_pm2; case "$action" in start|stop|restart) pm2_as_bot "$action" "$name"; pm2_as_bot save >/dev/null 2>&1 || true;; status) BOTNAME="$name" pm2_as_bot jlist | BOTNAME="$name" python3 -c 'import sys,json,os; data=json.load(sys.stdin); name=os.environ.get("BOTNAME",""); print(next((p.get("pm2_env",{}).get("status","") for p in data if p.get("name")==name), "not_found"))';; logs) pm2_as_bot logs "$name" --lines 250 --nostream || true;; esac; }
+cmd_bot_action() {
+  local action="${1:-}" name="${2:-}"
+  [[ "$action" =~ ^(start|stop|restart|status|logs|kill-conflicts)$ ]] || err "Invalid bot action"
+  [[ -n "$name" ]] || err "Bot name required"; valid_name "$name" || err "Invalid bot"
+  ensure_pm2
+  case "$action" in
+    start|restart)
+      # Если процесс уже есть, PM2 restart безопасен. Если нет — пробуем запустить через сохранённый .hyper-start.sh.
+      if pm2_as_bot describe "$name" >/dev/null 2>&1; then
+        pm2_as_bot restart "$name"
+      elif [[ -x "$BOTS_DIR/$name/.hyper-start.sh" ]]; then
+        bot_stop_duplicates "$name"
+        (cd "$BOTS_DIR/$name" && pm2_as_bot start ./.hyper-start.sh --name "$name" --interpreter bash)
+      else
+        err "PM2 process not found and .hyper-start.sh missing. Создай/запусти бота заново."
+      fi
+      pm2_as_bot save >/dev/null 2>&1 || true
+      ;;
+    stop)
+      pm2_as_bot stop "$name" || true
+      pm2_as_bot save >/dev/null 2>&1 || true
+      ;;
+    kill-conflicts)
+      bot_stop_duplicates "$name"
+      pm2_as_bot save >/dev/null 2>&1 || true
+      log "Local duplicate bot processes killed: $name"
+      ;;
+    status)
+      BOTNAME="$name" pm2_as_bot jlist | BOTNAME="$name" python3 -c 'import sys,json,os; data=json.load(sys.stdin); name=os.environ.get("BOTNAME",""); print(next((p.get("pm2_env",{}).get("status","") for p in data if p.get("name")==name), "not_found"))'
+      ;;
+    logs)
+      pm2_as_bot logs "$name" --lines 250 --nostream || true
+      ;;
+  esac
+}
 cmd_bot_list_json() {
   ensure_pm2
   pm2_as_bot jlist 2>/dev/null | python3 -c 'import sys,json,os
@@ -773,7 +953,7 @@ cmd_repair() {
 
   while IFS=: read -r user _ uid gid gecos old_home shell; do
     [[ "$user" == hhftp_* ]] || continue
-    local home="$FTP_DIR/$user" common="$home/common" sites="$common/sites" bots="$common/bots"
+    home="$FTP_DIR/$user"; common="$home/common"; sites="$common/sites"; bots="$common/bots"
     mkdir -p "$common" "$sites" "$bots"
     usermod -d "$home" -s /usr/sbin/nologin "$user" 2>/dev/null || true
     chown root:root "$home" 2>/dev/null || true; chmod 0755 "$home" 2>/dev/null || true
@@ -803,6 +983,8 @@ case "${1:-}" in
   add-site) shift; cmd_add_site "$@" ;;
   delete-site) shift; cmd_delete_site "$@" ;;
   ssl-site) shift; cmd_ssl_site "$@" ;;
+  ssl-ip-selfsigned) shift; cmd_ssl_ip_selfsigned "$@" ;;
+  public-ip) shift; cmd_public_ip "$@" ;;
   site-php) shift; cmd_site_php "$@" ;;
   create-ftp) shift; cmd_create_ftp "$@" ;;
   delete-ftp) shift; cmd_delete_ftp "$@" ;;
@@ -841,6 +1023,8 @@ Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
        hyper-host-ctl backup-run all|sites|bots|db|panel
        hyper-host-ctl dns-apply DOMAIN RECORDS_JSON [NS] [ADMIN]
        hyper-host-ctl cron-set NAME "* * * * *" COMMAND
+       hyper-host-ctl public-ip set 90.189.208.25
+       hyper-host-ctl ssl-ip-selfsigned 192.168.0.179
        hyper-host-ctl repair
 EOHELP
      exit 1 ;;

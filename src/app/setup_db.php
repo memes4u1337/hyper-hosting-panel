@@ -157,6 +157,7 @@ $defaults = [
     'security_2fa_secret' => '',
     'security_ip_allowlist' => '',
     'backup_dir' => '/opt/hyper-host/backups',
+    'public_ip_override' => '',
 ];
 foreach ($defaults as $k => $v) {
     $stmt = $pdo->prepare('INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)');

@@ -36,6 +36,7 @@ get_server_ip() {
 }
 
 SERVER_IP="${SERVER_IP:-$(get_server_ip)}"
+PUBLIC_IP="${PUBLIC_IP:-${SERVER_PUBLIC_IP:-}}"
 PANEL_DOMAIN="${PANEL_DOMAIN:-_}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-$(openssl rand -base64 18 | tr -d '\n')}"
@@ -121,6 +122,7 @@ PANEL_NAME="${PANEL_NAME}"
 POWERED_BY="${POWERED_BY}"
 SERVER_IP="${SERVER_IP}"
 PANEL_DOMAIN="${PANEL_DOMAIN}"
+PUBLIC_IP="${PUBLIC_IP}"
 BASE_DIR="${BASE_DIR}"
 PANEL_DIR="${PANEL_DIR}"
 SITES_DIR="${SITES_DIR}"
@@ -140,6 +142,7 @@ return [
     'powered_by' => '${POWERED_BY}',
     'server_ip' => '${SERVER_IP}',
     'panel_domain' => '${PANEL_DOMAIN}',
+    'public_ip' => '${PUBLIC_IP}',
     'base_dir' => '${BASE_DIR}',
     'panel_dir' => '${PANEL_DIR}',
     'sites_dir' => '${SITES_DIR}',
@@ -272,15 +275,18 @@ fix_node_packages() {
   local major; major="$(node_major)"
   if [[ "$major" -lt 18 ]]; then
     log "Node.js старый или сломан: $(node -v 2>/dev/null || echo none). Чищу старые node/npm/libnode-dev и ставлю Node.js 20.x..."
-    apt-get remove -y npm nodejs libnode-dev node-gyp nodejs-doc >/tmp/hyper-host-node-remove.log 2>&1 || true
+    apt-get remove -y npm nodejs libnode-dev libnode72 node-gyp nodejs-doc >/tmp/hyper-host-node-remove.log 2>&1 || true
+    dpkg --remove --force-all libnode-dev libnode72 npm nodejs node-gyp nodejs-doc >/tmp/hyper-host-node-dpkg-remove.log 2>&1 || true
     apt-get autoremove -y >/tmp/hyper-host-node-autoremove.log 2>&1 || true
     rm -f /etc/apt/sources.list.d/nodesource*.list /etc/apt/keyrings/nodesource.gpg 2>/dev/null || true
     apt-get install -y curl ca-certificates gnupg >/dev/null 2>&1 || true
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/tmp/hyper-host-nodesource.log 2>&1 || warn "NodeSource setup не отработал. Лог: /tmp/hyper-host-nodesource.log"
     apt-get update -y >/dev/null 2>&1 || true
     apt-get install -y nodejs >/tmp/hyper-host-node-install.log 2>&1 || {
-      warn "Node.js 20 не установился. Лог: /tmp/hyper-host-node-install.log. Пробую fallback apt nodejs/npm."
-      apt-get install -y nodejs npm || true
+      warn "Node.js 20 не установился. Лог: /tmp/hyper-host-node-install.log. Пробую дополнительно очистить libnode-dev/libnode72."
+      dpkg --remove --force-all libnode-dev libnode72 npm nodejs node-gyp nodejs-doc >/tmp/hyper-host-node-dpkg-force.log 2>&1 || true
+      apt-get -f install -y >/tmp/hyper-host-apt-fix-2.log 2>&1 || true
+      apt-get install -y nodejs >>/tmp/hyper-host-node-install.log 2>&1 || apt-get install -y nodejs npm || true
     }
   fi
 }
