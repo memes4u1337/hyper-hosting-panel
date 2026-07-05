@@ -397,6 +397,29 @@ function panel_host_for_connections(): string
     return (string)app_config('server_ip');
 }
 
+function mysql_external_host(): string
+{
+    $domain = trim((string)app_config('panel_domain', ''));
+    if ($domain !== '' && $domain !== '_') {
+        return $domain;
+    }
+    $public = trim((string)app_config('public_ip', ''));
+    if ($public !== '') {
+        return $public;
+    }
+    return panel_host_for_connections();
+}
+
+function mysql_local_host(): string
+{
+    return '127.0.0.1';
+}
+
+function mysql_host_for_row(array $row): string
+{
+    return !empty($row['remote_allowed']) ? mysql_external_host() : mysql_local_host();
+}
+
 function upsert_db_row(string $dbName, string $dbUser, int $remote, string $passwordPlain = '', string $host = '127.0.0.1', string $port = '3306'): void
 {
     $stmt = db()->prepare('SELECT id FROM databases WHERE db_name = ?');

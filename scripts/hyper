@@ -150,6 +150,9 @@ items=j.get('databases',[]) or []
 print('🗄️ HYPER-HOST — DATABASES')
 print('────────────────────────')
 print(f"MariaDB: {m.get('service','unknown')} | bind: {m.get('bind_address','unknown')} | 3306: {'listen' if m.get('listen_3306') else 'closed/local'}")
+print(f"Для бота на сервере: MYSQL_HOST=127.0.0.1 MYSQL_PORT=3306")
+print(f"Для бота на ПК/Windows: MYSQL_HOST={m.get('external_host','')} MYSQL_PORT=3306")
+print("phpMyAdmin может показывать Сервер: localhost:3306 — это нормально, он сам стоит на сервере.")
 if not items:
     print('Баз данных панели пока нет.'); raise SystemExit
 print(f"{'DB':<32} {'USER':<32} REMOTE")
@@ -157,7 +160,7 @@ for x in items:
     print(f"{x.get('db_name',''):<32} {x.get('db_user',''):<32} {('yes' if x.get('remote_allowed') else 'no')}")
 PY
       ;;
-    external) [[ "${1:-}" == enable || "${1:-}" == disable ]] || err "Используй: sudo hyper db external enable|disable"; $CTL mysql-external "$1" ;;
+    external) [[ "${1:-}" == enable || "${1:-}" == disable ]] || err "Используй: sudo hyper db external enable|disable"; $CTL mysql-external "$1"; $CTL mysql-status-json | json_pretty ;;
     user) [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper db user USER PASS [DB] [localhost|%]"; $CTL create-mysql-account "$1" "$2" "${4:-localhost}" "${3:-}" ALL ;;
     *) err "Используй: sudo hyper db list | external enable|disable | user USER PASS [DB] [localhost|%]" ;;
   esac
@@ -361,6 +364,7 @@ cmd_help() {
   sudo hyper ftp                     FTP-пользователи
   sudo hyper dbs                     базы данных
   sudo hyper db external enable      открыть MySQL 3306 наружу
+  sudo hyper db user USER PASS DB %    создать пользователя для внешнего входа
   sudo hyper db user USER PASS DB    создать MySQL/phpMyAdmin аккаунт
   sudo hyper php                     PHP-FPM версии
   sudo hyper repair                  починить права/FTP/PM2/Nginx

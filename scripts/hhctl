@@ -807,7 +807,37 @@ cmd_delete_mysql_account() {
   log "MySQL account deleted: ${user}@${host}"
 }
 
-cmd_mysql_external() { local state="${1:-}"; [[ "$state" == enable || "$state" == disable ]] || err "Use enable or disable"; local file="/etc/mysql/mariadb.conf.d/50-server.cnf"; [[ -f "$file" ]] || file="/etc/mysql/my.cnf"; cp "$file" "$file.backup.$(date +%s)" || true; if [[ "$state" == enable ]]; then sed -i 's/^\s*bind-address\s*=.*/bind-address = 0.0.0.0/' "$file" || true; grep -q '^bind-address' "$file" || echo 'bind-address = 0.0.0.0' >> "$file"; iptables -C INPUT -p tcp --dport 3306 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 3306 -j ACCEPT || true; ufw allow 3306/tcp >/dev/null 2>&1 || true; else sed -i 's/^\s*bind-address\s*=.*/bind-address = 127.0.0.1/' "$file" || true; ufw delete allow 3306/tcp >/dev/null 2>&1 || true; fi; systemctl restart mariadb; log "MySQL external access: $state"; }
+cmd_mysql_external() {
+  local state="${1:-}"
+  [[ "$state" == enable || "$state" == disable ]] || err "Use enable or disable"
+  local file="/etc/mysql/mariadb.conf.d/50-server.cnf"
+  [[ -f "$file" ]] || file="/etc/mysql/my.cnf"
+  cp "$file" "$file.backup.$(date +%s)" || true
+  local value="127.0.0.1"
+  [[ "$state" == enable ]] && value="0.0.0.0"
+  python3 - "$file" "$value" <<'PYSET'
+from pathlib import Path
+import sys,re
+path=Path(sys.argv[1]); value=sys.argv[2]
+text=path.read_text(errors='ignore') if path.exists() else ''
+if '[mysqld]' not in text:
+    text='[mysqld]\n'+text
+if re.search(r'^\s*bind-address\s*=', text, re.M):
+    text=re.sub(r'^\s*bind-address\s*=.*$', f'bind-address = {value}', text, flags=re.M)
+else:
+    text=text.replace('[mysqld]', '[mysqld]\nbind-address = '+value, 1)
+path.write_text(text)
+PYSET
+  if [[ "$state" == enable ]]; then
+    iptables -C INPUT -p tcp --dport 3306 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 3306 -j ACCEPT || true
+    ufw allow 3306/tcp >/dev/null 2>&1 || true
+  else
+    ufw delete allow 3306/tcp >/dev/null 2>&1 || true
+  fi
+  systemctl restart mariadb || systemctl restart mysql || true
+  sleep 1
+  log "MySQL external access: $state (bind-address=$value, external host=${PANEL_DOMAIN:-$PUBLIC_IP})"
+}
 
 cmd_mysql_status_json() {
   python3 - <<'PYIN'
@@ -822,7 +852,15 @@ for f in ['/etc/mysql/mariadb.conf.d/50-server.cnf','/etc/mysql/my.cnf']:
         m=re.findall(r'^\s*bind-address\s*=\s*(\S+)', txt, re.M)
         if m: bind=m[-1]
 listen=':3306' in sh("ss -lntp | grep ':3306' || true")
-print(json.dumps({'bind_address': bind or 'default', 'listen_3306': listen, 'service': sh('systemctl is-active mariadb || true')}, ensure_ascii=False))
+print(json.dumps({
+  'bind_address': bind or 'default',
+  'listen_3306': listen,
+  'service': sh('systemctl is-active mariadb || true'),
+  'external_host': os.environ.get('PANEL_DOMAIN') if os.environ.get('PANEL_DOMAIN','_')!='_' else os.environ.get('PUBLIC_IP',''),
+  'internal_host': '127.0.0.1',
+  'server_ip': os.environ.get('SERVER_IP',''),
+  'port': '3306',
+}, ensure_ascii=False))
 PYIN
 }
 
