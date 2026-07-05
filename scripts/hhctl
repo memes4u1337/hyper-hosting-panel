@@ -272,17 +272,21 @@ resolve_domain_a_public() {
 }
 
 resolve_domain_ips() {
-  local domain="$1" out
-  out="$(resolve_domain_ips_public "$domain")"
-  [[ -n "$out" ]] && { echo "$out"; return; }
-  { dig +short A "$domain" 2>/dev/null; dig +short AAAA "$domain" 2>/dev/null; } | sed '/^$/d' | sort -u
+  local domain="$1"
+  # Важно: для SSL/DNS нельзя брать локальный bind/resolv.conf, иначе панель видит 192.168.x.x.
+  # Проверяем только публичные резолверы. Локальная зона показывается отдельно в dns-status.
+  resolve_domain_ips_public "$domain"
 }
 
 resolve_domain_a() {
-  local domain="$1" out
-  out="$(resolve_domain_a_public "$domain")"
-  [[ -n "$out" ]] && { echo "$out"; return; }
-  dig +short A "$domain" 2>/dev/null | sed '/^$/d' | sort -u
+  local domain="$1"
+  # Только публичный DNS. Без fallback на локальный resolver.
+  resolve_domain_a_public "$domain"
+}
+
+resolve_domain_a_local() {
+  local domain="$1"
+  dig +time=1 +tries=1 +short @127.0.0.1 A "$domain" 2>/dev/null | sed '/^$/d' | sort -u || true
 }
 
 choose_ssl_expected_ip() {
@@ -354,8 +358,8 @@ ssl_preflight_json() {
   outbound="$(outbound_public_ip)"
   expected="$(choose_ssl_expected_ip "$domain")"
   pub="$expected"
-  arec="$(dig +short A "$domain" 2>/dev/null | sed '/^$/d' | sort -u || true)"
-  aaaarec="$(dig +short AAAA "$domain" 2>/dev/null | sed '/^$/d' | sort -u || true)"
+  arec="$(resolve_domain_a_public "$domain")"
+  aaaarec="$(for ns in 1.1.1.1 8.8.8.8 9.9.9.9; do dig +time=2 +tries=1 +short @"$ns" AAAA "$domain" 2>/dev/null; done | sed '/^$/d' | sort -u || true)"
   ips="$(printf '%s\n%s\n' "$arec" "$aaaarec" | sed '/^$/d' | sort -u)"
   dns_status="bad"
   nat_mode=0
@@ -1171,12 +1175,15 @@ extract_ipv4() {
 
 listen_port_tcp() {
   local port="$1"
-  ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(:|\])${port}$"
+  # Надёжная проверка локального прослушивания порта. Старый awk иногда брал не ту колонку ss.
+  ss -H -ltn 2>/dev/null | awk -v p=":$port" '{print $4}' | grep -Eq "(^|[:\]])${port}$|:${port}$" && return 0
+  ss -H -ltn "sport = :$port" 2>/dev/null | grep -q .
 }
 
 listen_port_udp() {
   local port="$1"
-  ss -H -lun 2>/dev/null | awk '{print $5}' | grep -Eq "(:|\])${port}$"
+  ss -H -lun 2>/dev/null | awk -v p=":$port" '{print $5}' | grep -Eq "(^|[:\]])${port}$|:${port}$" && return 0
+  ss -H -lun "sport = :$port" 2>/dev/null | grep -q .
 }
 
 open_server_ports() {
@@ -1238,7 +1245,7 @@ cmd_network_fix() {
     ensure_acme_location_for_domain "$domain" "$root"
     # Если домен уже обслуживается нашим bind9, принудительно обновляем зону на публичный IP.
     zonefile="$DNS_DIR/db.$domain"
-    if [[ -f "$zonefile" ]] || grep -q "zone \"$domain\"" /etc/bind/named.conf.local 2>/dev/null; then
+    if [[ -f "$zonefile" ]] || grep -Fq "zone \"$domain\"" /etc/bind/named.conf.local 2>/dev/null; then
       cmd_dns_wizard "$domain" "$pub" panel >/dev/null 2>&1 || true
     fi
   fi
@@ -1250,8 +1257,9 @@ cmd_network_fix() {
   log "Network fixed: nginx=0.0.0.0, server ports 80/443/53 opened, public_ip=$pub"
   echo "OK: серверная часть открыта. Если с телефона всё равно не грузит — на роутере пробрось TCP 80/443 -> $SERVER_IP и проверь, что у домена A=$pub."
 }
+
 cmd_network_doctor_json() {
-  local domain="${1:-}" pub cfg out server nginx_ok bind_ok ufw_status l80 l443 l53 dns_a dns_status local_http local_acme root problem hint
+  local domain="${1:-}" pub cfg out server nginx_ok bind_ok ufw_status l80 l443 l53 dns_a dns_a_local dns_status local_http local_acme root problem hint
   server="$SERVER_IP"; cfg="$(configured_public_ip)"; pub="$(public_ip)"; out="$(outbound_public_ip)"
   nginx_ok=0; nginx -t >/dev/null 2>&1 && nginx_ok=1
   bind_ok=0; systemctl is-active bind9 >/dev/null 2>&1 && bind_ok=1
@@ -1259,25 +1267,32 @@ cmd_network_doctor_json() {
   l80=0; listen_port_tcp 80 && l80=1
   l443=0; listen_port_tcp 443 && l443=1
   l53=0; listen_port_udp 53 && l53=1
-  dns_a=""; dns_status="not_checked"; local_http=0; local_acme=0; problem=""; hint=""
+  dns_a=""; dns_a_local=""; dns_status="not_checked"; local_http=0; local_acme=0; problem=""; hint=""
   if [[ -n "$domain" ]]; then
     valid_domain "$domain" || err "Invalid domain"
-    dns_a="$(resolve_domain_a "$domain")"
+    dns_a="$(resolve_domain_a_public "$domain")"
+    dns_a_local="$(resolve_domain_a_local "$domain")"
     dns_status="bad"
-    dns_points_here "$domain" && dns_status="ok" || true
+    if [[ -z "$dns_a" ]]; then
+      dns_status="missing"
+      problem="Публичная DNS A-запись не найдена. У регистратора/в DNS должно быть: A $domain $pub"
+    elif printf '%s\n' "$dns_a" | grep -qxF "$pub"; then
+      dns_status="ok"
+    else
+      problem="Публичная DNS A-запись смотрит не туда. Сейчас: ${dns_a//$'\n'/, }. Нужно: $pub"
+    fi
     curl -fsS --connect-timeout 1 --max-time 2 -H "Host: $domain" "http://127.0.0.1/" >/dev/null 2>&1 && local_http=1 || true
     root="$(site_root_for_domain "$domain")"
     local_http_challenge_check "$domain" "$root" && local_acme=1 || true
-    if [[ -z "$dns_a" ]]; then problem="DNS A-запись не найдена. Добавь A $domain $pub"; fi
-    if [[ -n "$dns_a" && "$dns_status" != "ok" ]]; then problem="DNS A-запись смотрит не туда. Сейчас: ${dns_a//$'\n'/, }. Нужно: $pub"; fi
-    if [[ "$l80" != 1 || "$l443" != 1 ]]; then problem="Nginx/сервер не слушает 80/443. Выполни: sudo hyper network fix $domain"; fi
-    if [[ "$local_acme" != 1 ]]; then problem="Локально не проходит ACME challenge. Выполни: sudo hyper ssl fix $domain"; fi
+    if [[ "$l80" != 1 || "$l443" != 1 ]]; then problem="На Ubuntu nginx не слушает 80/443. Выполни отдельной строкой: sudo hyper network fix $domain $pub"; fi
+    if [[ "$local_acme" != 1 ]]; then problem="Локально не проходит ACME challenge. Выполни отдельной строкой: sudo hyper ssl fix $domain"; fi
   fi
   if [[ -n "$server" ]] && is_private_ipv4 "$server"; then
-    hint="Сервер за роутером/NAT. На роутере нужны пробросы TCP 80/443 на $server. Из домашней Wi-Fi сети внешний IP может не открываться без NAT Loopback — проверяй с телефона через мобильный интернет или добавь hosts/DNS split."
+    hint="Сервер за роутером/NAT. На Ubuntu порты открывает sudo hyper network fix, а на роутере вручную пробрось TCP 80/443 на $server. Если из Wi‑Fi внешний IP не открывается — это NAT Loopback, проверяй через мобильный интернет."
   fi
-  DOMAIN="$domain" SERVER_IP="$server" PUBLIC_IP="$pub" CONFIGURED_PUBLIC_IP="$cfg" OUTBOUND_PUBLIC_IP="$out" DNS_A="$dns_a" DNS_STATUS="$dns_status" NGINX_OK="$nginx_ok" BIND_OK="$bind_ok" UFW_STATUS="$ufw_status" L80="$l80" L443="$l443" L53="$l53" LOCAL_HTTP="$local_http" LOCAL_ACME="$local_acme" PROBLEM="$problem" HINT="$hint" python3 - <<'PYNET'
+  DOMAIN="$domain" SERVER_IP="$server" PUBLIC_IP="$pub" CONFIGURED_PUBLIC_IP="$cfg" OUTBOUND_PUBLIC_IP="$out" DNS_A="$dns_a" DNS_A_LOCAL="$dns_a_local" DNS_STATUS="$dns_status" NGINX_OK="$nginx_ok" BIND_OK="$bind_ok" UFW_STATUS="$ufw_status" L80="$l80" L443="$l443" L53="$l53" LOCAL_HTTP="$local_http" LOCAL_ACME="$local_acme" PROBLEM="$problem" HINT="$hint" python3 - <<'PYNET'
 import os,json
+lines=lambda x:[i for i in x.splitlines() if i.strip()]
 print(json.dumps({
  'domain': os.environ.get('DOMAIN',''),
  'server_ip': os.environ.get('SERVER_IP',''),
@@ -1285,7 +1300,8 @@ print(json.dumps({
  'configured_public_ip': os.environ.get('CONFIGURED_PUBLIC_IP',''),
  'outbound_public_ip': os.environ.get('OUTBOUND_PUBLIC_IP',''),
  'nat_mode': os.environ.get('SERVER_IP','').startswith(('192.168.','10.','172.16.','172.17.','172.18.','172.19.','172.20.','172.21.','172.22.','172.23.','172.24.','172.25.','172.26.','172.27.','172.28.','172.29.','172.30.','172.31.')),
- 'dns_a': [x for x in os.environ.get('DNS_A','').splitlines() if x.strip()],
+ 'dns_a': lines(os.environ.get('DNS_A','')),
+ 'dns_a_local': lines(os.environ.get('DNS_A_LOCAL','')),
  'dns_status': os.environ.get('DNS_STATUS',''),
  'nginx_ok': os.environ.get('NGINX_OK') == '1',
  'bind9_ok': os.environ.get('BIND_OK') == '1',
@@ -1295,12 +1311,13 @@ print(json.dumps({
  'listen_dns_53': os.environ.get('L53') == '1',
  'local_http_ok': os.environ.get('LOCAL_HTTP') == '1',
  'local_acme_ok': os.environ.get('LOCAL_ACME') == '1',
+ 'server_ports_ok': os.environ.get('L80') == '1' and os.environ.get('L443') == '1',
+ 'dns_ready': os.environ.get('DNS_STATUS','') == 'ok',
  'problem': os.environ.get('PROBLEM',''),
  'hint': os.environ.get('HINT',''),
 }, ensure_ascii=False))
 PYNET
 }
-
 cmd_dns_wizard() {
   local domain="${1:-}" pub="${2:-}" panel_sub="${3:-panel}"
   [[ -n "$domain" ]] || err "Domain required"
