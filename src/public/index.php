@@ -274,7 +274,7 @@ function stat_card(string $icon,string $label,string $value,string $sub=''): voi
 function progress_block(string $label,float $used,float $total): string { $p=percent($used,$total); return '<div class="usage"><div class="d-flex justify-content-between"><span>'.e($label).'</span><b>'.e(human_bytes($used).' / '.human_bytes($total)).'</b></div><div class="progress"><div class="progress-bar" style="width:'.$p.'%"></div></div></div>'; }
 
 function view_dashboard(): void
-{ $stats=run_ctl_json_cached(['stats-json'],8,45); $events=db()->query('SELECT * FROM events ORDER BY id DESC LIMIT 8')->fetchAll(); $sites=table_count('sites'); $ftp=table_count('ftp_accounts'); $bots=table_count('bots'); $backups=table_count('backup_jobs'); ?>
+{ $stats=run_ctl_json_cached(['stats-json'],8,180); $events=db()->query('SELECT * FROM events ORDER BY id DESC LIMIT 8')->fetchAll(); $sites=table_count('sites'); $ftp=table_count('ftp_accounts'); $bots=table_count('bots'); $backups=table_count('backup_jobs'); ?>
 <div class="dashboard-hero mb-4">
   <div>
     <div class="eyebrow"><i class="fa-solid fa-rocket"></i> HYPER-HOST Control Center</div>
@@ -325,14 +325,14 @@ function view_files(): void
 </div><?php }
 
 function view_sites(): void
-{ $sites=db()->query('SELECT * FROM sites ORDER BY id DESC')->fetchAll(); $folders=db()->query('SELECT * FROM folders ORDER BY id DESC')->fetchAll(); $php=run_ctl_json_cached(['php-list-json'],20,60); ?>
+{ $sites=db()->query('SELECT * FROM sites ORDER BY id DESC')->fetchAll(); $folders=db()->query('SELECT * FROM folders ORDER BY id DESC')->fetchAll(); $php=run_ctl_json_cached(['php-list-json'],10,300); ?>
 <div class="row g-4"><div class="col-lg-4"><div class="panel-card"><h2>Создать сайт</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="add_site"><input class="form-control" name="domain" placeholder="hyper-host.pw" required><input class="form-control" name="aliases" placeholder="www.hyper-host.pw"><select class="form-select" name="php_version"><option value="">PHP по умолчанию</option><?php foreach(($php['_error']??null)?[]:$php as $p): ?><option value="<?= e($p['version']) ?>">PHP <?= e($p['version']) ?></option><?php endforeach; ?></select><button class="btn btn-primary">Создать сайт</button></form></div><div class="panel-card mt-4"><h2>Создать папку-сайт</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_folder"><input class="form-control" name="name" placeholder="test-site" required><button class="btn btn-primary">Создать папку</button></form></div></div><div class="col-lg-8"><div class="panel-card"><h2>Сайты</h2><div class="table-responsive"><table class="table table-dark-soft align-middle"><thead><tr><th>Домен</th><th>Папка</th><th>PHP/SSL</th><th></th></tr></thead><tbody><?php foreach($sites as $s): ?><tr><td><b><?= e($s['domain']) ?></b><div class="small muted"><?= e($s['aliases']) ?></div></td><td><code><?= e($s['root_path']) ?></code></td><td><span class="badge text-bg-info">PHP <?= e($s['php_version']?:'default') ?></span> <span class="badge text-bg-<?= (int)$s['ssl_enabled']?'success':'secondary' ?>"><?= (int)$s['ssl_enabled']?'SSL':'HTTP' ?></span></td><td class="text-end"><a class="btn btn-sm btn-soft" href="/?page=files&root=sites&path=<?= e($s['domain'].'/public_html') ?>">Файлы</a><form method="post" class="d-inline" onsubmit="return confirm('Удалить сайт?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_site"><input type="hidden" name="id" value="<?= (int)$s['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form></td></tr><?php endforeach; if(!$sites): ?><tr><td colspan="4" class="empty">Сайтов пока нет</td></tr><?php endif; ?></tbody></table></div><h2 class="mt-4">Папки</h2><div class="table-responsive"><table class="table table-dark-soft"><tbody><?php foreach($folders as $f): ?><tr><td><b><?= e($f['name']) ?></b></td><td><code><?= e($f['path']) ?></code></td><td class="text-end"><a class="btn btn-sm btn-soft" href="/?page=files&root=sites&path=<?= e($f['name'].'/public_html') ?>">Файлы</a></td></tr><?php endforeach; if(!$folders): ?><tr><td class="empty">Папок пока нет</td></tr><?php endif; ?></tbody></table></div></div></div></div><?php }
 
 function view_ftp(): void
 { $rows=db()->query('SELECT * FROM ftp_accounts ORDER BY id DESC')->fetchAll(); $gen=default_ftp_password(); ?>
 <div class="row g-4"><div class="col-lg-4"><div class="panel-card"><h2>Создать FTP</h2><p class="muted">После входа будет одна общая папка <code>common/</code>. Внутри неё: <code>sites/</code> со всеми сайтами и <code>bots/</code> со всеми ботами.</p><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_ftp"><input class="form-control" name="username" placeholder="hyperhost" required><div class="input-group"><input class="form-control" name="password" id="ftpPass" value="<?= e($gen) ?>" minlength="8" required><button class="btn btn-outline-light" type="button" onclick="copyValue('ftpPass')"><i class="fa-regular fa-copy"></i></button></div><button class="btn btn-primary">Создать FTP</button></form></div></div><div class="col-lg-8"><div class="row g-3"><?php foreach($rows as $r): ?><div class="col-md-6"><div class="ftp-card"><h3><?= e($r['username']) ?></h3><div class="cred"><span>Хост</span><code><?= e($r['host']?:host_name()) ?></code></div><div class="cred"><span>Имя пользователя</span><code><?= e($r['username']) ?></code></div><div class="cred"><span>Пароль</span><code><?= e($r['password_plain']?:'задать новый') ?></code></div><div class="small mt-3">Путь после входа: <code>common/sites/</code> и <code>common/bots/</code><br>Порт: <b>21</b>, Passive: <b>40000-40100</b></div><div class="d-flex gap-2 mt-3"><button class="btn btn-sm btn-light" onclick="copyText('Host: <?= e($r['host']?:host_name()) ?>\nLogin: <?= e($r['username']) ?>\nPassword: <?= e($r['password_plain']) ?>\nPort: 21')">Копировать</button><button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#ftp<?= (int)$r['id'] ?>">Пароль</button><form method="post" onsubmit="return confirm('Удалить FTP?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_ftp"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-danger">Удалить</button></form></div></div></div><div class="modal fade" id="ftp<?= (int)$r['id'] ?>"><div class="modal-dialog"><div class="modal-content"><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="reset_ftp_password"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><div class="modal-header"><h5>Новый пароль FTP</h5><button class="btn-close" data-bs-dismiss="modal" type="button"></button></div><div class="modal-body"><input class="form-control" name="password" value="<?= e(default_ftp_password()) ?>" minlength="8" required></div><div class="modal-footer"><button class="btn btn-primary">Сохранить</button></div></form></div></div></div><?php endforeach; if(!$rows): ?><div class="empty">FTP аккаунтов пока нет</div><?php endif; ?></div></div></div><?php }
 
-function pm2_status_map(): array { $d=run_ctl_json_cached(['bot-list-json'],10,25); $m=[]; if(!isset($d['_error'])) foreach($d as $p) $m[$p['name']]=$p; return $m; }
+function pm2_status_map(): array { $d=run_ctl_json_cached(['bot-list-json'],8,120); $m=[]; if(!isset($d['_error'])) foreach($d as $p) $m[$p['name']]=$p; return $m; }
 function view_bots(): void
 { $bots=db()->query('SELECT * FROM bots ORDER BY id DESC')->fetchAll(); $status=pm2_status_map(); ?>
 <div class="row g-4">
@@ -432,7 +432,7 @@ sudo hyper dns status hyper-host.pw</pre>
     </div>
   </div>
   <div class="col-xl-8">
-    <?php foreach($zones as $z): $rs=db()->prepare('SELECT * FROM dns_records WHERE zone_id=? ORDER BY id'); $rs->execute([(int)$z['id']]); $recs=$rs->fetchAll(); $status=run_ctl_json_cached(['dns-status-json',$z['domain']],12,20); ?>
+    <?php foreach($zones as $z): $rs=db()->prepare('SELECT * FROM dns_records WHERE zone_id=? ORDER BY id'); $rs->execute([(int)$z['id']]); $recs=$rs->fetchAll(); $status=run_ctl_json_cached(['dns-status-json',$z['domain']],8,180); ?>
       <div class="panel-card mb-4">
         <div class="card-title-row align-items-start"><div><h2><?= e($z['domain']) ?></h2><div class="small muted">NS: <code>ns1.<?= e($z['domain']) ?></code> / <code>ns2.<?= e($z['domain']) ?></code></div></div><form method="post" onsubmit="return confirm('Удалить DNS зону?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_dns_zone"><input type="hidden" name="id" value="<?= (int)$z['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form></div>
         <div class="status-grid mb-3">
@@ -448,11 +448,11 @@ sudo hyper dns status hyper-host.pw</pre>
   </div>
 </div><?php }
 
-function view_network(): void { $sites=db()->query('SELECT * FROM sites ORDER BY domain')->fetchAll(); $domain=(string)($_GET['domain']??($sites[0]['domain']??'hyper-host.pw')); $pub=setting_get('public_ip_override',(string)app_config('public_ip','90.189.208.25')); $doctor=run_ctl_json(['network-doctor-json',$domain],18); ?>
+function view_network(): void { $sites=db()->query('SELECT * FROM sites ORDER BY domain')->fetchAll(); $domain=(string)($_GET['domain']??($sites[0]['domain']??'hyper-host.pw')); $pub=setting_get('public_ip_override',(string)app_config('public_ip','90.189.208.25')); $doctor=run_ctl_json_cached(['network-doctor-json',$domain],8,180); ?>
 <div class="row g-4">
   <div class="col-xl-5"><div class="panel-card hero-mini"><div class="kicker"><i class="fa-solid fa-tower-broadcast me-2"></i>Внешний / внутренний доступ</div><h2>Поднимаем сайт наружу</h2><p class="muted">Ubuntu работает внутри сети: <code><?= e((string)app_config('server_ip')) ?></code>. Публично домен должен смотреть на роутер: <code><?= e($pub) ?></code>. Кнопка ниже чинит Ubuntu/Nginx/ACME/DNS-зону. Если после этого телефон не открывает сайт — нужен проброс портов на роутере.</p>
     <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="network_fix"><input class="form-control" name="domain" value="<?= e($domain) ?>" placeholder="hyper-host.pw"><input class="form-control" name="public_ip" value="<?= e($pub) ?>" placeholder="90.189.208.25"><button class="btn btn-primary btn-lg"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Починить сеть и SSL-доступ</button></form>
-    <form method="post" class="vstack gap-2 mt-4"><?= csrf_field() ?><input type="hidden" name="action" value="save_panel_domain"><label class="form-label">Домен панели</label><input class="form-control" name="panel_domain" placeholder="panel.hyper-host.pw"><button class="btn btn-soft">Привязать домен панели</button></form>
+    <form method="post" class="vstack gap-2 mt-4"><?= csrf_field() ?><input type="hidden" name="action" value="save_panel_domain"><label class="form-label">Домен панели</label><input class="form-control" name="panel_domain" value="<?= e(setting_get('panel_domain_override', (string)app_config('panel_domain', ''))) ?>" placeholder="panel.hyper-host.pw"><button class="btn btn-soft"><i class="fa-solid fa-link me-2"></i>Привязать именно к панели</button><div class="small muted mt-2">Если этот домен случайно был создан как сайт, панель отключит сайт-конфиг и привяжет домен к HYPER-HOST.</div></form>
   </div></div>
   <div class="col-xl-7"><div class="panel-card"><h2>Диагностика доступа</h2>
   <div class="network-check-grid">
@@ -472,7 +472,7 @@ function view_network(): void { $sites=db()->query('SELECT * FROM sites ORDER BY
 
 function view_ssl(): void {
     $sites=db()->query('SELECT * FROM sites ORDER BY domain')->fetchAll();
-    $certs=run_ctl_json_cached(['ssl-status-json'],8,120); $map=[]; if(!isset($certs['_error'])) foreach($certs as $c) $map[$c['domain']]=$c;
+    $certs=run_ctl_json_cached(['ssl-status-json'],8,300); $map=[]; if(!isset($certs['_error'])) foreach($certs as $c) $map[$c['domain']]=$c;
     $savedPublicIp = setting_get('public_ip_override', (string)app_config('public_ip',''));
     $modals = [];
 ?>
@@ -495,7 +495,7 @@ function view_ssl(): void {
   <div class="table-responsive"><table class="table table-dark-soft align-middle mb-0"><thead><tr><th>Сайт</th><th>Проверка</th><th>Сертификат</th><th class="text-end">Действия</th></tr></thead><tbody>
   <?php foreach($sites as $s):
       $c=$map[$s['domain']]??null;
-      $dns=run_ctl_json_cached(['ssl-check-json',$s['domain']],10,90);
+      $dns=run_ctl_json_cached(['ssl-check-json',$s['domain']],8,300);
       $hasCert = $c && (($c['status'] ?? '') === 'ok');
       $ready=empty($dns['_error']) && !empty($dns['certbot_ready']);
       $points=empty($dns['_error']) && !empty($dns['points_here']);
@@ -534,14 +534,30 @@ function view_ssl(): void {
   </tbody></table></div>
 </div>
 <?= implode("\n", $modals) ?>
-<div class="panel-card mt-4">
-  <h2><i class="fa-solid fa-network-wired me-2"></i>SSL на IP</h2>
-  <p class="muted mb-2">Для домена используй Let’s Encrypt. Для локального IP доступен self-signed сертификат.</p>
-  <pre class="logs mb-0">sudo hyper-host-ctl ssl-ip-selfsigned 192.168.0.179</pre>
+<div class="row g-4 mt-1">
+  <div class="col-lg-6">
+    <div class="panel-card h-100">
+      <h2><i class="fa-solid fa-gauge-high me-2"></i>SSL для панели</h2>
+      <p class="muted">Домен <code>panel.hyper-host.pw</code> должен открывать именно панель, а не обычный сайт.</p>
+      <div class="cmd-stack">
+        <button type="button" class="cmd-copy" onclick="copyText('sudo hyper panel domain panel.hyper-host.pw')"><i class="fa-solid fa-copy"></i><code>sudo hyper panel domain panel.hyper-host.pw</code></button>
+        <button type="button" class="cmd-copy" onclick="copyText('sudo hyper ssl panel panel.hyper-host.pw memes4u1337@mail.ru')"><i class="fa-solid fa-copy"></i><code>sudo hyper ssl panel panel.hyper-host.pw memes4u1337@mail.ru</code></button>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-6">
+    <div class="panel-card h-100">
+      <h2><i class="fa-solid fa-network-wired me-2"></i>SSL на внутренний IP</h2>
+      <p class="muted">Для IP нельзя получить обычный зелёный Let’s Encrypt. Панель поставит локальный self-signed SSL на <code>192.168.0.179</code>.</p>
+      <div class="cmd-stack">
+        <button type="button" class="cmd-copy" onclick="copyText('sudo hyper ssl ip 192.168.0.179')"><i class="fa-solid fa-copy"></i><code>sudo hyper ssl ip 192.168.0.179</code></button>
+      </div>
+    </div>
+  </div>
 </div>
 <?php }
 
-function view_php(): void { $sites=db()->query('SELECT * FROM sites ORDER BY domain')->fetchAll(); $versions=run_ctl_json_cached(['php-list-json'],20,60); ?>
+function view_php(): void { $sites=db()->query('SELECT * FROM sites ORDER BY domain')->fetchAll(); $versions=run_ctl_json_cached(['php-list-json'],10,300); ?>
 <div class="panel-card"><h2>PHP-версии по сайтам</h2><table class="table table-dark-soft align-middle"><tbody><?php foreach($sites as $s): ?><tr><td><b><?= e($s['domain']) ?></b><div class="small muted">текущая: PHP <?= e($s['php_version']?:'default') ?></div></td><td><form method="post" class="d-flex gap-2"><?= csrf_field() ?><input type="hidden" name="action" value="set_site_php"><input type="hidden" name="id" value="<?= (int)$s['id'] ?>"><select class="form-select" name="php_version"><?php foreach(($versions['_error']??null)?[]:$versions as $v): ?><option value="<?= e($v['version']) ?>" <?= ($s['php_version']??'')===$v['version']?'selected':'' ?>>PHP <?= e($v['version']) ?></option><?php endforeach; ?></select><button class="btn btn-primary">Сохранить</button></form></td></tr><?php endforeach; ?></tbody></table><p class="muted">Панель переключает только уже установленные PHP-FPM версии. Новые версии PHP ставятся пакетами Ubuntu/PPA.</p></div><?php }
 
 function view_cron(): void { $rows=db()->query('SELECT * FROM cron_tasks ORDER BY id DESC')->fetchAll(); ?>

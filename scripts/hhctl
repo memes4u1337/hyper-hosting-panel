@@ -93,6 +93,78 @@ ensure_acme_locations_all() {
   shopt -u nullglob
 }
 
+write_panel_nginx_conf() {
+  local domain="${1:-$PANEL_DOMAIN}"
+  [[ -n "$domain" ]] || domain="_"
+  mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled "$PANEL_DIR/public/.well-known/acme-challenge"
+  chown -R www-data:www-data "$PANEL_DIR/public/.well-known" 2>/dev/null || true
+  chmod -R a+rX "$PANEL_DIR/public/.well-known" 2>/dev/null || true
+  cat > /etc/nginx/sites-available/hyper-host-panel.conf <<EOPANELNGINX
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name ${domain} _;
+
+    root ${PANEL_DIR}/public;
+    index index.php index.html;
+    client_max_body_size 256M;
+
+    access_log /var/log/nginx/hyper-host-panel.access.log;
+    error_log /var/log/nginx/hyper-host-panel.error.log;
+
+    # HYPER-HOST PANEL ACME CHALLENGE
+    location ^~ /.well-known/acme-challenge/ {
+        root ${PANEL_DIR}/public;
+        default_type "text/plain";
+        try_files \$uri =404;
+        allow all;
+    }
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location /phpmyadmin {
+        alias /usr/share/phpmyadmin/;
+        index index.php index.html;
+    }
+
+    location ~ ^/phpmyadmin/(.+\.php)$ {
+        alias /usr/share/phpmyadmin/\$1;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /usr/share/phpmyadmin/\$1;
+        fastcgi_pass unix:${PHP_FPM_SOCK};
+    }
+
+    location ~ ^/phpmyadmin/(.+)$ {
+        alias /usr/share/phpmyadmin/\$1;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:${PHP_FPM_SOCK};
+    }
+
+    location ~ /\. {
+        deny all;
+    }
+}
+EOPANELNGINX
+  ln -sf /etc/nginx/sites-available/hyper-host-panel.conf /etc/nginx/sites-enabled/hyper-host-panel.conf
+}
+
+panel_domain_conflict_cleanup() {
+  local domain="$1" site_conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf" enabled_conf="$NGINX_ENABLED/hyper-host-site-$domain.conf"
+  # Если этот домен раньше создали как обычный сайт, он перехватывал панель.
+  # Отключаем только nginx-ссылку сайта, файлы сайта не удаляем.
+  if [[ -e "$enabled_conf" || -L "$enabled_conf" ]]; then
+    rm -f "$enabled_conf"
+  fi
+  if [[ -f "$site_conf" ]]; then
+    mv -f "$site_conf" "$site_conf.disabled-for-panel" 2>/dev/null || true
+  fi
+}
+
 
 cleanup_hyper_host_mounts() {
   # Безопасно снимает старые/сломанные bind-mount'ы HYPER-HOST, особенно те,
@@ -183,6 +255,9 @@ cmd_add_site() {
   ensure_dirs
   local domain="${1:-}" aliases="${2:-}" phpv="${3:-}"
   [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain: $domain"
+  if [[ -n "$PANEL_DOMAIN" && "$PANEL_DOMAIN" != "_" && "$domain" == "$PANEL_DOMAIN" ]]; then
+    err "Этот домен закреплён за панелью: $domain. Используй другой домен для сайта или сначала смени panel-domain."
+  fi
   local root="$SITES_DIR/$domain/public_html" sock; sock="$(php_sock_for_version "$phpv")"
   mkdir -p "$root" "$SITES_DIR/$domain/logs"
   [[ -f "$root/index.php" || -f "$root/index.html" ]] || php_index_template_file "$domain работает" "$root/index.php"
@@ -445,8 +520,8 @@ cmd_public_ip() {
 cmd_ssl_ip_selfsigned() {
   local ip="${1:-$SERVER_IP}"
   [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || err "Invalid IP: $ip"
-  local dir="/etc/ssl/hyper-host-ip-$ip" key="$dir/privkey.pem" crt="$dir/fullchain.pem" conf="$dir/openssl.cnf"
-  mkdir -p "$dir"
+  local dir="/etc/ssl/hyper-host-ip-$ip" key="$dir/privkey.pem" crt="$dir/fullchain.pem" conf="$dir/openssl.cnf" nginx_conf="/etc/nginx/sites-available/hyper-host-ip-$ip.conf"
+  mkdir -p "$dir" "$PANEL_DIR/public"
   cat > "$conf" <<EOFIP
 [req]
 default_bits = 2048
@@ -461,11 +536,51 @@ subjectAltName = @alt_names
 [alt_names]
 IP.1 = $ip
 EOFIP
-  openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout "$key" -out "$crt" -config "$conf" >/dev/null 2>&1
+  openssl req -x509 -nodes -days 825 -newkey rsa:2048 -keyout "$key" -out "$crt" -config "$conf" >/dev/null 2>&1
   chmod 0600 "$key"; chmod 0644 "$crt"
-  log "Self-signed IP certificate created: $crt / $key"
-  echo "WARNING: это self-signed сертификат для IP. Браузер будет показывать предупреждение, пока сертификат не добавлен в доверенные. Для публичного доверенного SSL лучше использовать домен."
+  cat > "$nginx_conf" <<EOFIPNGINX
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name $ip;
+
+    ssl_certificate $crt;
+    ssl_certificate_key $key;
+
+    root ${PANEL_DIR}/public;
+    index index.php index.html;
+    client_max_body_size 256M;
+
+    access_log /var/log/nginx/hyper-host-ip-$ip.access.log;
+    error_log /var/log/nginx/hyper-host-ip-$ip.error.log;
+
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+
+    location /phpmyadmin {
+        alias /usr/share/phpmyadmin/;
+        index index.php index.html;
+    }
+
+    location ~ ^/phpmyadmin/(.+\.php)$ {
+        alias /usr/share/phpmyadmin/\$1;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /usr/share/phpmyadmin/\$1;
+        fastcgi_pass unix:${PHP_FPM_SOCK};
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:${PHP_FPM_SOCK};
+    }
 }
+EOFIPNGINX
+  ln -sf "$nginx_conf" "/etc/nginx/sites-enabled/hyper-host-ip-$ip.conf"
+  ufw allow 443/tcp >/dev/null 2>&1 || true
+  nginx -t >/dev/null && systemctl reload nginx || nginx -t
+  log "Self-signed IP SSL enabled: https://$ip -> HYPER-HOST panel"
+  echo "WARNING: это self-signed сертификат для IP. Браузер будет предупреждать о недоверенном сертификате. Для нормального зелёного SSL используй домен panel.hyper-host.pw."
+}
+
 
 
 
@@ -1398,21 +1513,60 @@ cmd_panel_domain() {
   local action="${1:-get}" domain="${2:-}"
   case "$action" in
     get) echo "$PANEL_DOMAIN" ;;
-    set)
+    set|bind)
       [[ -n "$domain" ]] || err "Domain required"
       valid_domain "$domain" || err "Invalid domain"
+      mkdir -p /etc/hyper-host
       if [[ -f "$CONF" ]]; then
-        if grep -q '^PANEL_DOMAIN=' "$CONF"; then sed -i "s#^PANEL_DOMAIN=.*#PANEL_DOMAIN=\"$domain\"#" "$CONF"; else echo "PANEL_DOMAIN=\"$domain\"" >> "$CONF"; fi
+        if grep -q '^PANEL_DOMAIN=' "$CONF"; then sed -i "s#^PANEL_DOMAIN=.*#PANEL_DOMAIN="$domain"#" "$CONF"; else echo "PANEL_DOMAIN="$domain"" >> "$CONF"; fi
       fi
-      if [[ -f /etc/nginx/sites-available/hyper-host-panel.conf ]]; then
-        sed -i -E "s#^[[:space:]]*server_name[[:space:]].*;#    server_name $domain _;#" /etc/nginx/sites-available/hyper-host-panel.conf
+      PANEL_DOMAIN="$domain"
+      panel_domain_conflict_cleanup "$domain"
+      write_panel_nginx_conf "$domain"
+      # Если зона обслуживается нашим DNS, добавляем/обновляем panel A на публичный IP.
+      local apex="${domain#panel.}" pub="$(public_ip)"
+      if [[ "$apex" != "$domain" && -f "$DNS_DIR/db.$apex" ]]; then
+        cmd_dns_wizard "$apex" "$pub" panel >/dev/null 2>&1 || true
       fi
-      nginx_reload
-      log "Panel domain saved: $domain"
+      nginx -t >/dev/null && systemctl reload nginx || nginx -t
+      log "Panel domain bound: $domain -> $PANEL_DIR/public. Если раньше был сайт с таким доменом, он отключён только в nginx, файлы не удалены."
       ;;
     *) err "Use: panel-domain get|set DOMAIN" ;;
   esac
 }
+
+cmd_panel_ssl() {
+  local domain="${1:-$PANEL_DOMAIN}" email="${2:-}"
+  [[ -n "$domain" && "$domain" != "_" ]] || err "Panel domain required. Use: sudo hyper panel domain panel.example.com"
+  [[ -n "$email" ]] || err "Email required"
+  valid_domain "$domain" || err "Invalid domain"
+  cmd_panel_domain set "$domain" >/dev/null
+  ufw allow 80/tcp >/dev/null 2>&1 || true
+  ufw allow 443/tcp >/dev/null 2>&1 || true
+  local root="$PANEL_DIR/public" token body check_ip expected
+  mkdir -p "$root/.well-known/acme-challenge"
+  token="hyper-host-panel-ssl-test-$(date +%s)-$$"
+  printf 'ok-%s' "$token" > "$root/.well-known/acme-challenge/$token"
+  chmod -R a+rX "$root/.well-known" 2>/dev/null || true
+  body="$(curl -fsS --connect-timeout 1 --max-time 2 -H "Host: $domain" "http://127.0.0.1/.well-known/acme-challenge/$token" 2>/dev/null || true)"
+  rm -f "$root/.well-known/acme-challenge/$token" 2>/dev/null || true
+  [[ "$body" == "ok-$token" ]] || err "Панель локально не отдаёт ACME для $domain. Выполни: sudo hyper panel domain $domain"
+  expected="$(public_ip)"
+  check_ip="$(resolve_domain_a_public "$domain" | head -n1)"
+  if [[ -n "$expected" && "$check_ip" != "$expected" ]]; then
+    err "DNS панели смотрит не туда: $domain -> ${check_ip:-нет A}. Нужно: A $domain $expected"
+  fi
+  local log_file="/var/log/letsencrypt/hyper-host-panel-${domain}-$(date +%F-%H%M%S).log"
+  mkdir -p /var/log/letsencrypt
+  log "Panel SSL preflight OK: $domain -> $root"
+  if ! certbot --nginx --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --expand --redirect --preferred-challenges http --cert-name "hyper-host-panel-$domain" -d "$domain" >"$log_file" 2>&1; then
+    tail -n 120 "$log_file" >&2 || true
+    err "SSL панели не выпущен. Лог: $log_file. Проверь проброс TCP 80/443 на $SERVER_IP."
+  fi
+  nginx_reload
+  log "Panel SSL issued: https://$domain / log: $log_file"
+}
+
 
 cmd_repair() {
   ensure_dirs; ensure_nologin_shell; ensure_bot_user; cleanup_hyper_host_mounts; ensure_acme_locations_all
@@ -1500,6 +1654,7 @@ case "${1:-}" in
   network-fix) shift; cmd_network_fix "$@" ;;
   network-doctor-json) shift; cmd_network_doctor_json "$@" ;;
   panel-domain) shift; cmd_panel_domain "$@" ;;
+  panel-ssl) shift; cmd_panel_ssl "$@" ;;
   repair) shift; cmd_repair "$@" ;;
   *) cat >&2 <<EOHELP
 Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
@@ -1514,6 +1669,7 @@ Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
        hyper-host-ctl dns-wizard DOMAIN [PUBLIC_IP] [panel]
        hyper-host-ctl dns-status-json DOMAIN
        hyper-host-ctl panel-domain set panel.example.com
+       hyper-host-ctl panel-ssl panel.example.com email@example.com
        hyper-host-ctl pm2-persist
        hyper-host-ctl ssl-fix-site DOMAIN
        hyper-host-ctl ssl-ip-selfsigned 192.168.0.179

@@ -281,19 +281,43 @@ function hh_cache_key(array $args): string
 
 function run_ctl_json_cached(array $args, int $timeout = 20, int $ttl = 8): array
 {
+    // HYPER-HOST v18 fast mode:
+    // тяжёлые shell-проверки больше не запускаются на каждое открытие вкладки.
+    // Если кэш свежий — отдаём его сразу. Если команда временно зависла/упала —
+    // отдаём старый кэш до 30 минут, чтобы панель не тормозила и не висела.
+    $ttl = max($ttl, 60);
+    $staleTtl = max($ttl, 1800);
     $dir = hh_cache_dir();
     $file = $dir . '/' . hh_cache_key($args) . '.json';
-    if ($ttl > 0 && is_file($file) && (time() - filemtime($file) <= $ttl)) {
+    $readCached = static function(string $file): ?array {
         $raw = @file_get_contents($file);
         $data = json_decode((string)$raw, true);
-        if (is_array($data)) {
-            $data['_cached'] = true;
-            return $data;
+        return is_array($data) ? $data : null;
+    };
+    if (is_file($file)) {
+        $age = time() - filemtime($file);
+        if ($ttl > 0 && $age <= $ttl) {
+            $data = $readCached($file);
+            if (is_array($data)) {
+                $data['_cached'] = true;
+                $data['_cache_age'] = $age;
+                return $data;
+            }
         }
     }
-    $data = run_ctl_json($args, $timeout);
+    $data = run_ctl_json($args, min($timeout, 12));
     if (!isset($data['_error'])) {
         @file_put_contents($file, json_encode($data, JSON_UNESCAPED_UNICODE));
+        return $data;
+    }
+    if (is_file($file) && (time() - filemtime($file) <= $staleTtl)) {
+        $cached = $readCached($file);
+        if (is_array($cached)) {
+            $cached['_cached'] = true;
+            $cached['_stale'] = true;
+            $cached['_cache_age'] = time() - filemtime($file);
+            return $cached;
+        }
     }
     return $data;
 }

@@ -174,8 +174,10 @@ PY
     check) [[ -n "${1:-}" ]] || err "Используй: sudo hyper ssl check DOMAIN"; $CTL ssl-check-json "$1" | json_pretty ;;
     fix) [[ -n "${1:-}" ]] || err "Используй: sudo hyper ssl fix DOMAIN"; $CTL ssl-fix-site "$1" ;;
     issue|create) [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper ssl issue DOMAIN EMAIL"; $CTL ssl-site "$1" "$2" ;;
+    panel) [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper ssl panel panel.example.com EMAIL"; $CTL panel-ssl "$1" "$2" ;;
+    ip|local-ip) $CTL ssl-ip-selfsigned "${1:-}" ;;
     renew) $CTL ssl-renew-all ;;
-    *) err "SSL команды: sudo hyper ssl status | check DOMAIN | fix DOMAIN | issue DOMAIN EMAIL | renew" ;;
+    *) err "SSL команды: sudo hyper ssl status | check DOMAIN | fix DOMAIN | issue DOMAIN EMAIL | panel PANEL_DOMAIN EMAIL | ip [192.168.0.179] | renew" ;;
   esac
 }
 
@@ -199,6 +201,16 @@ cmd_bot() {
     doctor) $CTL bot-doctor ;;
     persist|24) $CTL pm2-persist ;;
     *) err "Bot команды: list, start NAME, stop NAME, restart NAME, logs NAME, fix NAME, delete NAME [--delete-files], create NAME runtime main, doctor, persist" ;;
+  esac
+}
+
+cmd_panel() {
+  local sub="${1:-status}"; shift || true
+  case "$sub" in
+    status) echo "Панель: $($CTL panel-domain get 2>/dev/null || echo '_')" ;;
+    domain|bind) [[ -n "${1:-}" ]] || err "Используй: sudo hyper panel domain panel.hyper-host.pw"; $CTL panel-domain set "$1" ;;
+    ssl) [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper panel ssl panel.hyper-host.pw EMAIL"; $CTL panel-ssl "$1" "$2" ;;
+    *) err "Panel команды: sudo hyper panel domain DOMAIN | sudo hyper panel ssl DOMAIN EMAIL | sudo hyper panel status" ;;
   esac
 }
 
@@ -333,6 +345,8 @@ cmd_help() {
   sudo hyper bots                    список ботов и статус
   sudo hyper sites                   список сайтов
   sudo hyper ssl status              список SSL сертификатов
+  sudo hyper panel domain DOMAIN      привязать домен именно к панели
+  sudo hyper panel ssl DOMAIN EMAIL   выпустить SSL для панели
   sudo hyper ftp                     FTP-пользователи
   sudo hyper dbs                     базы данных
   sudo hyper php                     PHP-FPM версии
@@ -363,6 +377,8 @@ SSL:
   sudo hyper ssl check DOMAIN
   sudo hyper ssl fix DOMAIN
   sudo hyper ssl issue DOMAIN EMAIL
+  sudo hyper ssl panel panel.hyper-host.pw EMAIL
+  sudo hyper ssl ip 192.168.0.179
   sudo hyper ssl renew
 
 DNS:
@@ -390,6 +406,7 @@ case "${1:-help}" in
   ftp) shift; cmd_ftp "$@" ;;
   db|dbs|databases) shift; cmd_dbs "$@" ;;
   ssl) shift; cmd_ssl "$@" ;;
+  panel) shift; cmd_panel "$@" ;;
   network|net) shift; cmd_network "$@" ;;
   dns) shift; cmd_dns "$@" ;;
   backup|backups) shift; cmd_backup "$@" ;;
