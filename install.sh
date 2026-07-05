@@ -37,6 +37,12 @@ get_server_ip() {
   echo "$ip"
 }
 
+# Preserve existing settings on updates. Older installers overwrote PANEL_DOMAIN/PUBLIC_IP
+# and panel.hyper-host.pw could become a normal site again after every update.
+if [[ -f "$CONF_DIR/hyper-host.conf" ]]; then
+  # shellcheck disable=SC1090
+  source "$CONF_DIR/hyper-host.conf" || true
+fi
 SERVER_IP="${SERVER_IP:-$(get_server_ip)}"
 PUBLIC_IP="${PUBLIC_IP:-${SERVER_PUBLIC_IP:-}}"
 PANEL_DOMAIN="${PANEL_DOMAIN:-_}"

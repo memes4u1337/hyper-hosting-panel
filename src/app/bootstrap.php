@@ -207,7 +207,7 @@ function human_bytes(float $bytes): string
 
 function table_count(string $table): int
 {
-    $allowed = ['sites', 'folders', 'ftp_accounts', 'databases', 'bots', 'events', 'backup_jobs', 'dns_zones', 'dns_records', 'cron_tasks', 'auth_logs'];
+    $allowed = ['sites', 'folders', 'ftp_accounts', 'databases', 'mysql_accounts', 'bots', 'events', 'backup_jobs', 'dns_zones', 'dns_records', 'cron_tasks', 'auth_logs'];
     if (!in_array($table, $allowed, true)) {
         return 0;
     }
@@ -397,15 +397,40 @@ function panel_host_for_connections(): string
     return (string)app_config('server_ip');
 }
 
-function upsert_db_row(string $dbName, string $dbUser, int $remote): void
+function upsert_db_row(string $dbName, string $dbUser, int $remote, string $passwordPlain = '', string $host = '127.0.0.1', string $port = '3306'): void
 {
     $stmt = db()->prepare('SELECT id FROM databases WHERE db_name = ?');
     $stmt->execute([$dbName]);
     if ($stmt->fetch()) {
-        db()->prepare('UPDATE databases SET db_user = ?, remote_allowed = ? WHERE db_name = ?')->execute([$dbUser, $remote, $dbName]);
+        if ($passwordPlain !== '') {
+            db()->prepare('UPDATE databases SET db_user = ?, remote_allowed = ?, db_password_plain = ?, db_host = ?, db_port = ? WHERE db_name = ?')->execute([$dbUser, $remote, $passwordPlain, $host, $port, $dbName]);
+        } else {
+            db()->prepare('UPDATE databases SET db_user = ?, remote_allowed = ?, db_host = ?, db_port = ? WHERE db_name = ?')->execute([$dbUser, $remote, $host, $port, $dbName]);
+        }
     } else {
-        db()->prepare('INSERT INTO databases(db_name, db_user, remote_allowed) VALUES(?, ?, ?)')->execute([$dbName, $dbUser, $remote]);
+        db()->prepare('INSERT INTO databases(db_name, db_user, remote_allowed, db_password_plain, db_host, db_port) VALUES(?, ?, ?, ?, ?, ?)')->execute([$dbName, $dbUser, $remote, $passwordPlain, $host, $port]);
     }
+}
+
+function upsert_mysql_account_row(string $username, string $passwordPlain, string $hostPattern, string $dbName, string $privileges, int $remote): void
+{
+    $stmt = db()->prepare('SELECT id FROM mysql_accounts WHERE username = ?');
+    $stmt->execute([$username]);
+    if ($stmt->fetch()) {
+        db()->prepare('UPDATE mysql_accounts SET password_plain = ?, host_pattern = ?, db_name = ?, privileges = ?, remote_allowed = ? WHERE username = ?')->execute([$passwordPlain, $hostPattern, $dbName, $privileges, $remote, $username]);
+    } else {
+        db()->prepare('INSERT INTO mysql_accounts(username, password_plain, host_pattern, db_name, privileges, remote_allowed) VALUES(?, ?, ?, ?, ?, ?)')->execute([$username, $passwordPlain, $hostPattern, $dbName, $privileges, $remote]);
+    }
+}
+
+function phpmyadmin_url(): string
+{
+    $host = panel_host_for_connections();
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    if (!empty($_SERVER['HTTP_HOST'])) {
+        $host = (string)$_SERVER['HTTP_HOST'];
+    }
+    return $scheme . '://' . $host . '/phpmyadmin/';
 }
 
 function upsert_bot_row(string $name, string $runtime, string $path, string $command): void

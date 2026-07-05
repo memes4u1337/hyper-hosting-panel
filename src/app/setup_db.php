@@ -58,6 +58,17 @@ CREATE TABLE IF NOT EXISTS databases (
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS mysql_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_plain TEXT NOT NULL DEFAULT '',
+    host_pattern TEXT NOT NULL DEFAULT 'localhost',
+    db_name TEXT NOT NULL DEFAULT '',
+    privileges TEXT NOT NULL DEFAULT 'ALL',
+    remote_allowed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
 CREATE TABLE IF NOT EXISTS bots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
@@ -141,6 +152,14 @@ ensure_column($pdo, 'sites', 'php_version', "TEXT NOT NULL DEFAULT ''");
 ensure_column($pdo, 'sites', 'disk_limit_mb', "INTEGER NOT NULL DEFAULT 0");
 ensure_column($pdo, 'ftp_accounts', 'host', "TEXT NOT NULL DEFAULT ''");
 ensure_column($pdo, 'ftp_accounts', 'password_plain', "TEXT NOT NULL DEFAULT ''");
+ensure_column($pdo, 'databases', 'db_password_plain', "TEXT NOT NULL DEFAULT ''");
+ensure_column($pdo, 'databases', 'db_host', "TEXT NOT NULL DEFAULT '127.0.0.1'");
+ensure_column($pdo, 'databases', 'db_port', "TEXT NOT NULL DEFAULT '3306'");
+ensure_column($pdo, 'mysql_accounts', 'password_plain', "TEXT NOT NULL DEFAULT ''");
+ensure_column($pdo, 'mysql_accounts', 'host_pattern', "TEXT NOT NULL DEFAULT 'localhost'");
+ensure_column($pdo, 'mysql_accounts', 'db_name', "TEXT NOT NULL DEFAULT ''");
+ensure_column($pdo, 'mysql_accounts', 'privileges', "TEXT NOT NULL DEFAULT 'ALL'");
+ensure_column($pdo, 'mysql_accounts', 'remote_allowed', "INTEGER NOT NULL DEFAULT 0");
 ensure_column($pdo, 'bots', 'memory_limit_mb', "INTEGER NOT NULL DEFAULT 0");
 ensure_column($pdo, 'bots', 'process_limit', "INTEGER NOT NULL DEFAULT 0");
 
