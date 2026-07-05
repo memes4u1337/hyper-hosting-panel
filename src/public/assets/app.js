@@ -11,3 +11,15 @@ document.addEventListener('click', function(e){
   if(!modal) return;
   if(modal.parentElement !== document.body) document.body.appendChild(modal);
 }, true);
+
+
+// HYPER-HOST v16: animated sidebar groups
+(function(){
+  document.addEventListener('click', function(e){
+    const btn=e.target.closest('.nav-group-toggle');
+    if(!btn) return;
+    const group=btn.closest('.nav-group');
+    if(!group) return;
+    group.classList.toggle('open');
+  });
+})();

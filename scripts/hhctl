@@ -255,13 +255,33 @@ public_ip() {
   echo "$SERVER_IP"
 }
 
+resolve_domain_ips_public() {
+  # HYPER-HOST v16: проверяем DNS через публичные резолверы, а не через локальный bind/hosts.
+  # Иначе сервер может сам себе отдавать 192.168.x.x и SSL/панель думают, что DNS неправильный.
+  local domain="$1" ns
+  for ns in 1.1.1.1 8.8.8.8 9.9.9.9; do
+    { dig +time=2 +tries=1 +short @"$ns" A "$domain" 2>/dev/null; dig +time=2 +tries=1 +short @"$ns" AAAA "$domain" 2>/dev/null; }
+  done | sed '/^$/d' | sort -u
+}
+
+resolve_domain_a_public() {
+  local domain="$1" ns
+  for ns in 1.1.1.1 8.8.8.8 9.9.9.9; do
+    dig +time=2 +tries=1 +short @"$ns" A "$domain" 2>/dev/null
+  done | sed '/^$/d' | sort -u
+}
+
 resolve_domain_ips() {
-  local domain="$1"
+  local domain="$1" out
+  out="$(resolve_domain_ips_public "$domain")"
+  [[ -n "$out" ]] && { echo "$out"; return; }
   { dig +short A "$domain" 2>/dev/null; dig +short AAAA "$domain" 2>/dev/null; } | sed '/^$/d' | sort -u
 }
 
 resolve_domain_a() {
-  local domain="$1"
+  local domain="$1" out
+  out="$(resolve_domain_a_public "$domain")"
+  [[ -n "$out" ]] && { echo "$out"; return; }
   dig +short A "$domain" 2>/dev/null | sed '/^$/d' | sort -u
 }
 
@@ -1144,6 +1164,43 @@ EOBINDOPT
   touch /etc/bind/named.conf.local
 }
 
+
+extract_ipv4() {
+  printf '%s' "${1:-}" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1 || true
+}
+
+listen_port_tcp() {
+  local port="$1"
+  ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(:|\])${port}$"
+}
+
+listen_port_udp() {
+  local port="$1"
+  ss -H -lun 2>/dev/null | awk '{print $5}' | grep -Eq "(:|\])${port}$"
+}
+
+open_server_ports() {
+  # Открываем именно Ubuntu firewall. Роутер всё равно нужно пробросить вручную.
+  ufw allow 80/tcp >/dev/null 2>&1 || true
+  ufw allow 443/tcp >/dev/null 2>&1 || true
+  ufw allow 53/tcp >/dev/null 2>&1 || true
+  ufw allow 53/udp >/dev/null 2>&1 || true
+  ufw allow 21/tcp >/dev/null 2>&1 || true
+  ufw allow 40000:40100/tcp >/dev/null 2>&1 || true
+  if command -v iptables >/dev/null 2>&1; then
+    for p in 80 443 53 21; do iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || true; done
+    iptables -C INPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+    iptables -C INPUT -p tcp --dport 40000:40100 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 40000:40100 -j ACCEPT 2>/dev/null || true
+  fi
+}
+
+ensure_nginx_public_listen() {
+  systemctl enable nginx >/dev/null 2>&1 || true
+  nginx_force_listen_all
+  nginx -t >/dev/null 2>&1 || nginx -t
+  systemctl restart nginx 2>/dev/null || systemctl reload nginx 2>/dev/null || true
+}
+
 nginx_force_listen_all() {
   # HYPER-HOST не должен биндиться на 90.x.x.x, если сервер за роутером.
   # Внешний IP находится на роутере, а nginx на Ubuntu должен слушать 0.0.0.0:80/443.
@@ -1164,37 +1221,44 @@ PYNGINXALL
 }
 
 cmd_network_fix() {
-  local domain="${1:-}" pub="${2:-}"
-  [[ -n "$pub" ]] || pub="$(configured_public_ip)"
-  [[ -n "$pub" ]] || pub="$(choose_ssl_expected_ip "${domain:-example.com}")"
-  [[ -n "$pub" ]] && cmd_public_ip set "$pub" >/dev/null 2>&1 || true
-  nginx_force_listen_all
+  local domain="${1:-}" pub="${2:-}" zonefile=""
+  pub="$(extract_ipv4 "$pub")"
+  [[ -n "$pub" ]] || pub="$(extract_ipv4 "$(configured_public_ip)")"
+  [[ -n "$pub" ]] || pub="$(extract_ipv4 "$(choose_ssl_expected_ip "${domain:-example.com}")")"
+  [[ -n "$pub" ]] || err "Не смог определить публичный IP. Используй: sudo hyper network fix DOMAIN 90.189.208.25"
+  [[ -z "$domain" || "$domain" == "_" ]] || valid_domain "$domain" || err "Invalid domain: $domain"
+
+  cmd_public_ip set "$pub" >/dev/null 2>&1 || true
+  open_server_ports
   ensure_acme_locations_all
-  ufw allow 80/tcp >/dev/null 2>&1 || true
-  ufw allow 443/tcp >/dev/null 2>&1 || true
-  ufw allow 53/tcp >/dev/null 2>&1 || true
-  ufw allow 53/udp >/dev/null 2>&1 || true
+  ensure_nginx_public_listen
+
   if [[ -n "$domain" && "$domain" != "_" ]]; then
-    valid_domain "$domain" || err "Invalid domain: $domain"
     local root; root="$(site_root_for_domain "$domain")"
     ensure_acme_location_for_domain "$domain" "$root"
+    # Если домен уже обслуживается нашим bind9, принудительно обновляем зону на публичный IP.
+    zonefile="$DNS_DIR/db.$domain"
+    if [[ -f "$zonefile" ]] || grep -q "zone \"$domain\"" /etc/bind/named.conf.local 2>/dev/null; then
+      cmd_dns_wizard "$domain" "$pub" panel >/dev/null 2>&1 || true
+    fi
   fi
+
   write_bind_authoritative_defaults
   systemctl enable bind9 >/dev/null 2>&1 || true
   systemctl restart bind9 2>/dev/null || true
   nginx -t >/dev/null && systemctl reload nginx || nginx -t
-  log "Network fixed: nginx listens on all IPs, ports 80/443/53 allowed, public_ip=${pub:-unknown}"
+  log "Network fixed: nginx=0.0.0.0, server ports 80/443/53 opened, public_ip=$pub"
+  echo "OK: серверная часть открыта. Если с телефона всё равно не грузит — на роутере пробрось TCP 80/443 -> $SERVER_IP и проверь, что у домена A=$pub."
 }
-
 cmd_network_doctor_json() {
   local domain="${1:-}" pub cfg out server nginx_ok bind_ok ufw_status l80 l443 l53 dns_a dns_status local_http local_acme root problem hint
   server="$SERVER_IP"; cfg="$(configured_public_ip)"; pub="$(public_ip)"; out="$(outbound_public_ip)"
   nginx_ok=0; nginx -t >/dev/null 2>&1 && nginx_ok=1
   bind_ok=0; systemctl is-active bind9 >/dev/null 2>&1 && bind_ok=1
   ufw_status="$(ufw status 2>/dev/null | head -n1 | sed 's/^Status: //')"
-  l80=0; ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq '(:80$|0\.0\.0\.0:80|\[::\]:80)' && l80=1
-  l443=0; ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq '(:443$|0\.0\.0\.0:443|\[::\]:443)' && l443=1
-  l53=0; ss -lun 2>/dev/null | awk '{print $5}' | grep -Eq '(:53$|0\.0\.0\.0:53|\[::\]:53)' && l53=1
+  l80=0; listen_port_tcp 80 && l80=1
+  l443=0; listen_port_tcp 443 && l443=1
+  l53=0; listen_port_udp 53 && l53=1
   dns_a=""; dns_status="not_checked"; local_http=0; local_acme=0; problem=""; hint=""
   if [[ -n "$domain" ]]; then
     valid_domain "$domain" || err "Invalid domain"
@@ -1293,7 +1357,7 @@ cmd_dns_status_json() {
   named_ok=0; [[ -f "$zonefile" ]] && named-checkzone "$domain" "$zonefile" >/dev/null 2>&1 && named_ok=1
   open53=0; ss -lun 2>/dev/null | awk '{print $5}' | grep -Eq '(:53$|0\.0\.0\.0:53|\[::\]:53)' && open53=1
   a_local="$(dig +short @127.0.0.1 "$domain" A 2>/dev/null | sed '/^$/d' | sort -u || true)"
-  a_public="$(dig +short "$domain" A 2>/dev/null | sed '/^$/d' | sort -u || true)"
+  a_public="$(resolve_domain_a_public "$domain")"
   DOMAIN="$domain" PUBLIC_IP="$pub" ZONEFILE="$zonefile" BIND_OK="$bind_ok" NAMED_OK="$named_ok" OPEN53="$open53" A_LOCAL="$a_local" A_PUBLIC="$a_public" python3 - <<'PYDNS'
 import os,json
 lines=lambda x:[i for i in x.splitlines() if i.strip()]
@@ -1369,7 +1433,8 @@ cmd_repair() {
 www-data ALL=(root) NOPASSWD: /usr/local/sbin/hyper-host-ctl *
 EOSUDO
   chmod 0440 /etc/sudoers.d/hyper-host; visudo -cf /etc/sudoers.d/hyper-host >/dev/null
-  ufw allow 80/tcp >/dev/null 2>&1 || true; ufw allow 443/tcp >/dev/null 2>&1 || true; ufw allow 21/tcp >/dev/null 2>&1 || true; ufw allow 40000:40100/tcp >/dev/null 2>&1 || true
+  open_server_ports
+  ensure_nginx_public_listen
   systemctl restart vsftpd 2>/dev/null || true; systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
   log "Repair finished: permissions, ACL, FTP safe homes, PM2 hyperbot and services checked"
 }

@@ -239,7 +239,7 @@ cmd_network() {
     doctor|check)
       $CTL network-doctor-json "${1:-}" | json_pretty
       ;;
-    fix)
+    fix|open)
       $CTL network-fix "${1:-}" "${2:-}"
       ;;
     public-ip)
@@ -250,7 +250,7 @@ cmd_network() {
       local act="${1:-get}"; shift || true
       $CTL panel-domain "$act" "$@"
       ;;
-    *) err "Network команды: sudo hyper network doctor [DOMAIN] | fix [DOMAIN] [PUBLIC_IP] | public-ip set IP | panel-domain set DOMAIN" ;;
+    *) err "Network команды: sudo hyper network doctor [DOMAIN] | fix DOMAIN PUBLIC_IP | open DOMAIN PUBLIC_IP | public-ip set IP | panel-domain set DOMAIN" ;;
   esac
 }
 
