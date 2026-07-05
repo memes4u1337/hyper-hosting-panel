@@ -753,7 +753,13 @@ cmd_delete_ftp() {
 cmd_ftp_password() { local username="${1:-}" password="${2:-}"; [[ -n "$username" && -n "$password" ]] || err "Username and password required"; valid_name "$username" || err "Invalid username"; [[ "$username" == hhftp_* ]] || username="hhftp_${username}"; id "$username" >/dev/null 2>&1 || err "FTP user not found"; echo "$username:$password" | chpasswd; fix_web_permissions "$SITES_DIR" "$username"; log "FTP password updated: $username"; }
 
 cmd_create_db() {
-  local db="${1:-}" user="${2:-}" pass="${3:-}" remote="${4:-0}"; [[ -n "$db" && -n "$user" && -n "$pass" ]] || err "DB, user and password required"; valid_db_name "$db" || err "Invalid db name"; valid_db_name "$user" || err "Invalid db user"; epass="$(sql_escape "$pass")"
+  local db="${1:-}" user="${2:-}" pass="${3:-}" remote="${4:-0}" host_pattern="${5:-}"
+  [[ -n "$db" && -n "$user" && -n "$pass" ]] || err "DB, user and password required"
+  valid_db_name "$db" || err "Invalid db name"
+  valid_db_name "$user" || err "Invalid db user"
+  local epass; epass="$(sql_escape "$pass")"
+  [[ -z "$host_pattern" ]] && { [[ "$remote" == "1" ]] && host_pattern="%" || host_pattern="localhost"; }
+  validate_mysql_host_pattern "$host_pattern"
   mysql <<SQL
 CREATE DATABASE IF NOT EXISTS \`${db}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '${user}'@'localhost' IDENTIFIED BY '${epass}';
@@ -761,20 +767,39 @@ ALTER USER '${user}'@'localhost' IDENTIFIED BY '${epass}';
 GRANT ALL PRIVILEGES ON \`${db}\`.* TO '${user}'@'localhost';
 SQL
   if [[ "$remote" == "1" ]]; then mysql <<SQL
-CREATE USER IF NOT EXISTS '${user}'@'%' IDENTIFIED BY '${epass}';
-ALTER USER '${user}'@'%' IDENTIFIED BY '${epass}';
-GRANT ALL PRIVILEGES ON \`${db}\`.* TO '${user}'@'%';
+CREATE USER IF NOT EXISTS '${user}'@'${host_pattern}' IDENTIFIED BY '${epass}';
+ALTER USER '${user}'@'${host_pattern}' IDENTIFIED BY '${epass}';
+GRANT ALL PRIVILEGES ON \`${db}\`.* TO '${user}'@'${host_pattern}';
 SQL
   fi
-  mysql -e "FLUSH PRIVILEGES;"; log "Database created: $db / $user / remote=$remote"
+  mysql -e "FLUSH PRIVILEGES;"
+  log "Database created: $db / $user / remote=$remote host=$host_pattern"
 }
-cmd_delete_db() { local db="${1:-}" user="${2:-}"; [[ -n "$db" && -n "$user" ]] || err "DB and user required"; valid_db_name "$db" || err "Invalid db"; valid_db_name "$user" || err "Invalid user"; mysql -e "DROP DATABASE IF EXISTS \`${db}\`; DROP USER IF EXISTS '${user}'@'localhost'; DROP USER IF EXISTS '${user}'@'%'; FLUSH PRIVILEGES;"; log "Database deleted: $db / $user"; }
+
+cmd_delete_db() {
+  local db="${1:-}" user="${2:-}"
+  [[ -n "$db" && -n "$user" ]] || err "DB and user required"
+  valid_db_name "$db" || err "Invalid db"
+  valid_db_name "$user" || err "Invalid user"
+  mysql -e "DROP DATABASE IF EXISTS \`${db}\`; DROP USER IF EXISTS '${user}'@'localhost'; DROP USER IF EXISTS '${user}'@'%'; FLUSH PRIVILEGES;"
+  mysql -N -B -e "SELECT Host FROM mysql.user WHERE User='$(sql_escape "$user")'" 2>/dev/null | while read -r h; do [[ -n "$h" ]] && mysql -e "DROP USER IF EXISTS '${user}'@'${h}';" || true; done
+  mysql -e "FLUSH PRIVILEGES;"
+  log "Database deleted: $db / $user"
+}
+
+validate_mysql_host_pattern() {
+  local h="${1:-}"
+  [[ "$h" == "localhost" || "$h" == "%" ]] && return 0
+  [[ "$h" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && return 0
+  [[ "$h" =~ ^[A-Za-z0-9._%-]{1,128}$ ]] && return 0
+  err "Invalid MySQL host pattern: $h"
+}
 
 cmd_create_mysql_account() {
   local user="${1:-}" pass="${2:-}" host="${3:-localhost}" db="${4:-}" priv="${5:-ALL}"
   [[ -n "$user" && -n "$pass" ]] || err "User and password required"
   valid_db_name "$user" || err "Invalid MySQL user"
-  [[ "$host" == "localhost" || "$host" == "%" ]] || err "Host must be localhost or %"
+  validate_mysql_host_pattern "$host"
   [[ -z "$db" || "$db" == "*" || "$db" == "*.*" || "$db" =~ ^[A-Za-z0-9_]{2,48}$ ]] || err "Invalid db name"
   [[ "$priv" =~ ^(ALL|SELECT|READ)$ ]] || priv="ALL"
   local epass; epass="$(sql_escape "$pass")"
@@ -802,7 +827,7 @@ cmd_delete_mysql_account() {
   local user="${1:-}" host="${2:-localhost}"
   [[ -n "$user" ]] || err "User required"
   valid_db_name "$user" || err "Invalid MySQL user"
-  [[ "$host" == "localhost" || "$host" == "%" ]] || err "Host must be localhost or %"
+  validate_mysql_host_pattern "$host"
   mysql -e "DROP USER IF EXISTS '${user}'@'${host}'; FLUSH PRIVILEGES;"
   log "MySQL account deleted: ${user}@${host}"
 }
@@ -822,6 +847,8 @@ path=Path(sys.argv[1]); value=sys.argv[2]
 text=path.read_text(errors='ignore') if path.exists() else ''
 if '[mysqld]' not in text:
     text='[mysqld]\n'+text
+# выключаем skip-networking, если было
+text=re.sub(r'^\s*skip-networking\s*$', '# skip-networking disabled by HYPER-HOST', text, flags=re.M)
 if re.search(r'^\s*bind-address\s*=', text, re.M):
     text=re.sub(r'^\s*bind-address\s*=.*$', f'bind-address = {value}', text, flags=re.M)
 else:
@@ -841,10 +868,12 @@ PYSET
 
 cmd_mysql_status_json() {
   python3 - <<'PYIN'
-import json, subprocess, re, os
+import json, subprocess, re, os, socket
+
 def sh(cmd):
     try: return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
     except Exception: return ''
+
 bind=''
 for f in ['/etc/mysql/mariadb.conf.d/50-server.cnf','/etc/mysql/my.cnf']:
     if os.path.exists(f):
@@ -852,16 +881,83 @@ for f in ['/etc/mysql/mariadb.conf.d/50-server.cnf','/etc/mysql/my.cnf']:
         m=re.findall(r'^\s*bind-address\s*=\s*(\S+)', txt, re.M)
         if m: bind=m[-1]
 listen=':3306' in sh("ss -lntp | grep ':3306' || true")
+service=sh('systemctl is-active mariadb || systemctl is-active mysql || true')
+panel=os.environ.get('PANEL_DOMAIN','')
+public=os.environ.get('PUBLIC_IP','')
+server=os.environ.get('SERVER_IP','')
+external = panel if panel and panel != '_' else public
+users=[]
+raw=sh("mysql -N -B -e \"SELECT User,Host FROM mysql.user WHERE User NOT IN ('root','mariadb.sys','mysql','debian-sys-maint') ORDER BY User,Host\" 2>/dev/null || true")
+for line in raw.splitlines():
+    p=line.split('\t')
+    if len(p)>=2: users.append({'user':p[0], 'host':p[1]})
 print(json.dumps({
   'bind_address': bind or 'default',
   'listen_3306': listen,
-  'service': sh('systemctl is-active mariadb || true'),
-  'external_host': os.environ.get('PANEL_DOMAIN') if os.environ.get('PANEL_DOMAIN','_')!='_' else os.environ.get('PUBLIC_IP',''),
+  'service': service,
+  'external_host': external,
+  'public_ip': public,
+  'lan_host': server,
   'internal_host': '127.0.0.1',
-  'server_ip': os.environ.get('SERVER_IP',''),
+  'panel_domain': panel,
   'port': '3306',
+  'users': users,
 }, ensure_ascii=False))
 PYIN
+}
+
+cmd_mysql_doctor_json() {
+  python3 - <<'PYDOC'
+import json, os, socket, subprocess
+
+def sh(cmd):
+    try: return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception as e: return ''
+
+def tcp(host, port, timeout=2):
+    try:
+        s=socket.create_connection((host,int(port)), timeout=timeout); s.close(); return True
+    except Exception: return False
+panel=os.environ.get('PANEL_DOMAIN','')
+public=os.environ.get('PUBLIC_IP','')
+server=os.environ.get('SERVER_IP','')
+listen=':3306' in sh("ss -lntp | grep ':3306' || true")
+local_tcp=tcp('127.0.0.1',3306)
+lan_tcp=tcp(server,3306) if server else False
+external_host=panel if panel and panel!='_' else public
+# Внешний host с самого сервера может не работать из-за NAT loopback, поэтому это warning, не fail.
+external_tcp=tcp(external_host,3306) if external_host else False
+bind=''
+for f in ['/etc/mysql/mariadb.conf.d/50-server.cnf','/etc/mysql/my.cnf']:
+    if os.path.exists(f):
+        import re
+        txt=open(f,errors='ignore').read(); m=re.findall(r'^\s*bind-address\s*=\s*(\S+)', txt, re.M)
+        if m: bind=m[-1]
+problem=''
+if not listen or not local_tcp:
+    problem='MariaDB не слушает 3306 на сервере. Выполни: sudo hyper db external enable'
+elif bind not in ('0.0.0.0','::','default','') and bind.startswith('127.'):
+    problem='MariaDB привязана к 127.0.0.1. Для внешнего входа выполни: sudo hyper db external enable'
+print(json.dumps({
+  'service': sh('systemctl is-active mariadb || systemctl is-active mysql || true'),
+  'bind_address': bind or 'default',
+  'listen_3306': listen,
+  'local_127_0_0_1': local_tcp,
+  'lan_host': server,
+  'lan_3306': lan_tcp,
+  'external_host': external_host,
+  'external_3306_from_server': external_tcp,
+  'note': 'Если бот на ПК в этой же Wi-Fi сети — используй MYSQL_HOST=%s. Если бот вне сети — используй MYSQL_HOST=%s и проброс TCP 3306 на роутере.' % (server or '192.168.x.x', external_host or 'PUBLIC_IP'),
+  'problem': problem,
+}, ensure_ascii=False))
+PYDOC
+}
+
+cmd_mysql_test() {
+  local host="${1:-127.0.0.1}" user="${2:-}" pass="${3:-}" db="${4:-}"
+  [[ -n "$user" && -n "$pass" ]] || err "Use: mysql-test HOST USER PASSWORD [DB]"
+  local opt_db=(); [[ -n "$db" ]] && opt_db=("$db")
+  MYSQL_PWD="$pass" mysql -h "$host" -P 3306 -u "$user" -e "SELECT 'ok' AS hyper_host_mysql_test, USER() AS mysql_user, CURRENT_USER() AS grants_user, VERSION() AS version;" "${opt_db[@]}"
 }
 
 
@@ -1789,6 +1885,8 @@ case "${1:-}" in
   delete-mysql-account) shift; cmd_delete_mysql_account "$@" ;;
   mysql-external) shift; cmd_mysql_external "$@" ;;
   mysql-status-json) shift; cmd_mysql_status_json "$@" ;;
+  mysql-doctor-json) shift; cmd_mysql_doctor_json "$@" ;;
+  mysql-test) shift; cmd_mysql_test "$@" ;;
   bot-create) shift; cmd_bot_create "$@" ;;
   bot-deploy) shift; cmd_bot_deploy "$@" ;;
   bot-install-requirements) shift; cmd_bot_install_requirements "$@" ;;

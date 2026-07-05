@@ -446,6 +446,26 @@ function upsert_mysql_account_row(string $username, string $passwordPlain, strin
     }
 }
 
+
+function mysql_host_label(string $host): string
+{
+    if ($host === '%') return 'Любой внешний IP';
+    if ($host === 'localhost' || $host === '127.0.0.1') return 'Только локально';
+    return $host;
+}
+
+function mysql_env_block(string $host, string $db='', string $user='', string $pass=''): string
+{
+    $lines = [
+        'MYSQL_HOST=' . $host,
+        'MYSQL_PORT=3306',
+    ];
+    if ($user !== '') $lines[] = 'MYSQL_USER=' . $user;
+    if ($pass !== '') $lines[] = 'MYSQL_PASSWORD=' . $pass;
+    if ($db !== '') $lines[] = 'MYSQL_DB=' . $db;
+    return implode("\n", $lines);
+}
+
 function phpmyadmin_url(): string
 {
     $host = panel_host_for_connections();

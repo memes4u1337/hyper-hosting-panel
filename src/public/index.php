@@ -83,7 +83,7 @@ function handle_post(string $action): void
                 $id=(int)($_POST['id']??0); $pass=(string)($_POST['password']??''); if(strlen($pass)<8) throw new RuntimeException('Пароль минимум 8 символов'); $st=db()->prepare('SELECT * FROM ftp_accounts WHERE id=?'); $st->execute([$id]); $f=$st->fetch(); if(!$f) throw new RuntimeException('FTP не найден'); $res=run_ctl(['ftp-password',$f['username'],$pass],120); if($res['code']!==0) throw new RuntimeException($res['output']); upsert_ftp_row((string)$f['username'],(string)$f['target_path'],$pass,host_name()); flash('Пароль FTP обновлён','success'); redirect('/?page=ftp');
             }
             case 'create_db': {
-                $db=trim((string)($_POST['db_name']??'')); $du=trim((string)($_POST['db_user']??'')); $pass=(string)($_POST['password']??''); $remote=!empty($_POST['remote_allowed'])?'1':'0'; if(!is_valid_db_name($db)||!is_valid_db_name($du)) throw new RuntimeException('Имя базы/пользователя: латиница, цифры, _'); if(strlen($pass)<10) throw new RuntimeException('Пароль базы минимум 10 символов'); $res=run_ctl(['create-db',$db,$du,$pass,$remote],180); if($res['code']!==0) throw new RuntimeException($res['output']); upsert_db_row($db,$du,(int)$remote,$pass,$remote==='1'?mysql_external_host():mysql_local_host(),'3306'); upsert_mysql_account_row($du,$pass,$remote==='1'?'%':'localhost',$db,'ALL',(int)$remote); flash('База и phpMyAdmin-пользователь созданы','success'); redirect('/?page=databases');
+                $db=trim((string)($_POST['db_name']??'')); $du=trim((string)($_POST['db_user']??'')); $pass=(string)($_POST['password']??''); $remote=!empty($_POST['remote_allowed'])?'1':'0'; $hostPattern=$remote==='1'?(trim((string)($_POST['host_pattern']??'%'))):'localhost'; if($hostPattern==='custom') $hostPattern=trim((string)($_POST['custom_host']??'%')); if(!is_valid_db_name($db)||!is_valid_db_name($du)) throw new RuntimeException('Имя базы/пользователя: латиница, цифры, _'); if(strlen($pass)<10) throw new RuntimeException('Пароль базы минимум 10 символов'); $res=run_ctl(['create-db',$db,$du,$pass,$remote,$hostPattern],180); if($res['code']!==0) throw new RuntimeException($res['output']); upsert_db_row($db,$du,(int)$remote,$pass,$remote==='1'?mysql_external_host():mysql_local_host(),'3306'); upsert_mysql_account_row($du,$pass,$hostPattern,$db,'ALL',(int)$remote); flash('База и phpMyAdmin-пользователь созданы','success'); redirect('/?page=databases');
             }
             case 'delete_db': {
                 $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM databases WHERE id=?'); $st->execute([$id]); $r=$st->fetch(); if(!$r) throw new RuntimeException('База не найдена'); $res=run_ctl(['delete-db',$r['db_name'],$r['db_user']],180); if($res['code']!==0) throw new RuntimeException($res['output']); db()->prepare('DELETE FROM databases WHERE id=?')->execute([$id]); redirect('/?page=databases');
@@ -92,7 +92,7 @@ function handle_post(string $action): void
                 $state=(string)($_POST['state']??'disable'); $res=run_ctl(['mysql-external',$state],180); if($res['code']!==0) throw new RuntimeException($res['output']); setting_set('mysql_external',$state==='enable'?'1':'0'); redirect('/?page=databases');
             }
             case 'create_mysql_account': {
-                $user=trim((string)($_POST['mysql_user']??'')); $pass=(string)($_POST['password']??''); $dbn=trim((string)($_POST['grant_db']??'')); $remote=!empty($_POST['remote_allowed'])?'1':'0'; $host=$remote==='1'?'%':'localhost'; $priv=(string)($_POST['privileges']??'ALL');
+                $user=trim((string)($_POST['mysql_user']??'')); $pass=(string)($_POST['password']??''); $dbn=trim((string)($_POST['grant_db']??'')); $remote=!empty($_POST['remote_allowed'])?'1':'0'; $host=$remote==='1'?(trim((string)($_POST['host_pattern']??'%'))):'localhost'; if($host==='custom') $host=trim((string)($_POST['custom_host']??'%')); $priv=(string)($_POST['privileges']??'ALL');
                 if(!is_valid_db_name($user)) throw new RuntimeException('Имя пользователя: латиница, цифры, _');
                 if($dbn!=='' && $dbn!=='*' && !is_valid_db_name($dbn)) throw new RuntimeException('Неверное имя базы для доступа');
                 if(strlen($pass)<10) throw new RuntimeException('Пароль MySQL минимум 10 символов');
@@ -371,54 +371,74 @@ function view_databases(): void
 {
     $rows=db()->query('SELECT * FROM databases ORDER BY id DESC')->fetchAll();
     $accounts=db()->query('SELECT * FROM mysql_accounts ORDER BY id DESC')->fetchAll();
-    $mysql=run_ctl_json_cached(['mysql-status-json'],8,30);
+    $mysql=run_ctl_json_cached(['mysql-status-json'],5,10);
+    $doctor=run_ctl_json_cached(['mysql-doctor-json'],5,8);
     $gen=default_db_password();
-    $external=setting_get('mysql_external','0')==='1';
+    $external=setting_get('mysql_external','0')==='1' || (($mysql['bind_address']??'')==='0.0.0.0');
     $pma=phpmyadmin_url();
     $mysqlExternalHost=mysql_external_host();
     $mysqlLocalHost=mysql_local_host();
+    $mysqlLanHost=(string)app_config('server_ip','192.168.0.179');
+    $listen=!empty($mysql['listen_3306']);
     ?>
 <div class="db-hero panel-card mb-4">
   <div class="card-title-row align-items-start">
-    <div><h2><i class="fa-solid fa-database me-2"></i>Базы данных и phpMyAdmin</h2><p class="muted mb-0">Создавай базы, пользователей, включай внешнее подключение и заходи в phpMyAdmin в один клик.</p></div>
-    <a class="btn btn-primary" href="<?= e($pma) ?>" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square me-2"></i>Открыть phpMyAdmin</a>
+    <div><h2><i class="fa-solid fa-database me-2"></i>Базы данных и phpMyAdmin</h2><p class="muted mb-0">Создание баз, удобные доступы для сайта/бота и быстрый вход в phpMyAdmin.</p></div>
+    <div class="d-flex gap-2 flex-wrap"><a class="btn btn-primary" href="<?= e($pma) ?>" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square me-2"></i>Открыть phpMyAdmin</a><button class="btn btn-soft" onclick="copyText('<?= e(mysql_env_block($mysqlLanHost)) ?>')">.env для LAN</button></div>
   </div>
   <div class="hardware-grid mt-3">
     <div><span>MariaDB</span><b><?= e((string)($mysql['service']??'unknown')) ?></b></div>
     <div><span>Bind-address</span><b><?= e((string)($mysql['bind_address']??'unknown')) ?></b></div>
-    <div><span>3306</span><b><?= !empty($mysql['listen_3306'])?'слушает':'локально/закрыт' ?></b></div>
+    <div><span>3306</span><b><?= $listen?'слушает':'закрыт' ?></b></div>
     <div><span>Внешний доступ</span><b><?= $external?'включён':'выключен' ?></b></div>
   </div>
+  <?php if(!empty($doctor['problem'])): ?><div class="alert alert-warning mt-3"><b>Проблема:</b> <?= e((string)$doctor['problem']) ?></div><?php endif; ?>
   <div class="row g-3 mt-2">
-    <div class="col-lg-4"><div class="mini-stat"><span>Для бота на этом сервере</span><b><?= e($mysqlLocalHost) ?>:3306</b><small>phpMyAdmin тоже видит это как <code>localhost:3306</code> — это нормально.</small></div></div>
-    <div class="col-lg-4"><div class="mini-stat"><span>Для подключения с ПК/Windows</span><b><?= e($mysqlExternalHost) ?>:3306</b><small>Именно этот host указывай в <code>.env</code> бота, не 127.0.0.1.</small></div></div>
-    <div class="col-lg-4"><div class="mini-stat"><span>Роутер для внешнего MySQL</span><b>TCP 3306 → 192.168.0.179</b><small>Нужно только если бот запускается не на сервере.</small></div></div>
+    <div class="col-lg-4"><div class="mini-stat"><span>Бот на этом сервере</span><b><?= e($mysqlLocalHost) ?>:3306</b><small>Для PM2-ботов внутри HYPER-HOST.</small><button class="btn-copy mt-2" onclick="copyText('<?= e(mysql_env_block($mysqlLocalHost)) ?>')">Копировать .env</button></div></div>
+    <div class="col-lg-4"><div class="mini-stat"><span>Бот на твоём ПК в этой Wi‑Fi сети</span><b><?= e($mysqlLanHost) ?>:3306</b><small>Лучше для Windows дома. Не зависит от NAT Loopback.</small><button class="btn-copy mt-2" onclick="copyText('<?= e(mysql_env_block($mysqlLanHost)) ?>')">Копировать .env</button></div></div>
+    <div class="col-lg-4"><div class="mini-stat"><span>Бот из интернета</span><b><?= e($mysqlExternalHost) ?>:3306</b><small>Нужен проброс роутера TCP 3306 → <?= e($mysqlLanHost) ?>.</small><button class="btn-copy mt-2" onclick="copyText('<?= e(mysql_env_block($mysqlExternalHost)) ?>')">Копировать .env</button></div></div>
   </div>
 </div>
 <div class="row g-4">
   <div class="col-xl-4">
-    <div class="panel-card"><h2>Создать базу + аккаунт</h2>
+    <div class="panel-card"><h2>Создать базу + пользователя</h2>
       <form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_db">
-        <input class="form-control" name="db_name" placeholder="site_db" required>
-        <input class="form-control" name="db_user" placeholder="site_user" required>
+        <input class="form-control" name="db_name" placeholder="hyper_host_bot" required>
+        <input class="form-control" name="db_user" placeholder="hyper_bot" required>
         <div class="input-group"><input class="form-control" id="dbPass" name="password" value="<?= e($gen) ?>" minlength="10" required><button class="btn btn-outline-light" type="button" onclick="copyValue('dbPass')"><i class="fa-regular fa-copy"></i></button></div>
-        <label class="form-check"><input class="form-check-input" type="checkbox" name="remote_allowed" value="1"> <span class="form-check-label">Разрешить подключение извне для этого пользователя</span></label>
+        <label class="form-check"><input class="form-check-input db-remote-toggle" type="checkbox" name="remote_allowed" value="1"> <span class="form-check-label">Разрешить внешний вход MySQL</span></label>
+        <div class="remote-options p-3 rounded-4" style="display:none;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08)">
+          <div class="small muted mb-2">Кто сможет подключаться этим пользователем:</div>
+          <select class="form-select mb-2" name="host_pattern" onchange="this.closest('.remote-options').querySelector('.custom-host').style.display=this.value==='custom'?'block':'none'">
+            <option value="%">Любой внешний IP — правильно для бота</option>
+            <option value="<?= e($mysqlLanHost) ?>">Только локальная сеть: <?= e($mysqlLanHost) ?></option>
+            <option value="custom">Конкретный IP / маска</option>
+          </select>
+          <input class="form-control custom-host" style="display:none" name="custom_host" placeholder="например 90.189.208.% или 1.2.3.4">
+          <div class="small muted mt-2">В MySQL это может храниться как <code>%</code>, но в панели показывается как “Любой внешний IP”. Это не ошибка.</div>
+        </div>
         <button class="btn btn-primary">Создать базу и пользователя</button>
       </form>
     </div>
-    <div class="panel-card mt-4"><h2>Создать аккаунт phpMyAdmin</h2>
+    <div class="panel-card mt-4"><h2>Аккаунт phpMyAdmin/MySQL</h2>
       <form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_mysql_account">
         <input class="form-control" name="mysql_user" placeholder="pma_user" required>
         <div class="input-group"><input class="form-control" id="pmaPass" name="password" value="<?= e(default_db_password()) ?>" minlength="10" required><button class="btn btn-outline-light" type="button" onclick="copyValue('pmaPass')"><i class="fa-regular fa-copy"></i></button></div>
         <select class="form-select" name="grant_db"><option value="">Только вход без базы</option><?php foreach($rows as $r): ?><option value="<?= e($r['db_name']) ?>"><?= e($r['db_name']) ?></option><?php endforeach; ?><option value="*">Админ: все базы</option></select>
         <select class="form-select" name="privileges"><option value="ALL">Полный доступ</option><option value="SELECT">Только чтение</option></select>
-        <label class="form-check"><input class="form-check-input" type="checkbox" name="remote_allowed" value="1"> <span class="form-check-label">Разрешить внешний вход MySQL</span></label>
+        <label class="form-check"><input class="form-check-input db-remote-toggle" type="checkbox" name="remote_allowed" value="1"> <span class="form-check-label">Разрешить внешний вход MySQL</span></label>
+        <div class="remote-options p-3 rounded-4" style="display:none;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08)">
+          <select class="form-select mb-2" name="host_pattern" onchange="this.closest('.remote-options').querySelector('.custom-host').style.display=this.value==='custom'?'block':'none'">
+            <option value="%">Любой внешний IP</option>
+            <option value="<?= e($mysqlLanHost) ?>">Только <?= e($mysqlLanHost) ?></option>
+            <option value="custom">Конкретный IP / маска</option>
+          </select>
+          <input class="form-control custom-host" style="display:none" name="custom_host" placeholder="например 90.189.208.% или 1.2.3.4">
+        </div>
         <button class="btn btn-soft">Создать аккаунт</button>
       </form>
     </div>
-    <div class="panel-card mt-4"><h2>Открытое подключение MySQL</h2><p class="muted">Для бота на Windows/другом ПК включи <code>0.0.0.0:3306</code>, создай пользователя с галкой “внешний вход” и на роутере пробрось <code>TCP 3306 → 192.168.0.179</code>.</p>
-      <div class="copy-row mb-3"><code>MYSQL_HOST=<?= e($mysqlExternalHost) ?>
-MYSQL_PORT=3306</code><button class="btn-copy" type="button" onclick="copyText('MYSQL_HOST=<?= e($mysqlExternalHost) ?>\nMYSQL_PORT=3306')">Копировать .env</button></div>
+    <div class="panel-card mt-4"><h2>Открытое подключение MySQL</h2><p class="muted">Включает MariaDB на <code>0.0.0.0:3306</code>. Для доступа из интернета также нужен проброс на роутере: <code>TCP 3306 → <?= e($mysqlLanHost) ?></code>.</p>
       <form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="mysql_external"><input type="hidden" name="state" value="enable"><button class="btn btn-primary">Включить 3306</button></form>
       <form method="post" class="d-inline ms-2"><?= csrf_field() ?><input type="hidden" name="action" value="mysql_external"><input type="hidden" name="state" value="disable"><button class="btn btn-outline-danger">Закрыть</button></form>
     </div>
@@ -426,12 +446,15 @@ MYSQL_PORT=3306</code><button class="btn-copy" type="button" onclick="copyText('
   <div class="col-xl-8">
     <div class="panel-card"><div class="card-title-row"><h2>Базы</h2><a class="btn btn-soft btn-sm" href="<?= e($pma) ?>" target="_blank">phpMyAdmin</a></div>
       <div class="table-responsive"><table class="table table-dark-soft align-middle"><thead><tr><th>База</th><th>Пользователь</th><th>Доступ</th><th></th></tr></thead><tbody>
-      <?php foreach($rows as $r): ?><tr><td><b><?= e($r['db_name']) ?></b></td><td><code><?= e($r['db_user']) ?></code><div class="small muted">Пароль: <code><?= e($r['db_password_plain']?:'не сохранён') ?></code></div></td><td><?= (int)$r['remote_allowed']?'<span class="badge text-bg-warning">remote</span>':'<span class="badge text-bg-secondary">localhost</span>' ?></td><td class="text-end"><a class="btn btn-sm btn-primary" href="/?page=pma_login&type=db&id=<?= (int)$r['id'] ?>">Войти</a> <button class="btn btn-sm btn-soft" onclick="copyText('Host: <?= e(mysql_host_for_row($r)) ?>\nPort: 3306\nDB: <?= e($r['db_name']) ?>\nUser: <?= e($r['db_user']) ?>\nPassword: <?= e($r['db_password_plain']) ?>')">Копировать</button><form method="post" class="d-inline" onsubmit="return confirm('Удалить базу?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_db"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form></td></tr><?php endforeach; if(!$rows): ?><tr><td colspan="4" class="empty">Баз пока нет</td></tr><?php endif; ?>
+      <?php foreach($rows as $r): $hostLabel=mysql_host_label((string)($accounts[array_search($r['db_user'], array_column($accounts,'username'))]['host_pattern']??($r['remote_allowed']?'%':'localhost'))); ?><tr><td><b><?= e($r['db_name']) ?></b></td><td><code><?= e($r['db_user']) ?></code><div class="small muted">Пароль: <code><?= e($r['db_password_plain']?:'не сохранён') ?></code></div></td><td><?= (int)$r['remote_allowed']?'<span class="badge text-bg-warning">'.e($hostLabel).'</span>':'<span class="badge text-bg-secondary">Только локально</span>' ?></td><td class="text-end"><a class="btn btn-sm btn-primary" href="/?page=pma_login&type=db&id=<?= (int)$r['id'] ?>">Войти</a> <button class="btn btn-sm btn-soft" onclick="copyText('<?= e(mysql_env_block(mysql_host_for_row($r), $r['db_name'], $r['db_user'], $r['db_password_plain'])) ?>')">.env</button><form method="post" class="d-inline" onsubmit="return confirm('Удалить базу?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_db"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form></td></tr><?php endforeach; if(!$rows): ?><tr><td colspan="4" class="empty">Баз пока нет</td></tr><?php endif; ?>
       </tbody></table></div>
     </div>
-    <div class="panel-card mt-4"><h2>Аккаунты phpMyAdmin</h2><div class="table-responsive"><table class="table table-dark-soft align-middle"><thead><tr><th>Логин</th><th>Host</th><th>Доступ</th><th></th></tr></thead><tbody><?php foreach($accounts as $a): ?><tr><td><code><?= e($a['username']) ?></code><div class="small muted">Пароль: <code><?= e($a['password_plain']) ?></code></div></td><td><?= e($a['host_pattern']) ?></td><td><?= e($a['db_name']?:'USAGE') ?> / <?= e($a['privileges']) ?></td><td class="text-end"><a class="btn btn-sm btn-primary" href="/?page=pma_login&type=account&id=<?= (int)$a['id'] ?>">Войти</a> <button class="btn btn-sm btn-soft" onclick="copyText('User: <?= e($a['username']) ?>\nPassword: <?= e($a['password_plain']) ?>\nHost: <?= e($a['host_pattern']) ?>')">Копировать</button><form method="post" class="d-inline" onsubmit="return confirm('Удалить MySQL аккаунт?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_mysql_account"><input type="hidden" name="id" value="<?= (int)$a['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form></td></tr><?php endforeach; if(!$accounts): ?><tr><td colspan="4" class="empty">Аккаунтов пока нет</td></tr><?php endif; ?></tbody></table></div></div>
+    <div class="panel-card mt-4"><h2>Аккаунты phpMyAdmin / MySQL</h2><div class="table-responsive"><table class="table table-dark-soft align-middle"><thead><tr><th>Логин</th><th>Host</th><th>Доступ</th><th></th></tr></thead><tbody><?php foreach($accounts as $a): ?><tr><td><code><?= e($a['username']) ?></code><div class="small muted">Пароль: <code><?= e($a['password_plain']) ?></code></div></td><td><span class="badge text-bg-info"><?= e(mysql_host_label((string)$a['host_pattern'])) ?></span></td><td><?= e($a['db_name']?:'USAGE') ?> / <?= e($a['privileges']) ?></td><td class="text-end"><a class="btn btn-sm btn-primary" href="/?page=pma_login&type=account&id=<?= (int)$a['id'] ?>">Войти</a> <button class="btn btn-sm btn-soft" onclick="copyText('<?= e(mysql_env_block(mysql_external_host(), $a['db_name'], $a['username'], $a['password_plain'])) ?>')">.env</button><form method="post" class="d-inline" onsubmit="return confirm('Удалить MySQL аккаунт?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_mysql_account"><input type="hidden" name="id" value="<?= (int)$a['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form></td></tr><?php endforeach; if(!$accounts): ?><tr><td colspan="4" class="empty">Аккаунтов пока нет</td></tr><?php endif; ?></tbody></table></div></div>
   </div>
-</div><?php
+</div>
+<script>
+document.querySelectorAll('.db-remote-toggle').forEach(function(cb){function t(){var box=cb.closest('form').querySelector('.remote-options'); if(box) box.style.display=cb.checked?'block':'none';} cb.addEventListener('change',t); t();});
+</script><?php
 }
 
 function view_ftp(): void

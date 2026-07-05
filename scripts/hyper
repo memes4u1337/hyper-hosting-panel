@@ -151,7 +151,8 @@ print('🗄️ HYPER-HOST — DATABASES')
 print('────────────────────────')
 print(f"MariaDB: {m.get('service','unknown')} | bind: {m.get('bind_address','unknown')} | 3306: {'listen' if m.get('listen_3306') else 'closed/local'}")
 print(f"Для бота на сервере: MYSQL_HOST=127.0.0.1 MYSQL_PORT=3306")
-print(f"Для бота на ПК/Windows: MYSQL_HOST={m.get('external_host','')} MYSQL_PORT=3306")
+print(f"Для бота на ПК в той же сети: MYSQL_HOST={m.get('lan_host','')} MYSQL_PORT=3306")
+print(f"Для бота из интернета: MYSQL_HOST={m.get('external_host','')} MYSQL_PORT=3306")
 print("phpMyAdmin может показывать Сервер: localhost:3306 — это нормально, он сам стоит на сервере.")
 if not items:
     print('Баз данных панели пока нет.'); raise SystemExit
@@ -161,8 +162,10 @@ for x in items:
 PY
       ;;
     external) [[ "${1:-}" == enable || "${1:-}" == disable ]] || err "Используй: sudo hyper db external enable|disable"; $CTL mysql-external "$1"; $CTL mysql-status-json | json_pretty ;;
-    user) [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper db user USER PASS [DB] [localhost|%]"; $CTL create-mysql-account "$1" "$2" "${4:-localhost}" "${3:-}" ALL ;;
-    *) err "Используй: sudo hyper db list | external enable|disable | user USER PASS [DB] [localhost|%]" ;;
+    doctor) $CTL mysql-doctor-json | json_pretty ;;
+    test) shift || true; [[ -n "${1:-}" && -n "${2:-}" && -n "${3:-}" ]] || err "Используй: sudo hyper db test HOST USER PASS [DB]"; $CTL mysql-test "$@" ;;
+    user) [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper db user USER PASS [DB] [HOST]"; $CTL create-mysql-account "$1" "$2" "${4:-%}" "${3:-}" ALL ;;
+    *) err "Используй: sudo hyper db list | doctor | external enable|disable | user USER PASS [DB] [%|IP] | test HOST USER PASS [DB]" ;;
   esac
 }
 
@@ -362,7 +365,12 @@ cmd_help() {
   sudo hyper panel domain DOMAIN      привязать домен именно к панели
   sudo hyper panel ssl DOMAIN EMAIL   выпустить SSL для панели
   sudo hyper ftp                     FTP-пользователи
-  sudo hyper dbs                     базы данных
+  sudo hyper dbs
+  sudo hyper db status
+  sudo hyper db doctor
+  sudo hyper db external enable
+  sudo hyper db user USER PASS DB %
+  sudo hyper db test HOST USER PASS DB                     базы данных
   sudo hyper db external enable      открыть MySQL 3306 наружу
   sudo hyper db user USER PASS DB %    создать пользователя для внешнего входа
   sudo hyper db user USER PASS DB    создать MySQL/phpMyAdmin аккаунт
@@ -413,6 +421,35 @@ DNS:
   sudo hyper raw site-logs DOMAIN error 200
 
 EOF
+}
+
+
+cmd_db_status() {
+  say "🛢 HYPER-HOST — DATABASES"
+  $CTL mysql-status-json | json_pretty
+}
+cmd_db_doctor() {
+  say "🧪 HYPER-HOST — MYSQL DOCTOR"
+  $CTL mysql-doctor-json | json_pretty
+}
+cmd_db_external() {
+  local state="${1:-status}"
+  case "$state" in
+    enable|on) $CTL mysql-external enable ;;
+    disable|off) $CTL mysql-external disable ;;
+    status) cmd_db_status ;;
+    *) err "Используй: sudo hyper db external enable|disable" ;;
+  esac
+}
+cmd_db_user() {
+  local user="${1:-}" pass="${2:-}" db="${3:-}" host="${4:-%}"
+  [[ -n "$user" && -n "$pass" ]] || err "Используй: sudo hyper db user USER PASS [DB] [HOST]"
+  $CTL create-mysql-account "$user" "$pass" "$host" "$db" ALL
+  say "Готово. Для внешнего бота host=${host}. В .env используй MYSQL_HOST=panel.hyper-host.pw или 192.168.0.179 если бот в локальной сети."
+}
+cmd_db_test() {
+  local host="${1:-127.0.0.1}" user="${2:-}" pass="${3:-}" db="${4:-}"
+  $CTL mysql-test "$host" "$user" "$pass" "$db"
 }
 
 case "${1:-help}" in
