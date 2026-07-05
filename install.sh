@@ -124,6 +124,11 @@ rsync -a --delete "$PROJECT_DIR/src/" "$PANEL_DIR/"
 rsync -a --delete "$PROJECT_DIR/templates/" "$BASE_DIR/templates/"
 install -m 0755 "$PROJECT_DIR/scripts/hhctl" "$CONTROL_BIN"
 install -m 0755 "$PROJECT_DIR/scripts/hyper" "$HYPER_BIN"
+# v23: делаем CLI доступным для панели, PM2-ботов и обычной shell-среды.
+# Некоторые окружения/боты ищут hyper в /usr/local/bin или /usr/bin.
+ln -sf "$HYPER_BIN" /usr/bin/hyper 2>/dev/null || true
+ln -sf "$CONTROL_BIN" /usr/bin/hyper-host-ctl 2>/dev/null || true
+chmod 0755 "$CONTROL_BIN" "$HYPER_BIN" /usr/bin/hyper /usr/bin/hyper-host-ctl 2>/dev/null || true
 
 log "Создание конфигурации HYPER-HOST..."
 cat > "$CONF_DIR/hyper-host.conf" <<EOCONF

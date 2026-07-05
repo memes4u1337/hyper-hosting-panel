@@ -269,13 +269,13 @@ html,body{background:#030712!important;color:#eef5ff!important}.sidebar *,.topba
 function render_login(): void
 {
     $flash=flash(); $need2fa=setting_get('security_2fa_enabled','0')==='1'; ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=17" rel="stylesheet"><?= hh_ui_critical_css() ?></head><body class="login-body"><div class="login-shell"><div class="login-card card-glass"><div class="brand-mark"><i class="fa-solid fa-bolt"></i></div><h1>HYPER-HOST</h1><p>powered by memes4u1337</p><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> py-2"><?= e($flash['message']) ?></div><?php endif; ?><form method="post" class="vstack gap-3"><?= csrf_field() ?><input class="form-control form-control-lg" name="username" placeholder="Логин" autofocus required><input class="form-control form-control-lg" type="password" name="password" placeholder="Пароль" required><?php if($need2fa): ?><input class="form-control form-control-lg" name="totp" placeholder="2FA код" inputmode="numeric"><?php endif; ?><button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-right-to-bracket me-2"></i>Войти</button></form></div></div></body></html><?php
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=24" rel="stylesheet"><?= hh_ui_critical_css() ?></head><body class="login-body"><div class="login-shell"><div class="login-card card-glass"><div class="brand-mark"><i class="fa-solid fa-bolt"></i></div><h1>HYPER-HOST</h1><p>powered by memes4u1337</p><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> py-2"><?= e($flash['message']) ?></div><?php endif; ?><form method="post" class="vstack gap-3"><?= csrf_field() ?><input class="form-control form-control-lg" name="username" placeholder="Логин" autofocus required><input class="form-control form-control-lg" type="password" name="password" placeholder="Пароль" required><?php if($need2fa): ?><input class="form-control form-control-lg" name="totp" placeholder="2FA код" inputmode="numeric"><?php endif; ?><button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-right-to-bracket me-2"></i>Войти</button></form></div></div></body></html><?php
 }
 
 function render_page(string $page, array $user): void
 {
     $titles=['dashboard'=>'Дашборд','files'=>'Файловый менеджер','sites'=>'Сайты и папки','ftp'=>'FTP','databases'=>'Базы данных','bots'=>'Боты PM2 24/7','bot_logs'=>'Логи бота','backups'=>'Backup','dns'=>'DNS','network'=>'Сеть и доступ','ssl'=>'SSL','php'=>'PHP-версии','cron'=>'Cron','logs'=>'Логи сайтов','security'=>'Безопасность','settings'=>'Настройки']; $title=$titles[$page]??'Дашборд'; $flash=flash(); ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($title) ?> — HYPER-HOST</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=17" rel="stylesheet"><?= hh_ui_critical_css() ?></head><body class="hh-v17"><div class="app-shell"><aside class="sidebar"><div class="brand"><div class="brand-icon"><i class="fa-solid fa-bolt"></i></div><div><b>HYPER-HOST</b><span>powered by memes4u1337</span></div></div><nav class="nav flex-column gap-2 mt-4">
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($title) ?> — HYPER-HOST</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=24" rel="stylesheet"><?= hh_ui_critical_css() ?></head><body class="hh-v17"><div class="app-shell"><aside class="sidebar"><div class="brand"><div class="brand-icon"><i class="fa-solid fa-bolt"></i></div><div><b>HYPER-HOST</b><span>powered by memes4u1337</span></div></div><nav class="nav flex-column gap-2 mt-4">
 <?= nav_group('Главное','fa-rocket',['dashboard'=>['fa-gauge-high','Дашборд'],'files'=>['fa-folder-open','Файлы'],'settings'=>['fa-sliders','Настройки']],$page) ?>
 <?= nav_group('Хостинг','fa-server',['sites'=>['fa-globe','Сайты'],'ftp'=>['fa-network-wired','FTP'],'databases'=>['fa-database','Базы'],'php'=>['fa-code','PHP']],$page) ?>
 <?= nav_group('Автоматизация','fa-wand-magic-sparkles',['bots'=>['fa-robot','Боты PM2'],'backups'=>['fa-box-archive','Backup'],'cron'=>['fa-clock','Cron'],'logs'=>['fa-file-lines','Логи']],$page) ?>
@@ -371,8 +371,8 @@ function view_databases(): void
 {
     $rows=db()->query('SELECT * FROM databases ORDER BY id DESC')->fetchAll();
     $accounts=db()->query('SELECT * FROM mysql_accounts ORDER BY id DESC')->fetchAll();
-    $mysql=run_ctl_json_cached(['mysql-status-json'],5,10);
-    $doctor=run_ctl_json_cached(['mysql-doctor-json'],5,8);
+    $mysql=run_ctl_json_cached(['mysql-status-json'],5,120);
+    $doctor=run_ctl_json_cached(['mysql-doctor-json'],5,120);
     $gen=default_db_password();
     $external=setting_get('mysql_external','0')==='1' || (($mysql['bind_address']??'')==='0.0.0.0');
     $pma=phpmyadmin_url();
@@ -380,80 +380,127 @@ function view_databases(): void
     $mysqlLocalHost=mysql_local_host();
     $mysqlLanHost=(string)app_config('server_ip','192.168.0.179');
     $listen=!empty($mysql['listen_3306']);
+    $accountByUser=[]; foreach($accounts as $a){ $accountByUser[$a['username']]=$a; }
     ?>
-<div class="db-hero panel-card mb-4">
-  <div class="card-title-row align-items-start">
-    <div><h2><i class="fa-solid fa-database me-2"></i>Базы данных и phpMyAdmin</h2><p class="muted mb-0">Создание баз, удобные доступы для сайта/бота и быстрый вход в phpMyAdmin.</p></div>
-    <div class="d-flex gap-2 flex-wrap"><a class="btn btn-primary" href="<?= e($pma) ?>" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square me-2"></i>Открыть phpMyAdmin</a><button class="btn btn-soft" onclick="copyText('<?= e(mysql_env_block($mysqlLanHost)) ?>')">.env для LAN</button></div>
-  </div>
-  <div class="hardware-grid mt-3">
-    <div><span>MariaDB</span><b><?= e((string)($mysql['service']??'unknown')) ?></b></div>
-    <div><span>Bind-address</span><b><?= e((string)($mysql['bind_address']??'unknown')) ?></b></div>
-    <div><span>3306</span><b><?= $listen?'слушает':'закрыт' ?></b></div>
-    <div><span>Внешний доступ</span><b><?= $external?'включён':'выключен' ?></b></div>
-  </div>
-  <?php if(!empty($doctor['problem'])): ?><div class="alert alert-warning mt-3"><b>Проблема:</b> <?= e((string)$doctor['problem']) ?></div><?php endif; ?>
-  <div class="row g-3 mt-2">
-    <div class="col-lg-4"><div class="mini-stat"><span>Бот на этом сервере</span><b><?= e($mysqlLocalHost) ?>:3306</b><small>Для PM2-ботов внутри HYPER-HOST.</small><button class="btn-copy mt-2" onclick="copyText('<?= e(mysql_env_block($mysqlLocalHost)) ?>')">Копировать .env</button></div></div>
-    <div class="col-lg-4"><div class="mini-stat"><span>Бот на твоём ПК в этой Wi‑Fi сети</span><b><?= e($mysqlLanHost) ?>:3306</b><small>Лучше для Windows дома. Не зависит от NAT Loopback.</small><button class="btn-copy mt-2" onclick="copyText('<?= e(mysql_env_block($mysqlLanHost)) ?>')">Копировать .env</button></div></div>
-    <div class="col-lg-4"><div class="mini-stat"><span>Бот из интернета</span><b><?= e($mysqlExternalHost) ?>:3306</b><small>Нужен проброс роутера TCP 3306 → <?= e($mysqlLanHost) ?>.</small><button class="btn-copy mt-2" onclick="copyText('<?= e(mysql_env_block($mysqlExternalHost)) ?>')">Копировать .env</button></div></div>
-  </div>
-</div>
-<div class="row g-4">
-  <div class="col-xl-4">
-    <div class="panel-card"><h2>Создать базу + пользователя</h2>
-      <form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_db">
-        <input class="form-control" name="db_name" placeholder="hyper_host_bot" required>
-        <input class="form-control" name="db_user" placeholder="hyper_bot" required>
-        <div class="input-group"><input class="form-control" id="dbPass" name="password" value="<?= e($gen) ?>" minlength="10" required><button class="btn btn-outline-light" type="button" onclick="copyValue('dbPass')"><i class="fa-regular fa-copy"></i></button></div>
-        <label class="form-check"><input class="form-check-input db-remote-toggle" type="checkbox" name="remote_allowed" value="1"> <span class="form-check-label">Разрешить внешний вход MySQL</span></label>
-        <div class="remote-options p-3 rounded-4" style="display:none;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08)">
-          <div class="small muted mb-2">Кто сможет подключаться этим пользователем:</div>
-          <select class="form-select mb-2" name="host_pattern" onchange="this.closest('.remote-options').querySelector('.custom-host').style.display=this.value==='custom'?'block':'none'">
-            <option value="%">Любой внешний IP — правильно для бота</option>
-            <option value="<?= e($mysqlLanHost) ?>">Только локальная сеть: <?= e($mysqlLanHost) ?></option>
-            <option value="custom">Конкретный IP / маска</option>
-          </select>
-          <input class="form-control custom-host" style="display:none" name="custom_host" placeholder="например 90.189.208.% или 1.2.3.4">
-          <div class="small muted mt-2">В MySQL это может храниться как <code>%</code>, но в панели показывается как “Любой внешний IP”. Это не ошибка.</div>
+<div class="db-layout-v24">
+  <section class="db-top panel-card">
+    <div class="card-title-row align-items-start flex-wrap">
+      <div>
+        <div class="eyebrow"><i class="fa-solid fa-database"></i> MySQL / phpMyAdmin</div>
+        <h2 class="mb-1">Базы данных</h2>
+        <p class="muted mb-0">Создание базы, пользователя и быстрый вход в phpMyAdmin без лишнего мусора.</p>
+      </div>
+      <div class="d-flex gap-2 flex-wrap">
+        <a class="btn btn-primary" href="<?= e($pma) ?>" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square me-2"></i>phpMyAdmin</a>
+        <form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="mysql_external"><input type="hidden" name="state" value="enable"><button class="btn btn-soft"><i class="fa-solid fa-plug-circle-bolt me-2"></i>Открыть 3306</button></form>
+      </div>
+    </div>
+    <div class="db-status-grid mt-3">
+      <div><span>MariaDB</span><b class="<?= (($mysql['service']??'')==='active')?'hh-ok':'hh-warn' ?>"><?= e((string)($mysql['service']??'unknown')) ?></b></div>
+      <div><span>3306</span><b class="<?= $listen?'hh-ok':'hh-bad' ?>"><?= $listen?'слушает':'закрыт' ?></b></div>
+      <div><span>Доступ</span><b class="<?= $external?'hh-ok':'hh-warn' ?>"><?= $external?'внешний включён':'только локально' ?></b></div>
+      <div><span>Host для ПК</span><b><?= e($mysqlLanHost) ?></b></div>
+    </div>
+    <?php if(!empty($doctor['problem'])): ?><div class="alert alert-warning mt-3 mb-0"><i class="fa-solid fa-triangle-exclamation me-2"></i><?= e((string)$doctor['problem']) ?></div><?php endif; ?>
+  </section>
+
+  <div class="row g-4 mt-1">
+    <div class="col-xl-4">
+      <div class="panel-card db-form-card">
+        <h2><i class="fa-solid fa-plus me-2"></i>Новая база</h2>
+        <form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_db">
+          <input class="form-control" name="db_name" placeholder="Имя базы, например hyper_host_bot" value="hyper_host_bot" required>
+          <input class="form-control" name="db_user" placeholder="Пользователь, например hyper_bot" value="hyper_bot" required>
+          <div class="input-group"><input class="form-control" id="dbPass" name="password" value="<?= e($gen) ?>" minlength="10" required><button class="btn btn-outline-light" type="button" onclick="copyValue('dbPass')"><i class="fa-regular fa-copy"></i></button></div>
+          <div class="db-access-pills">
+            <label><input type="radio" name="remote_allowed" value="0" checked><span><i class="fa-solid fa-house"></i> Только локально</span></label>
+            <label><input type="radio" name="remote_allowed" value="1"><span><i class="fa-solid fa-globe"></i> Внешний вход</span></label>
+          </div>
+          <div class="remote-options db-hidden">
+            <select class="form-select" name="host_pattern" onchange="this.closest('.remote-options').querySelector('.custom-host').style.display=this.value==='custom'?'block':'none'">
+              <option value="%">Любой внешний IP</option>
+              <option value="<?= e($mysqlLanHost) ?>">Только этот сервер/LAN: <?= e($mysqlLanHost) ?></option>
+              <option value="custom">Свой IP или маска</option>
+            </select>
+            <input class="form-control custom-host mt-2" style="display:none" name="custom_host" placeholder="пример: 1.2.3.4 или 90.189.208.%">
+          </div>
+          <button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Создать</button>
+        </form>
+      </div>
+
+      <div class="panel-card db-form-card mt-4">
+        <h2><i class="fa-solid fa-user-lock me-2"></i>Аккаунт phpMyAdmin</h2>
+        <form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_mysql_account">
+          <input class="form-control" name="mysql_user" placeholder="Логин" required>
+          <div class="input-group"><input class="form-control" id="pmaPass" name="password" value="<?= e(default_db_password()) ?>" minlength="10" required><button class="btn btn-outline-light" type="button" onclick="copyValue('pmaPass')"><i class="fa-regular fa-copy"></i></button></div>
+          <select class="form-select" name="grant_db"><option value="">Без привязки к базе</option><?php foreach($rows as $r): ?><option value="<?= e($r['db_name']) ?>"><?= e($r['db_name']) ?></option><?php endforeach; ?><option value="*">Все базы</option></select>
+          <select class="form-select" name="privileges"><option value="ALL">Полный доступ</option><option value="SELECT">Только чтение</option></select>
+          <div class="db-access-pills">
+            <label><input type="radio" name="remote_allowed" value="0" checked><span><i class="fa-solid fa-house"></i> Локально</span></label>
+            <label><input type="radio" name="remote_allowed" value="1"><span><i class="fa-solid fa-globe"></i> Внешний вход</span></label>
+          </div>
+          <div class="remote-options db-hidden">
+            <select class="form-select" name="host_pattern" onchange="this.closest('.remote-options').querySelector('.custom-host').style.display=this.value==='custom'?'block':'none'">
+              <option value="%">Любой внешний IP</option>
+              <option value="<?= e($mysqlLanHost) ?>">Только <?= e($mysqlLanHost) ?></option>
+              <option value="custom">Свой IP или маска</option>
+            </select>
+            <input class="form-control custom-host mt-2" style="display:none" name="custom_host" placeholder="пример: 1.2.3.4">
+          </div>
+          <button class="btn btn-soft w-100"><i class="fa-solid fa-user-plus me-2"></i>Создать аккаунт</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="col-xl-8">
+      <div class="panel-card">
+        <div class="card-title-row"><h2><i class="fa-solid fa-table me-2"></i>Базы</h2><div class="d-flex gap-2"><button class="btn btn-sm btn-soft" onclick="copyText('<?= e(mysql_env_block($mysqlLanHost)) ?>')">Host LAN</button><button class="btn btn-sm btn-soft" onclick="copyText('<?= e(mysql_env_block($mysqlExternalHost)) ?>')">Host Internet</button></div></div>
+        <div class="db-cards-list">
+        <?php foreach($rows as $r): $a=$accountByUser[$r['db_user']]??null; $hostPattern=(string)($a['host_pattern']??($r['remote_allowed']?'%':'localhost')); $connHost=(int)$r['remote_allowed']?$mysqlLanHost:mysqlLocalHost; ?>
+          <div class="db-row-card">
+            <div><span>База</span><b><?= e($r['db_name']) ?></b><small><?= (int)$r['remote_allowed']?'Внешний вход разрешён':'Только локально' ?></small></div>
+            <div><span>Пользователь</span><code><?= e($r['db_user']) ?></code><small><?= e(mysql_host_label($hostPattern)) ?></small></div>
+            <div><span>Пароль</span><code><?= e($r['db_password_plain']?:'не сохранён') ?></code></div>
+            <div class="db-actions">
+              <a class="btn btn-sm btn-primary" href="/?page=pma_login&type=db&id=<?= (int)$r['id'] ?>">Войти</a>
+              <button class="btn btn-sm btn-soft" onclick="copyText('<?= e(mysql_env_block($connHost, $r['db_name'], $r['db_user'], $r['db_password_plain'])) ?>')">.env</button>
+              <form method="post" onsubmit="return confirm('Удалить базу?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_db"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form>
+            </div>
+          </div>
+        <?php endforeach; if(!$rows): ?><div class="empty">Баз пока нет</div><?php endif; ?>
         </div>
-        <button class="btn btn-primary">Создать базу и пользователя</button>
-      </form>
-    </div>
-    <div class="panel-card mt-4"><h2>Аккаунт phpMyAdmin/MySQL</h2>
-      <form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_mysql_account">
-        <input class="form-control" name="mysql_user" placeholder="pma_user" required>
-        <div class="input-group"><input class="form-control" id="pmaPass" name="password" value="<?= e(default_db_password()) ?>" minlength="10" required><button class="btn btn-outline-light" type="button" onclick="copyValue('pmaPass')"><i class="fa-regular fa-copy"></i></button></div>
-        <select class="form-select" name="grant_db"><option value="">Только вход без базы</option><?php foreach($rows as $r): ?><option value="<?= e($r['db_name']) ?>"><?= e($r['db_name']) ?></option><?php endforeach; ?><option value="*">Админ: все базы</option></select>
-        <select class="form-select" name="privileges"><option value="ALL">Полный доступ</option><option value="SELECT">Только чтение</option></select>
-        <label class="form-check"><input class="form-check-input db-remote-toggle" type="checkbox" name="remote_allowed" value="1"> <span class="form-check-label">Разрешить внешний вход MySQL</span></label>
-        <div class="remote-options p-3 rounded-4" style="display:none;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08)">
-          <select class="form-select mb-2" name="host_pattern" onchange="this.closest('.remote-options').querySelector('.custom-host').style.display=this.value==='custom'?'block':'none'">
-            <option value="%">Любой внешний IP</option>
-            <option value="<?= e($mysqlLanHost) ?>">Только <?= e($mysqlLanHost) ?></option>
-            <option value="custom">Конкретный IP / маска</option>
-          </select>
-          <input class="form-control custom-host" style="display:none" name="custom_host" placeholder="например 90.189.208.% или 1.2.3.4">
+      </div>
+
+      <div class="panel-card mt-4">
+        <h2><i class="fa-solid fa-users-gear me-2"></i>Аккаунты MySQL / phpMyAdmin</h2>
+        <div class="db-cards-list">
+        <?php foreach($accounts as $a): $connHost=((int)$a['remote_allowed']?$mysqlLanHost:$mysqlLocalHost); ?>
+          <div class="db-row-card compact">
+            <div><span>Логин</span><code><?= e($a['username']) ?></code><small><?= e(mysql_host_label((string)$a['host_pattern'])) ?></small></div>
+            <div><span>Доступ</span><b><?= e($a['db_name']?:'без базы') ?></b><small><?= e($a['privileges']) ?></small></div>
+            <div><span>Пароль</span><code><?= e($a['password_plain']) ?></code></div>
+            <div class="db-actions">
+              <a class="btn btn-sm btn-primary" href="/?page=pma_login&type=account&id=<?= (int)$a['id'] ?>">Войти</a>
+              <button class="btn btn-sm btn-soft" onclick="copyText('<?= e(mysql_env_block($connHost, $a['db_name'], $a['username'], $a['password_plain'])) ?>')">.env</button>
+              <form method="post" onsubmit="return confirm('Удалить MySQL аккаунт?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_mysql_account"><input type="hidden" name="id" value="<?= (int)$a['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form>
+            </div>
+          </div>
+        <?php endforeach; if(!$accounts): ?><div class="empty">Аккаунтов пока нет</div><?php endif; ?>
         </div>
-        <button class="btn btn-soft">Создать аккаунт</button>
-      </form>
+      </div>
     </div>
-    <div class="panel-card mt-4"><h2>Открытое подключение MySQL</h2><p class="muted">Включает MariaDB на <code>0.0.0.0:3306</code>. Для доступа из интернета также нужен проброс на роутере: <code>TCP 3306 → <?= e($mysqlLanHost) ?></code>.</p>
-      <form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="mysql_external"><input type="hidden" name="state" value="enable"><button class="btn btn-primary">Включить 3306</button></form>
-      <form method="post" class="d-inline ms-2"><?= csrf_field() ?><input type="hidden" name="action" value="mysql_external"><input type="hidden" name="state" value="disable"><button class="btn btn-outline-danger">Закрыть</button></form>
-    </div>
-  </div>
-  <div class="col-xl-8">
-    <div class="panel-card"><div class="card-title-row"><h2>Базы</h2><a class="btn btn-soft btn-sm" href="<?= e($pma) ?>" target="_blank">phpMyAdmin</a></div>
-      <div class="table-responsive"><table class="table table-dark-soft align-middle"><thead><tr><th>База</th><th>Пользователь</th><th>Доступ</th><th></th></tr></thead><tbody>
-      <?php foreach($rows as $r): $hostLabel=mysql_host_label((string)($accounts[array_search($r['db_user'], array_column($accounts,'username'))]['host_pattern']??($r['remote_allowed']?'%':'localhost'))); ?><tr><td><b><?= e($r['db_name']) ?></b></td><td><code><?= e($r['db_user']) ?></code><div class="small muted">Пароль: <code><?= e($r['db_password_plain']?:'не сохранён') ?></code></div></td><td><?= (int)$r['remote_allowed']?'<span class="badge text-bg-warning">'.e($hostLabel).'</span>':'<span class="badge text-bg-secondary">Только локально</span>' ?></td><td class="text-end"><a class="btn btn-sm btn-primary" href="/?page=pma_login&type=db&id=<?= (int)$r['id'] ?>">Войти</a> <button class="btn btn-sm btn-soft" onclick="copyText('<?= e(mysql_env_block(mysql_host_for_row($r), $r['db_name'], $r['db_user'], $r['db_password_plain'])) ?>')">.env</button><form method="post" class="d-inline" onsubmit="return confirm('Удалить базу?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_db"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form></td></tr><?php endforeach; if(!$rows): ?><tr><td colspan="4" class="empty">Баз пока нет</td></tr><?php endif; ?>
-      </tbody></table></div>
-    </div>
-    <div class="panel-card mt-4"><h2>Аккаунты phpMyAdmin / MySQL</h2><div class="table-responsive"><table class="table table-dark-soft align-middle"><thead><tr><th>Логин</th><th>Host</th><th>Доступ</th><th></th></tr></thead><tbody><?php foreach($accounts as $a): ?><tr><td><code><?= e($a['username']) ?></code><div class="small muted">Пароль: <code><?= e($a['password_plain']) ?></code></div></td><td><span class="badge text-bg-info"><?= e(mysql_host_label((string)$a['host_pattern'])) ?></span></td><td><?= e($a['db_name']?:'USAGE') ?> / <?= e($a['privileges']) ?></td><td class="text-end"><a class="btn btn-sm btn-primary" href="/?page=pma_login&type=account&id=<?= (int)$a['id'] ?>">Войти</a> <button class="btn btn-sm btn-soft" onclick="copyText('<?= e(mysql_env_block(mysql_external_host(), $a['db_name'], $a['username'], $a['password_plain'])) ?>')">.env</button><form method="post" class="d-inline" onsubmit="return confirm('Удалить MySQL аккаунт?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_mysql_account"><input type="hidden" name="id" value="<?= (int)$a['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form></td></tr><?php endforeach; if(!$accounts): ?><tr><td colspan="4" class="empty">Аккаунтов пока нет</td></tr><?php endif; ?></tbody></table></div></div>
   </div>
 </div>
 <script>
-document.querySelectorAll('.db-remote-toggle').forEach(function(cb){function t(){var box=cb.closest('form').querySelector('.remote-options'); if(box) box.style.display=cb.checked?'block':'none';} cb.addEventListener('change',t); t();});
+document.querySelectorAll('.db-access-pills input[type="radio"]').forEach(function(r){
+  function upd(){
+    var form=r.closest('form'); if(!form) return;
+    var remote=form.querySelector('.remote-options'); if(!remote) return;
+    var yes=form.querySelector('input[name="remote_allowed"][value="1"]');
+    remote.classList.toggle('db-hidden', !(yes && yes.checked));
+  }
+  r.addEventListener('change', upd); upd();
+});
 </script><?php
 }
 
@@ -463,72 +510,75 @@ function view_ftp(): void
 
 function pm2_status_map(): array { $d=run_ctl_json_cached(['bot-list-json'],8,120); $m=[]; if(!isset($d['_error'])) foreach($d as $p) $m[$p['name']]=$p; return $m; }
 function view_bots(): void
-{ $bots=db()->query('SELECT * FROM bots ORDER BY id DESC')->fetchAll(); $status=pm2_status_map(); ?>
+{
+  $bots=db()->query('SELECT * FROM bots ORDER BY id DESC')->fetchAll();
+  $status=pm2_status_map();
+  $modals=[];
+  ?>
 <div class="row g-4">
   <div class="col-lg-4">
-    <div class="panel-card">
-      <h2>Загрузить и запустить бота</h2>
-      <p class="muted">Загрузи <code>bot.py</code>, при необходимости <code>.env</code> и <code>requirements.txt</code>. Панель поставит зависимости, запустит PM2 и сохранит автозапуск: можно закрывать панель/SSH — бот продолжит работать.</p>
+    <div class="panel-card bot-upload-card">
+      <div class="eyebrow"><i class="fa-solid fa-robot"></i> PM2 24/7</div>
+      <h2>Загрузить бота</h2>
       <form method="post" enctype="multipart/form-data" class="vstack gap-3">
         <?= csrf_field() ?><input type="hidden" name="action" value="create_bot">
-        <input class="form-control" name="name" placeholder="mystockbot" required>
-        <select class="form-select" name="runtime"><option value="python">Python</option><option value="node">Node.js</option><option value="php">PHP</option><option value="custom">Custom bash</option></select>
-        <input class="form-control" name="main_file" value="bot.py" placeholder="bot.py">
-        <label class="form-label mb-0">Основной файл</label><input class="form-control" type="file" name="bot_file" accept=".py,.js,.php,.sh,.txt">
-        <label class="form-label mb-0">.env — можно пропустить</label><input class="form-control" type="file" name="env_file" accept=".env,.txt">
-        <label class="form-label mb-0">requirements.txt / package.json — можно пропустить</label><input class="form-control" type="file" name="requirements_file" accept=".txt,.json">
+        <input class="form-control" name="name" placeholder="HYPER-HOST-BOT" required>
+        <div class="row g-2"><div class="col-5"><select class="form-select" name="runtime"><option value="python">Python</option><option value="node">Node.js</option><option value="php">PHP</option><option value="custom">Custom</option></select></div><div class="col-7"><input class="form-control" name="main_file" value="bot.py" placeholder="bot.py"></div></div>
+        <label class="upload-mini"><span>Основной файл</span><input class="form-control" type="file" name="bot_file" accept=".py,.js,.php,.sh,.txt"></label>
+        <label class="upload-mini"><span>.env</span><input class="form-control" type="file" name="env_file" accept=".env,.txt"></label>
+        <label class="upload-mini"><span>requirements.txt / package.json</span><input class="form-control" type="file" name="requirements_file" accept=".txt,.json"></label>
         <input class="form-control" type="number" name="memory_limit_mb" placeholder="RAM лимит, MB, например 512">
-        <button class="btn btn-primary">Загрузить, поставить зависимости и запустить</button>
+        <button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-play me-2"></i>Загрузить и запустить</button>
       </form>
     </div>
   </div>
   <div class="col-lg-8">
     <div class="panel-card">
-      <div class="card-title-row"><h2>Список ботов PM2</h2><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="pm2_persist"><button class="btn btn-soft btn-sm"><i class="fa-solid fa-shield-heart me-1"></i>Включить 24/7</button></form></div>
-      <div class="alert alert-dark-soft small mb-3"><i class="fa-solid fa-circle-check me-2 text-success"></i>После запуска бот не зависит от открытой панели или консоли. PM2 сохраняется в systemd и поднимает ботов после перезагрузки.</div>
-      <div class="table-responsive"><table class="table table-dark-soft align-middle"><thead><tr><th>Бот</th><th>Статус</th><th>Файлы</th><th>Управление</th></tr></thead><tbody>
-      <?php foreach($bots as $b): $pm=$status[$b['name']]??[]; $st=$pm['status']??'not_found'; $files=$pm['files']??[]; ?>
-        <tr>
-          <td><b><?= e($b['name']) ?></b><div class="small muted"><code><?= e($b['path']) ?></code></div><div class="small muted">PM2 name: <code><?= e($b['name']) ?></code></div></td>
-          <td><span class="badge text-bg-<?= $st==='online'?'success':'danger' ?>"><?= e($st) ?></span><div class="small muted">RAM: <?= isset($pm['memory'])?e(human_bytes((float)$pm['memory'])):'?' ?></div></td>
-          <td><?php if($files): foreach($files as $f): ?><span class="badge text-bg-secondary me-1"><?= e($f) ?></span><?php endforeach; else: ?><span class="muted">нет данных</span><?php endif; ?></td>
-          <td class="text-end">
-            <div class="btn-group btn-group-sm flex-wrap">
-              <?php foreach(['start'=>'Start','stop'=>'Stop','restart'=>'Restart','install'=>'Deps'] as $cmd=>$label): ?>
-                <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="bot_action"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="bot_action" value="<?= e($cmd) ?>"><button class="btn btn-outline-primary"><?= e($label) ?></button></form>
-              <?php endforeach; ?>
-              <form method="post" onsubmit="return confirm('Остановить локальные дубли этого бота? Это помогает при TelegramConflictError getUpdates.')"><?= csrf_field() ?><input type="hidden" name="action" value="bot_action"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="bot_action" value="kill-conflicts"><button class="btn btn-outline-warning">Fix conflict</button></form>
-              <a class="btn btn-outline-light" href="/?page=bot_logs&id=<?= (int)$b['id'] ?>">Logs</a>
-              <a class="btn btn-outline-light" href="/?page=files&root=bots&path=<?= e($b['name']) ?>">Files</a>
-              <button class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#deleteBot<?= (int)$b['id'] ?>">Delete</button>
-            </div>
-          </td>
-        </tr>
-        <div class="modal fade" id="deleteBot<?= (int)$b['id'] ?>" tabindex="-1">
+      <div class="card-title-row flex-wrap"><h2><i class="fa-solid fa-list-check me-2"></i>Боты</h2><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="pm2_persist"><button class="btn btn-soft btn-sm"><i class="fa-solid fa-shield-heart me-1"></i>Включить 24/7</button></form></div>
+      <div class="bot-grid-v24">
+      <?php foreach($bots as $b): $pm=$status[$b['name']]??[]; $st=$pm['status']??'not_found'; $files=$pm['files']??[]; ob_start(); ?>
+        <div class="modal fade hh-modal bot-delete-modal" id="deleteBot<?= (int)$b['id'] ?>" tabindex="-1" aria-hidden="true">
           <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-            <div class="modal-header"><h5 class="modal-title">Удалить бота <?= e($b['name']) ?>?</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+            <div class="modal-header"><div><div class="eyebrow"><i class="fa-solid fa-trash"></i> Удаление</div><h5 class="modal-title mb-0"><?= e($b['name']) ?></h5></div><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
             <div class="modal-body">
-              <div class="alert alert-warning">Можно удалить только процесс из PM2 и оставить файлы, либо удалить процесс и всю папку бота с сервера.</div>
-              <div class="small muted mb-2">Папка бота: <code><?= e($b['path']) ?></code></div>
-              <form method="post" class="vstack gap-3">
+              <div class="design-note mb-3">Выбери: убрать только PM2-процесс или удалить полностью вместе с файлами.</div>
+              <div class="small muted mb-3">Папка: <code><?= e($b['path']) ?></code></div>
+              <form method="post" class="mb-3">
                 <?= csrf_field() ?><input type="hidden" name="action" value="delete_bot"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>">
-                <button class="btn btn-outline-warning" onclick="return confirm('Удалить бота только из PM2? Файлы останутся на сервере.')">Удалить только из PM2, файлы оставить</button>
+                <button class="btn btn-outline-warning w-100">Удалить только из PM2, файлы оставить</button>
               </form>
-              <hr>
               <form method="post" class="vstack gap-3">
                 <?= csrf_field() ?><input type="hidden" name="action" value="delete_bot"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="delete_files" value="1">
-                <label class="form-label">Чтобы удалить файлы, введи точное имя бота:</label>
-                <input class="form-control" name="confirm_name" placeholder="<?= e($b['name']) ?>" required>
-                <button class="btn btn-danger" onclick="return confirm('ТОЧНО удалить PM2-процесс и все файлы этого бота с сервера?')">Удалить PM2 + файлы с сервера</button>
+                <label class="form-label">Подтверди имя бота:</label>
+                <input class="form-control form-control-lg" name="confirm_name" placeholder="<?= e($b['name']) ?>" autocomplete="off" required>
+                <button class="btn btn-danger btn-lg w-100">Удалить PM2 + файлы с сервера</button>
               </form>
             </div>
           </div></div>
         </div>
-      <?php endforeach; if(!$bots): ?><tr><td colspan="4" class="empty">Ботов пока нет</td></tr><?php endif; ?>
-      </tbody></table></div>
+      <?php $modals[] = ob_get_clean(); ?>
+        <div class="bot-card-v24">
+          <div class="bot-head"><div><b><?= e($b['name']) ?></b><span><?= e($b['runtime']) ?> / <?= e($b['main_file']?:'bot.py') ?></span></div><span class="bot-status <?= $st==='online'?'ok':'bad' ?>"><?= e($st) ?></span></div>
+          <div class="bot-path"><code><?= e($b['path']) ?></code></div>
+          <div class="bot-files"><?php if($files): foreach($files as $f): ?><span><?= e($f) ?></span><?php endforeach; else: ?><em>файлы не прочитаны</em><?php endif; ?></div>
+          <div class="bot-actions">
+            <?php foreach(['start'=>'Start','stop'=>'Stop','restart'=>'Restart','install'=>'Deps'] as $cmd=>$label): ?>
+              <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="bot_action"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="bot_action" value="<?= e($cmd) ?>"><button class="btn btn-sm btn-soft"><?= e($label) ?></button></form>
+            <?php endforeach; ?>
+            <form method="post" onsubmit="return confirm('Остановить локальные дубли этого бота?')"><?= csrf_field() ?><input type="hidden" name="action" value="bot_action"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="bot_action" value="kill-conflicts"><button class="btn btn-sm btn-outline-warning">Fix</button></form>
+            <a class="btn btn-sm btn-soft" href="/?page=bot_logs&id=<?= (int)$b['id'] ?>">Logs</a>
+            <a class="btn btn-sm btn-soft" href="/?page=files&root=bots&path=<?= e($b['name']) ?>">Files</a>
+            <button type="button" class="btn btn-sm btn-outline-danger" data-bs-toggle="modal" data-bs-target="#deleteBot<?= (int)$b['id'] ?>">Delete</button>
+          </div>
+        </div>
+      <?php endforeach; if(!$bots): ?><div class="empty">Ботов пока нет</div><?php endif; ?>
+      </div>
     </div>
   </div>
-</div><?php }
+</div>
+<?= implode("\n", $modals) ?>
+<?php }
+
 function view_bot_logs(): void { $id=(int)($_GET['id']??0); $st=db()->prepare('SELECT * FROM bots WHERE id=?'); $st->execute([$id]); $b=$st->fetch(); if(!$b){echo '<div class="panel-card empty">Бот не найден</div>';return;} $res=run_ctl(['bot','logs',$b['name']],30); ?><div class="panel-card"><div class="card-title-row"><h2>Логи PM2: <?= e($b['name']) ?></h2><a class="btn btn-soft" href="/?page=bots">Назад</a></div><pre class="logs"><?= e($res['output']?:'Логов пока нет') ?></pre></div><?php }
 
 function view_backups(): void { $jobs=db()->query('SELECT * FROM backup_jobs ORDER BY id DESC')->fetchAll(); $files=run_ctl_json(['backup-list-json'],30); ?>

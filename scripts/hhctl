@@ -1067,58 +1067,62 @@ cmd_pm2_persist() {
   log "PM2 24/7 autostart enabled for $BOT_USER. Боты продолжат работать после закрытия панели/SSH и поднимутся после перезагрузки."
 }
 make_bot_start_script() {
-  local name="$1" runtime="$2" main_file="$3" path="$BOTS_DIR/$name" mem="$4" interp=""
-  case "$runtime" in
-    python)
-      if [[ -x "$path/venv/bin/python" ]]; then interp="$path/venv/bin/python"; else interp="python3"; fi
-      cat > "$path/.hyper-start.sh" <<EOS
+  local name="$1" runtime="$2" main_file="$3" path="$BOTS_DIR/$name" mem="${4:-0}"
+  mkdir -p "$path"
+  main_file="$(basename "$main_file")"
+
+  # HYPER-HOST v24: раньше .hyper-start.sh мог получить пустой interpreter и падал:
+  #   .hyper-start.sh: line 4: : No such file or directory
+  # Теперь стартовый файл сам находит interpreter внутри папки бота и пишет понятную ошибку.
+  cat > "$path/.hyper-start.sh" <<EOS
 #!/usr/bin/env bash
 set -Eeuo pipefail
-LOCK="$path/.hyper-bot.lock"
-exec 9>"$LOCK"
-if ! flock -n 9; then echo "HYPER-HOST: bot $name already running, exit duplicate"; exit 0; fi
-cd "$path"
-if [[ -f .env ]]; then set -a; source .env; set +a; fi
-exec "$interp" "$main_file"
+cd "\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+LOCK=".hyper-bot.lock"
+exec 9>"\$LOCK"
+if ! flock -n 9; then
+  echo "HYPER-HOST: bot ${name} уже запущен, дубль остановлен"
+  exit 0
+fi
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+MAIN_FILE="${main_file}"
+if [[ ! -f "\$MAIN_FILE" ]]; then
+  echo "HYPER-HOST ERROR: главный файл не найден: \$(pwd)/\$MAIN_FILE"
+  echo "Проверь поле 'Главный файл' в панели и загруженные файлы бота."
+  exit 127
+fi
+case "${runtime}" in
+  python)
+    if [[ -x ./venv/bin/python ]]; then exec ./venv/bin/python "\$MAIN_FILE"; fi
+    if command -v python3 >/dev/null 2>&1; then exec python3 "\$MAIN_FILE"; fi
+    if command -v python >/dev/null 2>&1; then exec python "\$MAIN_FILE"; fi
+    echo "HYPER-HOST ERROR: python3 не найден. Выполни: sudo apt install -y python3 python3-venv python3-pip"
+    exit 127
+    ;;
+  node)
+    if command -v node >/dev/null 2>&1; then exec node "\$MAIN_FILE"; fi
+    echo "HYPER-HOST ERROR: node не найден. Выполни: sudo apt install -y nodejs npm"
+    exit 127
+    ;;
+  php)
+    if command -v php >/dev/null 2>&1; then exec php "\$MAIN_FILE"; fi
+    echo "HYPER-HOST ERROR: php-cli не найден. Выполни: sudo apt install -y php-cli"
+    exit 127
+    ;;
+  custom)
+    exec bash -lc "./\$MAIN_FILE"
+    ;;
+  *)
+    echo "HYPER-HOST ERROR: неизвестный runtime: ${runtime}"
+    exit 2
+    ;;
+esac
 EOS
-      ;;
-    node)
-      cat > "$path/.hyper-start.sh" <<EOS
-#!/usr/bin/env bash
-set -Eeuo pipefail
-LOCK="$path/.hyper-bot.lock"
-exec 9>"$LOCK"
-if ! flock -n 9; then echo "HYPER-HOST: bot $name already running, exit duplicate"; exit 0; fi
-cd "$path"
-if [[ -f .env ]]; then set -a; source .env; set +a; fi
-exec node "$main_file"
-EOS
-      ;;
-    php)
-      cat > "$path/.hyper-start.sh" <<EOS
-#!/usr/bin/env bash
-set -Eeuo pipefail
-LOCK="$path/.hyper-bot.lock"
-exec 9>"$LOCK"
-if ! flock -n 9; then echo "HYPER-HOST: bot $name already running, exit duplicate"; exit 0; fi
-cd "$path"
-if [[ -f .env ]]; then set -a; source .env; set +a; fi
-exec php "$main_file"
-EOS
-      ;;
-    custom)
-      cat > "$path/.hyper-start.sh" <<EOS
-#!/usr/bin/env bash
-set -Eeuo pipefail
-LOCK="$path/.hyper-bot.lock"
-exec 9>"$LOCK"
-if ! flock -n 9; then echo "HYPER-HOST: bot $name already running, exit duplicate"; exit 0; fi
-cd "$path"
-if [[ -f .env ]]; then set -a; source .env; set +a; fi
-exec bash -lc "$main_file"
-EOS
-      ;;
-  esac
   chmod +x "$path/.hyper-start.sh"
   chown "$BOT_USER":www-data "$path/.hyper-start.sh" 2>/dev/null || true
 }
@@ -1202,7 +1206,7 @@ bot_start_pm2() {
   ensure_pm2
   [[ -f "$path/$main_file" ]] || err "Главный файл не найден: $path/$main_file"
   bot_stop_duplicates "$name"
-  make_bot_start_script "$name" "$runtime" "$main_file" "$path" "$mem"
+  make_bot_start_script "$name" "$runtime" "$main_file" "$mem"
   local mem_arg=(); [[ "$mem" =~ ^[0-9]+$ && "$mem" -gt 0 ]] && mem_arg+=(--max-memory-restart "${mem}M")
   (cd "$path" && pm2_as_bot start ./.hyper-start.sh --name "$name" --interpreter bash "${mem_arg[@]}")
   pm2_persist
@@ -1282,16 +1286,22 @@ cmd_bot_action() {
   ensure_pm2
   case "$action" in
     start|restart)
-      # HYPER-HOST v11: при старте/рестарте всегда гасим локальные дубли,
-      # чтобы Telegram polling не ловил getUpdates conflict из-за второго PM2/systemd процесса.
-      if [[ -x "$BOTS_DIR/$name/.hyper-start.sh" ]]; then
-        bot_stop_duplicates "$name"
-        (cd "$BOTS_DIR/$name" && pm2_as_bot start ./.hyper-start.sh --name "$name" --interpreter bash)
-      elif pm2_as_bot describe "$name" >/dev/null 2>&1; then
-        pm2_as_bot restart "$name"
+      # HYPER-HOST v24: всегда пересобираем .hyper-start.sh перед стартом,
+      # чтобы старые битые start-файлы с пустым interpreter не ломали запуск.
+      local bot_dir="$BOTS_DIR/$name" runtime="python" main_file=""
+      [[ -d "$bot_dir" ]] || err "Папка бота не найдена: $bot_dir"
+      if [[ -f "$bot_dir/bot.py" ]]; then runtime="python"; main_file="bot.py";
+      elif [[ -f "$bot_dir/main.py" ]]; then runtime="python"; main_file="main.py";
+      elif [[ -f "$bot_dir/index.py" ]]; then runtime="python"; main_file="index.py";
+      elif [[ -f "$bot_dir/index.js" ]]; then runtime="node"; main_file="index.js";
+      elif [[ -f "$bot_dir/bot.php" ]]; then runtime="php"; main_file="bot.php";
+      elif [[ -f "$bot_dir/start.sh" ]]; then runtime="custom"; main_file="start.sh";
       else
-        err "PM2 process not found and .hyper-start.sh missing. Создай/запусти бота заново."
+        err "Не найден главный файл бота. Нужен bot.py, main.py, index.py, index.js, bot.php или start.sh в $bot_dir"
       fi
+      make_bot_start_script "$name" "$runtime" "$main_file" 0
+      bot_stop_duplicates "$name"
+      (cd "$bot_dir" && pm2_as_bot start ./.hyper-start.sh --name "$name" --interpreter bash)
       pm2_persist
       ;;
     stop)
@@ -1786,6 +1796,26 @@ cmd_panel_domain() {
   esac
 }
 
+
+ensure_cli_links() {
+  local self_path hyper_src
+  self_path="/usr/local/sbin/hyper-host-ctl"
+  hyper_src="/usr/local/bin/hyper"
+
+  # Если скрипт запущен из репозитория, а бинарей ещё нет — устанавливаем их.
+  if [[ ! -x "$self_path" && -f "/root/hyper-hosting-panel/scripts/hhctl" ]]; then
+    install -m 0755 "/root/hyper-hosting-panel/scripts/hhctl" "$self_path" 2>/dev/null || true
+  fi
+  if [[ ! -x "$hyper_src" && -f "/root/hyper-hosting-panel/scripts/hyper" ]]; then
+    install -m 0755 "/root/hyper-hosting-panel/scripts/hyper" "$hyper_src" 2>/dev/null || true
+  fi
+
+  # Дублируем в /usr/bin, чтобы Telegram-боты и разные PATH точно находили команды.
+  [[ -x "$self_path" ]] && ln -sf "$self_path" /usr/bin/hyper-host-ctl 2>/dev/null || true
+  [[ -x "$hyper_src" ]] && ln -sf "$hyper_src" /usr/bin/hyper 2>/dev/null || true
+  chmod 0755 "$self_path" "$hyper_src" /usr/bin/hyper-host-ctl /usr/bin/hyper 2>/dev/null || true
+}
+
 cmd_panel_ssl() {
   local domain="${1:-$PANEL_DOMAIN}" email="${2:-}"
   [[ -n "$domain" && "$domain" != "_" ]] || err "Panel domain required. Use: sudo hyper panel domain panel.example.com"
@@ -1820,7 +1850,7 @@ cmd_panel_ssl() {
 
 
 cmd_repair() {
-  ensure_dirs; ensure_nologin_shell; ensure_bot_user; cleanup_hyper_host_mounts; ensure_acme_locations_all
+  ensure_cli_links; ensure_dirs; ensure_nologin_shell; ensure_bot_user; cleanup_hyper_host_mounts; ensure_acme_locations_all
   if [[ -n "${PANEL_DOMAIN:-}" && "${PANEL_DOMAIN:-_}" != "_" ]]; then
     panel_domain_conflict_cleanup "$PANEL_DOMAIN"
     write_panel_nginx_conf "$PANEL_DOMAIN"
@@ -1916,6 +1946,7 @@ case "${1:-}" in
   network-doctor-json) shift; cmd_network_doctor_json "$@" ;;
   panel-domain) shift; cmd_panel_domain "$@" ;;
   panel-ssl) shift; cmd_panel_ssl "$@" ;;
+  cli-doctor) shift; ensure_cli_links; echo "hyper: $(command -v hyper || true)"; echo "hyper-host-ctl: $(command -v hyper-host-ctl || true)"; ls -l /usr/local/bin/hyper /usr/bin/hyper /usr/local/sbin/hyper-host-ctl /usr/bin/hyper-host-ctl 2>/dev/null || true ;;
   repair) shift; cmd_repair "$@" ;;
   *) cat >&2 <<EOHELP
 Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
