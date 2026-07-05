@@ -232,6 +232,78 @@ cmd_update() {
   say "Обновление HYPER-HOST из GitHub завершено."
 }
 
+
+cmd_network() {
+  local sub="${1:-doctor}"; shift || true
+  case "$sub" in
+    doctor|check)
+      $CTL network-doctor-json "${1:-}" | json_pretty
+      ;;
+    fix)
+      $CTL network-fix "${1:-}" "${2:-}"
+      ;;
+    public-ip)
+      local act="${1:-get}"; shift || true
+      $CTL public-ip "$act" "$@"
+      ;;
+    panel-domain)
+      local act="${1:-get}"; shift || true
+      $CTL panel-domain "$act" "$@"
+      ;;
+    *) err "Network команды: sudo hyper network doctor [DOMAIN] | fix [DOMAIN] [PUBLIC_IP] | public-ip set IP | panel-domain set DOMAIN" ;;
+  esac
+}
+
+cmd_dns() {
+  local sub="${1:-status}"; shift || true
+  case "$sub" in
+    wizard|setup)
+      [[ -n "${1:-}" ]] || err "Используй: sudo hyper dns wizard DOMAIN [PUBLIC_IP] [panel]"
+      $CTL dns-wizard "$@"
+      ;;
+    status|check)
+      [[ -n "${1:-}" ]] || err "Используй: sudo hyper dns status DOMAIN"
+      $CTL dns-status-json "$1" | json_pretty
+      ;;
+    apply)
+      [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper dns apply DOMAIN RECORDS_JSON"
+      $CTL dns-apply "$@"
+      ;;
+    delete)
+      [[ -n "${1:-}" ]] || err "Используй: sudo hyper dns delete DOMAIN"
+      $CTL dns-delete "$1"
+      ;;
+    guide)
+      cat <<'EODNSGUIDE'
+DNS перенос домена на HYPER-HOST:
+
+1) На сервере:
+   sudo hyper network fix hyper-host.pw 90.189.208.25
+   sudo hyper dns wizard hyper-host.pw 90.189.208.25 panel
+
+2) У регистратора домена укажи NS:
+   ns1.hyper-host.pw
+   ns2.hyper-host.pw
+
+3) Если регистратор просит Glue/IP:
+   ns1.hyper-host.pw -> 90.189.208.25
+   ns2.hyper-host.pw -> 90.189.208.25
+
+4) На роутере пробросить:
+   TCP 80  -> 192.168.0.179:80
+   TCP 443 -> 192.168.0.179:443
+   TCP/UDP 53 -> 192.168.0.179:53
+
+5) Проверка:
+   sudo hyper dns status hyper-host.pw
+   sudo hyper network doctor hyper-host.pw
+   sudo hyper ssl check hyper-host.pw
+EODNSGUIDE
+      ;;
+    *) err "DNS команды: sudo hyper dns wizard DOMAIN [IP] | status DOMAIN | guide | delete DOMAIN" ;;
+  esac
+}
+
 cmd_backup() {
   local sub="${1:-list}"; shift || true
   case "$sub" in
@@ -266,6 +338,10 @@ cmd_help() {
   sudo hyper php                     PHP-FPM версии
   sudo hyper repair                  починить права/FTP/PM2/Nginx
   sudo hyper update                  обновить панель из GitHub
+  sudo hyper network doctor DOMAIN   проверить внешний/внутренний доступ
+  sudo hyper network fix DOMAIN IP   починить nginx/ufw/public-ip
+  sudo hyper dns wizard DOMAIN IP    создать DNS-зону для переноса домена
+  sudo hyper dns status DOMAIN       проверить нашу DNS-зону
   sudo hyper help                    помощь
 
 Боты:
@@ -282,10 +358,17 @@ cmd_help() {
   sudo hyper bot doctor
 
 SSL:
+  sudo hyper network doctor DOMAIN
+  sudo hyper network fix DOMAIN 90.189.208.25
   sudo hyper ssl check DOMAIN
   sudo hyper ssl fix DOMAIN
   sudo hyper ssl issue DOMAIN EMAIL
   sudo hyper ssl renew
+
+DNS:
+  sudo hyper dns wizard hyper-host.pw 90.189.208.25 panel
+  sudo hyper dns status hyper-host.pw
+  sudo hyper dns guide
 
 Сайты/низкий уровень:
   sudo hyper raw add-site DOMAIN [ALIASES]
@@ -307,6 +390,8 @@ case "${1:-help}" in
   ftp) shift; cmd_ftp "$@" ;;
   db|dbs|databases) shift; cmd_dbs "$@" ;;
   ssl) shift; cmd_ssl "$@" ;;
+  network|net) shift; cmd_network "$@" ;;
+  dns) shift; cmd_dns "$@" ;;
   backup|backups) shift; cmd_backup "$@" ;;
   php) shift; cmd_php "$@" ;;
   repair) shift; cmd_repair "$@" ;;

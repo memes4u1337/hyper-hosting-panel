@@ -1123,6 +1123,216 @@ print(json.dumps({'sites':sites,'folders':folders,'ftp':ftp,'databases':database
 PY
 }
 
+
+
+# -----------------------------
+# HYPER-HOST v15: network + DNS
+# -----------------------------
+write_bind_authoritative_defaults() {
+  mkdir -p /etc/bind/hyper-host-zones
+  cat > /etc/bind/named.conf.options <<'EOBINDOPT'
+options {
+    directory "/var/cache/bind";
+    listen-on { any; };
+    listen-on-v6 { any; };
+    allow-query { any; };
+    recursion no;
+    dnssec-validation auto;
+    auth-nxdomain no;
+};
+EOBINDOPT
+  touch /etc/bind/named.conf.local
+}
+
+nginx_force_listen_all() {
+  # HYPER-HOST не должен биндиться на 90.x.x.x, если сервер за роутером.
+  # Внешний IP находится на роутере, а nginx на Ubuntu должен слушать 0.0.0.0:80/443.
+  local conf
+  shopt -s nullglob
+  for conf in /etc/nginx/sites-available/hyper-host-*.conf; do
+    python3 - "$conf" <<'PYNGINXALL'
+import sys,re,pathlib
+p=pathlib.Path(sys.argv[1])
+text=p.read_text(encoding='utf-8', errors='ignore')
+text=re.sub(r'listen\s+\d+\.\d+\.\d+\.\d+:80\s*;', 'listen 80;', text)
+text=re.sub(r'listen\s+\d+\.\d+\.\d+\.\d+:443\s+ssl([^;]*);', r'listen 443 ssl\1;', text)
+text=re.sub(r'listen\s+\d+\.\d+\.\d+\.\d+:443\s*;', 'listen 443 ssl;', text)
+p.write_text(text, encoding='utf-8')
+PYNGINXALL
+  done
+  shopt -u nullglob
+}
+
+cmd_network_fix() {
+  local domain="${1:-}" pub="${2:-}"
+  [[ -n "$pub" ]] || pub="$(configured_public_ip)"
+  [[ -n "$pub" ]] || pub="$(choose_ssl_expected_ip "${domain:-example.com}")"
+  [[ -n "$pub" ]] && cmd_public_ip set "$pub" >/dev/null 2>&1 || true
+  nginx_force_listen_all
+  ensure_acme_locations_all
+  ufw allow 80/tcp >/dev/null 2>&1 || true
+  ufw allow 443/tcp >/dev/null 2>&1 || true
+  ufw allow 53/tcp >/dev/null 2>&1 || true
+  ufw allow 53/udp >/dev/null 2>&1 || true
+  if [[ -n "$domain" && "$domain" != "_" ]]; then
+    valid_domain "$domain" || err "Invalid domain: $domain"
+    local root; root="$(site_root_for_domain "$domain")"
+    ensure_acme_location_for_domain "$domain" "$root"
+  fi
+  write_bind_authoritative_defaults
+  systemctl enable bind9 >/dev/null 2>&1 || true
+  systemctl restart bind9 2>/dev/null || true
+  nginx -t >/dev/null && systemctl reload nginx || nginx -t
+  log "Network fixed: nginx listens on all IPs, ports 80/443/53 allowed, public_ip=${pub:-unknown}"
+}
+
+cmd_network_doctor_json() {
+  local domain="${1:-}" pub cfg out server nginx_ok bind_ok ufw_status l80 l443 l53 dns_a dns_status local_http local_acme root problem hint
+  server="$SERVER_IP"; cfg="$(configured_public_ip)"; pub="$(public_ip)"; out="$(outbound_public_ip)"
+  nginx_ok=0; nginx -t >/dev/null 2>&1 && nginx_ok=1
+  bind_ok=0; systemctl is-active bind9 >/dev/null 2>&1 && bind_ok=1
+  ufw_status="$(ufw status 2>/dev/null | head -n1 | sed 's/^Status: //')"
+  l80=0; ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq '(:80$|0\.0\.0\.0:80|\[::\]:80)' && l80=1
+  l443=0; ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq '(:443$|0\.0\.0\.0:443|\[::\]:443)' && l443=1
+  l53=0; ss -lun 2>/dev/null | awk '{print $5}' | grep -Eq '(:53$|0\.0\.0\.0:53|\[::\]:53)' && l53=1
+  dns_a=""; dns_status="not_checked"; local_http=0; local_acme=0; problem=""; hint=""
+  if [[ -n "$domain" ]]; then
+    valid_domain "$domain" || err "Invalid domain"
+    dns_a="$(resolve_domain_a "$domain")"
+    dns_status="bad"
+    dns_points_here "$domain" && dns_status="ok" || true
+    curl -fsS --connect-timeout 1 --max-time 2 -H "Host: $domain" "http://127.0.0.1/" >/dev/null 2>&1 && local_http=1 || true
+    root="$(site_root_for_domain "$domain")"
+    local_http_challenge_check "$domain" "$root" && local_acme=1 || true
+    if [[ -z "$dns_a" ]]; then problem="DNS A-запись не найдена. Добавь A $domain $pub"; fi
+    if [[ -n "$dns_a" && "$dns_status" != "ok" ]]; then problem="DNS A-запись смотрит не туда. Сейчас: ${dns_a//$'\n'/, }. Нужно: $pub"; fi
+    if [[ "$l80" != 1 || "$l443" != 1 ]]; then problem="Nginx/сервер не слушает 80/443. Выполни: sudo hyper network fix $domain"; fi
+    if [[ "$local_acme" != 1 ]]; then problem="Локально не проходит ACME challenge. Выполни: sudo hyper ssl fix $domain"; fi
+  fi
+  if [[ -n "$server" ]] && is_private_ipv4 "$server"; then
+    hint="Сервер за роутером/NAT. На роутере нужны пробросы TCP 80/443 на $server. Из домашней Wi-Fi сети внешний IP может не открываться без NAT Loopback — проверяй с телефона через мобильный интернет или добавь hosts/DNS split."
+  fi
+  DOMAIN="$domain" SERVER_IP="$server" PUBLIC_IP="$pub" CONFIGURED_PUBLIC_IP="$cfg" OUTBOUND_PUBLIC_IP="$out" DNS_A="$dns_a" DNS_STATUS="$dns_status" NGINX_OK="$nginx_ok" BIND_OK="$bind_ok" UFW_STATUS="$ufw_status" L80="$l80" L443="$l443" L53="$l53" LOCAL_HTTP="$local_http" LOCAL_ACME="$local_acme" PROBLEM="$problem" HINT="$hint" python3 - <<'PYNET'
+import os,json
+print(json.dumps({
+ 'domain': os.environ.get('DOMAIN',''),
+ 'server_ip': os.environ.get('SERVER_IP',''),
+ 'public_ip': os.environ.get('PUBLIC_IP',''),
+ 'configured_public_ip': os.environ.get('CONFIGURED_PUBLIC_IP',''),
+ 'outbound_public_ip': os.environ.get('OUTBOUND_PUBLIC_IP',''),
+ 'nat_mode': os.environ.get('SERVER_IP','').startswith(('192.168.','10.','172.16.','172.17.','172.18.','172.19.','172.20.','172.21.','172.22.','172.23.','172.24.','172.25.','172.26.','172.27.','172.28.','172.29.','172.30.','172.31.')),
+ 'dns_a': [x for x in os.environ.get('DNS_A','').splitlines() if x.strip()],
+ 'dns_status': os.environ.get('DNS_STATUS',''),
+ 'nginx_ok': os.environ.get('NGINX_OK') == '1',
+ 'bind9_ok': os.environ.get('BIND_OK') == '1',
+ 'ufw_status': os.environ.get('UFW_STATUS',''),
+ 'listen_80': os.environ.get('L80') == '1',
+ 'listen_443': os.environ.get('L443') == '1',
+ 'listen_dns_53': os.environ.get('L53') == '1',
+ 'local_http_ok': os.environ.get('LOCAL_HTTP') == '1',
+ 'local_acme_ok': os.environ.get('LOCAL_ACME') == '1',
+ 'problem': os.environ.get('PROBLEM',''),
+ 'hint': os.environ.get('HINT',''),
+}, ensure_ascii=False))
+PYNET
+}
+
+cmd_dns_wizard() {
+  local domain="${1:-}" pub="${2:-}" panel_sub="${3:-panel}"
+  [[ -n "$domain" ]] || err "Domain required"
+  valid_domain "$domain" || err "Invalid domain: $domain"
+  [[ -n "$pub" ]] || pub="$(public_ip)"
+  [[ "$pub" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || err "Invalid public IPv4: $pub"
+  mkdir -p "$DNS_DIR"
+  write_bind_authoritative_defaults
+  local ns1="ns1.$domain." ns2="ns2.$domain." admin="admin.$domain." records
+  records="$(python3 - <<PYREC
+import json
+pub='$pub'; panel='$panel_sub'
+records=[
+ {'name':'@','type':'A','value':pub,'ttl':300},
+ {'name':'www','type':'A','value':pub,'ttl':300},
+ {'name':panel,'type':'A','value':pub,'ttl':300},
+ {'name':'ns1','type':'A','value':pub,'ttl':300},
+ {'name':'ns2','type':'A','value':pub,'ttl':300},
+ {'name':'@','type':'MX','value':'10 mail','ttl':3600},
+ {'name':'mail','type':'A','value':pub,'ttl':3600},
+ {'name':'@','type':'TXT','value':'"v=spf1 a mx ip4:%s ~all"'%pub,'ttl':3600},
+]
+print(json.dumps(records, ensure_ascii=False))
+PYREC
+)"
+  cmd_dns_apply "$domain" "$records" "$ns1" "$admin"
+  ufw allow 53/tcp >/dev/null 2>&1 || true
+  ufw allow 53/udp >/dev/null 2>&1 || true
+  systemctl restart bind9 2>/dev/null || true
+  cat <<EOF
+DNS зона готова: $domain
+
+У регистратора домена поставь NS:
+  ns1.$domain
+  ns2.$domain
+
+Если регистратор просит glue/IP для NS:
+  ns1.$domain -> $pub
+  ns2.$domain -> $pub
+
+Потом проверка:
+  dig @$pub $domain A
+  dig @$pub www.$domain A
+  sudo hyper dns status $domain
+EOF
+}
+
+cmd_dns_status_json() {
+  local domain="${1:-}" pub zonefile nscheck a_local a_public bind_ok named_ok open53
+  [[ -n "$domain" ]] || err "Domain required"
+  valid_domain "$domain" || err "Invalid domain"
+  pub="$(public_ip)"; zonefile="$DNS_DIR/db.$domain"
+  bind_ok=0; systemctl is-active bind9 >/dev/null 2>&1 && bind_ok=1
+  named_ok=0; [[ -f "$zonefile" ]] && named-checkzone "$domain" "$zonefile" >/dev/null 2>&1 && named_ok=1
+  open53=0; ss -lun 2>/dev/null | awk '{print $5}' | grep -Eq '(:53$|0\.0\.0\.0:53|\[::\]:53)' && open53=1
+  a_local="$(dig +short @127.0.0.1 "$domain" A 2>/dev/null | sed '/^$/d' | sort -u || true)"
+  a_public="$(dig +short "$domain" A 2>/dev/null | sed '/^$/d' | sort -u || true)"
+  DOMAIN="$domain" PUBLIC_IP="$pub" ZONEFILE="$zonefile" BIND_OK="$bind_ok" NAMED_OK="$named_ok" OPEN53="$open53" A_LOCAL="$a_local" A_PUBLIC="$a_public" python3 - <<'PYDNS'
+import os,json
+lines=lambda x:[i for i in x.splitlines() if i.strip()]
+print(json.dumps({
+ 'domain': os.environ['DOMAIN'],
+ 'public_ip': os.environ.get('PUBLIC_IP',''),
+ 'zonefile': os.environ.get('ZONEFILE',''),
+ 'zone_exists': os.path.exists(os.environ.get('ZONEFILE','')),
+ 'bind9_ok': os.environ.get('BIND_OK')=='1',
+ 'zone_ok': os.environ.get('NAMED_OK')=='1',
+ 'listen_53_udp': os.environ.get('OPEN53')=='1',
+ 'local_a': lines(os.environ.get('A_LOCAL','')),
+ 'public_a': lines(os.environ.get('A_PUBLIC','')),
+ 'registrar_ns_required': ['ns1.'+os.environ['DOMAIN'], 'ns2.'+os.environ['DOMAIN']],
+ 'glue_required': {'ns1.'+os.environ['DOMAIN']: os.environ.get('PUBLIC_IP',''), 'ns2.'+os.environ['DOMAIN']: os.environ.get('PUBLIC_IP','')},
+}, ensure_ascii=False))
+PYDNS
+}
+
+cmd_panel_domain() {
+  local action="${1:-get}" domain="${2:-}"
+  case "$action" in
+    get) echo "$PANEL_DOMAIN" ;;
+    set)
+      [[ -n "$domain" ]] || err "Domain required"
+      valid_domain "$domain" || err "Invalid domain"
+      if [[ -f "$CONF" ]]; then
+        if grep -q '^PANEL_DOMAIN=' "$CONF"; then sed -i "s#^PANEL_DOMAIN=.*#PANEL_DOMAIN=\"$domain\"#" "$CONF"; else echo "PANEL_DOMAIN=\"$domain\"" >> "$CONF"; fi
+      fi
+      if [[ -f /etc/nginx/sites-available/hyper-host-panel.conf ]]; then
+        sed -i -E "s#^[[:space:]]*server_name[[:space:]].*;#    server_name $domain _;#" /etc/nginx/sites-available/hyper-host-panel.conf
+      fi
+      nginx_reload
+      log "Panel domain saved: $domain"
+      ;;
+    *) err "Use: panel-domain get|set DOMAIN" ;;
+  esac
+}
+
 cmd_repair() {
   ensure_dirs; ensure_nologin_shell; ensure_bot_user; cleanup_hyper_host_mounts; ensure_acme_locations_all
   mkdir -p "$BASE_DIR/data" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$BACKUP_DIR" "$BASE_DIR/templates" /etc/hyper-host
@@ -1193,6 +1403,8 @@ case "${1:-}" in
   backup-delete-schedule) shift; cmd_backup_delete_schedule "$@" ;;
   backup-list-json) shift; cmd_backup_list_json "$@" ;;
   dns-apply) shift; cmd_dns_apply "$@" ;;
+  dns-wizard) shift; cmd_dns_wizard "$@" ;;
+  dns-status-json) shift; cmd_dns_status_json "$@" ;;
   dns-delete) shift; cmd_dns_delete "$@" ;;
   cron-set) shift; cmd_cron_set "$@" ;;
   cron-delete) shift; cmd_cron_delete "$@" ;;
@@ -1203,6 +1415,9 @@ case "${1:-}" in
   php-list-json) shift; cmd_php_list_json "$@" ;;
   stats-json) shift; cmd_stats_json "$@" ;;
   sync-json) shift; cmd_sync_json "$@" ;;
+  network-fix) shift; cmd_network_fix "$@" ;;
+  network-doctor-json) shift; cmd_network_doctor_json "$@" ;;
+  panel-domain) shift; cmd_panel_domain "$@" ;;
   repair) shift; cmd_repair "$@" ;;
   *) cat >&2 <<EOHELP
 Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
@@ -1213,6 +1428,10 @@ Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
        hyper-host-ctl dns-apply DOMAIN RECORDS_JSON [NS] [ADMIN]
        hyper-host-ctl cron-set NAME "* * * * *" COMMAND
        hyper-host-ctl public-ip set 90.189.208.25
+       hyper-host-ctl network-fix [DOMAIN] [PUBLIC_IP]
+       hyper-host-ctl dns-wizard DOMAIN [PUBLIC_IP] [panel]
+       hyper-host-ctl dns-status-json DOMAIN
+       hyper-host-ctl panel-domain set panel.example.com
        hyper-host-ctl pm2-persist
        hyper-host-ctl ssl-fix-site DOMAIN
        hyper-host-ctl ssl-ip-selfsigned 192.168.0.179

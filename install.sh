@@ -198,7 +198,7 @@ cat > /etc/nginx/sites-available/hyper-host-panel.conf <<EONGINX
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
-    server_name ${PANEL_DOMAIN};
+    server_name ${PANEL_DOMAIN} _;
 
     root ${PANEL_DIR}/public;
     index index.php index.html;
@@ -314,6 +314,18 @@ if command -v pm2 >/dev/null 2>&1; then
 fi
 
 log "Настройка DNS сервиса bind9..."
+cat > /etc/bind/named.conf.options <<'EOBINDOPT'
+options {
+    directory "/var/cache/bind";
+    listen-on { any; };
+    listen-on-v6 { any; };
+    allow-query { any; };
+    recursion no;
+    dnssec-validation auto;
+    auth-nxdomain no;
+};
+EOBINDOPT
+touch /etc/bind/named.conf.local
 systemctl enable bind9 >/dev/null 2>&1 || true
 systemctl restart bind9 2>/dev/null || true
 
@@ -329,12 +341,15 @@ log "Настройка firewall..."
 ufw allow OpenSSH >/dev/null 2>&1 || true
 ufw allow 80/tcp >/dev/null 2>&1 || true
 ufw allow 443/tcp >/dev/null 2>&1 || true
+ufw allow 53/tcp >/dev/null 2>&1 || true
+ufw allow 53/udp >/dev/null 2>&1 || true
 ufw allow 21/tcp >/dev/null 2>&1 || true
 ufw allow 40000:40100/tcp >/dev/null 2>&1 || true
 # 3306 открывается через настройки панели, когда включаешь внешние подключения.
 
 log "Финальный ремонт прав и сервисов..."
 /usr/local/sbin/hyper-host-ctl repair >/dev/null || warn "Repair-команда не выполнилась, проверь вручную: sudo hyper-host-ctl repair"
+/usr/local/sbin/hyper-host-ctl network-fix "${PANEL_DOMAIN}" "${PUBLIC_IP}" >/dev/null 2>&1 || true
 
 log "Проверка панели..."
 php -l "$PANEL_DIR/public/index.php" >/dev/null

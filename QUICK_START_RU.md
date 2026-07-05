@@ -1,6 +1,6 @@
-# Быстрый старт HYPER-HOST
+# HYPER-HOST v15 Quick Start
 
-## Обновление с GitHub
+## Обновление сервера из GitHub
 
 ```bash
 cd /root/hyper-hosting-panel
@@ -10,62 +10,57 @@ git checkout main
 git reset --hard origin/main
 git clean -fd
 
-chmod +x install.sh uninstall.sh scripts/hhctl || true
+chmod +x install.sh uninstall.sh scripts/hhctl scripts/hyper || true
 
 sudo bash install.sh
-sudo hyper-host-ctl repair
-sudo hyper-host-ctl public-ip set 90.189.208.25
-sudo hyper-host-ctl ssl-fix-site hyper-host.pw
-sudo hyper-host-ctl sync-json
-sudo hyper-host-ctl bot-doctor
+
+sudo hyper repair
+sudo hyper network fix hyper-host.pw 90.189.208.25
+sudo hyper bot persist
+sudo hyper stats
+sudo hyper bots
+sudo hyper network doctor hyper-host.pw
+sudo hyper ssl check hyper-host.pw
 
 sudo nginx -t
 sudo systemctl reload nginx
 sudo systemctl restart vsftpd
 ```
 
+## Перенос домена на свои DNS
+
+```bash
+sudo hyper dns wizard hyper-host.pw 90.189.208.25 panel
+sudo hyper dns status hyper-host.pw
+```
+
+У регистратора домена поставить NS:
+
+```text
+ns1.hyper-host.pw
+ns2.hyper-host.pw
+```
+
+Glue/IP:
+
+```text
+ns1.hyper-host.pw -> 90.189.208.25
+ns2.hyper-host.pw -> 90.189.208.25
+```
+
+## Проброс портов на роутере
+
+```text
+TCP 80   -> 192.168.0.179:80
+TCP 443  -> 192.168.0.179:443
+TCP 53   -> 192.168.0.179:53
+UDP 53   -> 192.168.0.179:53
+```
+
 ## SSL
 
 ```bash
-sudo hyper-host-ctl ssl-check-json hyper-host.pw
-sudo hyper-host-ctl ssl-site hyper-host.pw admin@example.com
+sudo hyper ssl fix hyper-host.pw
+sudo hyper ssl check hyper-host.pw
+sudo hyper ssl issue hyper-host.pw admin@example.com
 ```
-
-## Боты
-
-```bash
-sudo hyper-host-ctl bot kill-conflicts 123
-sudo hyper-host-ctl bot restart 123
-sudo hyper-host-ctl bot logs 123
-```
-
-## Включить 24/7 для ботов
-
-```bash
-sudo hyper-host-ctl pm2-persist
-sudo hyper-host-ctl bot-doctor
-```
-
-После этого можно закрывать панель и SSH — боты останутся работать через PM2/systemd.
-
-
-## HYPER-HOST CLI v14
-
-После установки доступна короткая команда:
-
-```bash
-sudo hyper help
-sudo hyper dev
-sudo hyper stats
-sudo hyper bots
-sudo hyper ssl status
-sudo hyper update
-```
-
-Разработчик отображается командой:
-
-```bash
-sudo hyper dev
-```
-
-Выводит: `@memes4u1337`.
