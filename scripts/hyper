@@ -369,7 +369,12 @@ cmd_help() {
   sudo hyper panel ssl DOMAIN EMAIL   выпустить SSL для панели
   sudo hyper ftp                     FTP-пользователи
   sudo hyper ftp fix                 починить FTP для FileZilla
-  sudo hyper access fix              открыть доступ с другого ПК
+  sudo hyper access guide            гайд по подключению с любого ПК/интернета
+  sudo hyper access doctor           диагностика портов SSH/FTP/HTTP/MySQL
+  sudo hyper access fix              открыть доступ с другого ПК на Ubuntu
+  sudo hyper disk guide              гайд по расширению диска
+  sudo hyper disk doctor             диагностика LVM/размера root
+  sudo hyper disk expand             расширить root LVM на весь диск
   sudo hyper dbs
   sudo hyper db status
   sudo hyper db doctor
@@ -417,6 +422,16 @@ DNS:
   sudo hyper dns status hyper-host.pw
   sudo hyper dns guide
 
+Доступ с другого ПК/интернета:
+  sudo hyper access guide
+  sudo hyper access fix
+  sudo hyper access doctor
+
+Диск 1ТБ вместо 98ГБ:
+  sudo hyper disk guide
+  sudo hyper disk doctor
+  sudo hyper disk expand
+
 Сайты/низкий уровень:
   sudo hyper raw add-site DOMAIN [ALIASES]
   sudo hyper raw delete-site DOMAIN [--delete-files]
@@ -429,6 +444,27 @@ DNS:
 EOF
 }
 
+
+
+cmd_access() {
+  local sub="${1:-guide}"; shift || true
+  case "$sub" in
+    guide|help) $CTL access-guide ;;
+    doctor|status|check) $CTL access-doctor-json | json_pretty ;;
+    fix|open) $CTL access-fix ;;
+    *) err "Access команды: sudo hyper access guide | doctor | fix" ;;
+  esac
+}
+
+cmd_disk() {
+  local sub="${1:-guide}"; shift || true
+  case "$sub" in
+    guide|help) $CTL disk-guide ;;
+    doctor|status|check) $CTL disk-doctor-json | json_pretty ;;
+    expand|resize) $CTL disk-expand ;;
+    *) err "Disk команды: sudo hyper disk guide | doctor | expand" ;;
+  esac
+}
 
 cmd_db_status() {
   say "🛢 HYPER-HOST — DATABASES"
@@ -466,7 +502,8 @@ case "${1:-help}" in
   bot) shift; cmd_bot "$@" ;;
   sites) shift; cmd_sites "$@" ;;
   ftp) shift; cmd_ftp "$@" ;;
-  access) shift; [[ "${1:-fix}" == "fix" ]] && $CTL access-fix || err "Используй: sudo hyper access fix" ;;
+  access) shift; cmd_access "$@" ;;
+  disk) shift; cmd_disk "$@" ;;
   db|dbs|databases) shift; cmd_dbs "$@" ;;
   ssl) shift; cmd_ssl "$@" ;;
   panel) shift; cmd_panel "$@" ;;

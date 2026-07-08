@@ -1650,6 +1650,231 @@ cmd_access_fix() {
   log "External access fixed: SSH 22, FTP 21/passive 40000-40100, HTTP 80, HTTPS 443, MySQL 3306 opened on Ubuntu. На роутере пробрось нужные порты на $SERVER_IP."
 }
 
+
+cmd_access_doctor_json() {
+  local pub cfg out server ufw ssh ftp http https mysql dns_tcp dns_udp nginx mariadb vsftpd sshsvc bind9
+  server="$SERVER_IP"; cfg="$(configured_public_ip)"; pub="$(public_ip)"; out="$(outbound_public_ip)"
+  ufw="$(ufw status 2>/dev/null | head -n1 | sed 's/^Status: //')"
+  ssh=0; listen_port_tcp 22 && ssh=1
+  ftp=0; listen_port_tcp 21 && ftp=1
+  http=0; listen_port_tcp 80 && http=1
+  https=0; listen_port_tcp 443 && https=1
+  mysql=0; listen_port_tcp 3306 && mysql=1
+  dns_tcp=0; listen_port_tcp 53 && dns_tcp=1
+  dns_udp=0; listen_port_udp 53 && dns_udp=1
+  nginx="$(systemctl is-active nginx 2>/dev/null || true)"
+  mariadb="$(systemctl is-active mariadb 2>/dev/null || systemctl is-active mysql 2>/dev/null || true)"
+  vsftpd="$(systemctl is-active vsftpd 2>/dev/null || true)"
+  sshsvc="$(systemctl is-active ssh 2>/dev/null || systemctl is-active sshd 2>/dev/null || true)"
+  bind9="$(systemctl is-active bind9 2>/dev/null || true)"
+  SERVER_IP="$server" PUBLIC_IP="$pub" CONFIGURED_PUBLIC_IP="$cfg" OUTBOUND_PUBLIC_IP="$out" UFW="$ufw" SSH="$ssh" FTP="$ftp" HTTP="$http" HTTPS="$https" MYSQL="$mysql" DNS_TCP="$dns_tcp" DNS_UDP="$dns_udp" NGINX="$nginx" MARIADB="$mariadb" VSFTPD="$vsftpd" SSHSVC="$sshsvc" BIND9="$bind9" python3 - <<'PYACCESS'
+import os,json
+server=os.environ.get('SERVER_IP','')
+public=os.environ.get('PUBLIC_IP','')
+ports={
+ 'ssh_22': os.environ.get('SSH')=='1',
+ 'ftp_21': os.environ.get('FTP')=='1',
+ 'http_80': os.environ.get('HTTP')=='1',
+ 'https_443': os.environ.get('HTTPS')=='1',
+ 'mysql_3306': os.environ.get('MYSQL')=='1',
+ 'dns_tcp_53': os.environ.get('DNS_TCP')=='1',
+ 'dns_udp_53': os.environ.get('DNS_UDP')=='1',
+}
+router=[]
+if server:
+    router=[
+      {'service':'HTTP sites + SSL','rule':'TCP 80 -> %s:80' % server},
+      {'service':'HTTPS sites','rule':'TCP 443 -> %s:443' % server},
+      {'service':'SSH/SFTP','rule':'TCP 22 -> %s:22' % server},
+      {'service':'FTP','rule':'TCP 21 -> %s:21 and TCP 40000-40100 -> %s:40000-40100' % (server, server)},
+      {'service':'MySQL external','rule':'TCP 3306 -> %s:3306' % server},
+      {'service':'Own DNS','rule':'TCP/UDP 53 -> %s:53' % server},
+    ]
+missing=[]
+for key, ok in ports.items():
+    if not ok: missing.append(key)
+print(json.dumps({
+  'server_ip': server,
+  'public_ip': public,
+  'configured_public_ip': os.environ.get('CONFIGURED_PUBLIC_IP',''),
+  'outbound_public_ip': os.environ.get('OUTBOUND_PUBLIC_IP',''),
+  'ufw_status': os.environ.get('UFW',''),
+  'services': {'nginx':os.environ.get('NGINX',''), 'mariadb':os.environ.get('MARIADB',''), 'vsftpd':os.environ.get('VSFTPD',''), 'ssh':os.environ.get('SSHSVC',''), 'bind9':os.environ.get('BIND9','')},
+  'listen_ports': ports,
+  'missing_server_ports': missing,
+  'router_forwarding_needed': router,
+  'ok_for_lan': bool(ports['http_80'] and ports['ssh_22']),
+  'note': 'Ubuntu firewall чинится командой sudo hyper access fix. Роутер нужно пробросить вручную на внутренний IP сервера.'
+}, ensure_ascii=False))
+PYACCESS
+}
+
+cmd_access_guide() {
+  local pub; pub="$(configured_public_ip)"; [[ -z "$pub" || "$pub" == "_" ]] && pub="$(public_ip)"
+  cat <<EOACCESS
+HYPER-HOST: подключение к серверу с любого ПК/интернета
+
+Схема:
+  сервер Ubuntu внутри сети: ${SERVER_IP}
+  публичный IP роутера:      ${pub}
+
+1) На сервере включить доступ:
+   sudo hyper access fix
+   sudo hyper access doctor
+
+2) На роутере Keenetic: Сетевые правила -> Переадресация портов.
+   Создай правила:
+   TCP 80          -> ${SERVER_IP}:80        сайты и выпуск SSL
+   TCP 443         -> ${SERVER_IP}:443       HTTPS
+   TCP 22          -> ${SERVER_IP}:22        SSH/SFTP с другого ПК
+   TCP 21          -> ${SERVER_IP}:21        FTP
+   TCP 40000-40100 -> ${SERVER_IP}:40000-40100 passive FTP
+   TCP 3306        -> ${SERVER_IP}:3306      MySQL извне, если нужно
+   TCP/UDP 53      -> ${SERVER_IP}:53        свои NS/DNS, если переносишь домены
+
+3) Как подключаться:
+   Из домашней сети:
+     панель:  http://${SERVER_IP}/ или https://${SERVER_IP}/
+     SSH:     ssh root@${SERVER_IP}
+     FTP:     host=${SERVER_IP}, port=21
+     MySQL:   host=${SERVER_IP}, port=3306
+
+   Из интернета:
+     панель:  https://panel.hyper-host.pw или http://${pub}/
+     SSH:     ssh root@${pub}
+     FTP:     host=${pub}, port=21
+     MySQL:   host=panel.hyper-host.pw или ${pub}, port=3306
+
+4) Важно:
+   Если из Wi-Fi не открывается внешний IP ${pub}, а с мобильного интернета открывается — это NAT Loopback.
+   Для домашнего ПК можно прописать hosts:
+     ${SERVER_IP} panel.hyper-host.pw
+     ${SERVER_IP} hyper-host.pw
+
+5) Проверка:
+   sudo hyper network doctor hyper-host.pw
+   sudo hyper ssl check hyper-host.pw
+   sudo ss -lntp | grep -E ':22|:80|:443|:3306|:21'
+EOACCESS
+}
+
+cmd_disk_doctor_json() {
+  python3 - <<'PYDISK'
+import json, subprocess, shutil, os
+
+def sh(cmd):
+    try: return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception: return ''
+
+def hb(n):
+    try: n=float(n)
+    except Exception: n=0
+    for u in ['B','KB','MB','GB','TB']:
+        if n < 1024 or u == 'TB': return f'{n:.1f} {u}' if u!='B' else f'{n:.0f} {u}'
+        n/=1024
+
+usage=shutil.disk_usage('/')
+root_source=sh('findmnt -n -o SOURCE /')
+root_fstype=sh('findmnt -n -o FSTYPE /')
+root_target=sh('readlink -f "$(findmnt -n -o SOURCE /)"')
+lsblk=sh('lsblk -b -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS')
+lvs=sh('lvs --noheadings --units b --nosuffix -o lv_path,vg_name,lv_size 2>/dev/null')
+pvs=sh('pvs --noheadings --units b --nosuffix -o pv_name,vg_name,pv_size,pv_free 2>/dev/null')
+vgs=sh('vgs --noheadings --units b --nosuffix -o vg_name,vg_size,vg_free 2>/dev/null')
+root_lv=root_target if '/dev/mapper/' in root_target or '/dev/' in root_target else root_source
+vg=''
+for line in lvs.splitlines():
+    parts=line.split()
+    if len(parts)>=3 and (parts[0] == root_lv or os.path.basename(parts[0]) in os.path.basename(root_lv)):
+        vg=parts[1]
+        break
+pv_candidates=[]
+if vg:
+    for line in pvs.splitlines():
+        parts=line.split()
+        if len(parts)>=4 and parts[1]==vg:
+            pv_candidates.append({'pv':parts[0], 'vg':parts[1], 'size_bytes':float(parts[2]), 'free_bytes':float(parts[3]), 'size':hb(parts[2]), 'free':hb(parts[3])})
+can_lvm=bool(vg and pv_candidates)
+print(json.dumps({
+  'root_source': root_source,
+  'root_realpath': root_target,
+  'root_fstype': root_fstype,
+  'root_total_bytes': usage.total,
+  'root_used_bytes': usage.used,
+  'root_free_bytes': usage.free,
+  'root_total': hb(usage.total),
+  'root_used': hb(usage.used),
+  'root_free': hb(usage.free),
+  'root_used_percent': round(usage.used*100/usage.total,2) if usage.total else 0,
+  'lvm_detected': can_lvm,
+  'root_vg': vg,
+  'pv_candidates': pv_candidates,
+  'vgs_raw': vgs,
+  'lvs_raw': lvs,
+  'pvs_raw': pvs,
+  'lsblk_raw': lsblk,
+  'recommended_command': 'sudo hyper disk expand' if can_lvm else 'Нужна ручная проверка: lsblk; pvs; vgs; lvs',
+}, ensure_ascii=False))
+PYDISK
+}
+
+cmd_disk_expand() {
+  [[ "${EUID}" -eq 0 ]] || err "Запусти: sudo hyper disk expand"
+  command -v pvresize >/dev/null 2>&1 || apt-get update && apt-get install -y lvm2
+  local root_src root_lv vg pv
+  root_src="$(findmnt -n -o SOURCE /)"
+  root_lv="$(readlink -f "$root_src")"
+  [[ -n "$root_lv" && -b "$root_lv" ]] || root_lv="$root_src"
+  vg="$(lvs --noheadings -o vg_name "$root_lv" 2>/dev/null | head -n1 | xargs || true)"
+  [[ -n "$vg" ]] || err "Root раздел не похож на LVM. Пришли вывод: lsblk; pvs; vgs; lvs"
+  pv="$(pvs --noheadings -o pv_name --select "vg_name=$vg" 2>/dev/null | head -n1 | xargs || true)"
+  [[ -n "$pv" ]] || err "Не нашёл physical volume для VG=$vg. Пришли вывод: pvs; vgs; lvs"
+  echo "[HYPER-HOST] Root LV: $root_lv"
+  echo "[HYPER-HOST] VG:      $vg"
+  echo "[HYPER-HOST] PV:      $pv"
+  echo "[HYPER-HOST] Расширяю PV до размера диска..."
+  pvresize "$pv"
+  echo "[HYPER-HOST] Расширяю root LV на всё свободное место..."
+  lvextend -r -l +100%FREE "$root_lv"
+  echo
+  df -hT /
+  echo
+  lsblk
+}
+
+cmd_disk_guide() {
+  cat <<'EODISKGUIDE'
+HYPER-HOST: расширение диска Ubuntu/LVM
+
+У тебя диск физически примерно 1ТБ, а root показывает около 98ГБ — это типичная ситуация после установки Ubuntu с LVM: диск большой, но logical volume root не расширен.
+
+Проверка:
+  sudo hyper disk doctor
+  lsblk
+  df -hT /
+  sudo pvs
+  sudo vgs
+  sudo lvs
+
+Автоматическое расширение на весь свободный объём:
+  sudo hyper disk expand
+
+Ручной вариант для твоей типовой схемы /dev/sda3 -> ubuntu-vg -> ubuntu-lv:
+  sudo apt update
+  sudo apt install -y lvm2
+  sudo pvresize /dev/sda3
+  sudo lvextend -r -l +100%FREE /dev/mapper/ubuntu--vg-ubuntu--lv
+  df -hT /
+  lsblk
+
+Если команда выдаст ошибку — не повторяй вслепую, пришли вывод:
+  lsblk
+  sudo pvs
+  sudo vgs
+  sudo lvs
+EODISKGUIDE
+}
+
 ensure_nginx_public_listen() {
   systemctl enable nginx >/dev/null 2>&1 || true
   nginx_force_listen_all
@@ -2003,6 +2228,11 @@ case "${1:-}" in
   bot-doctor) shift; cmd_bot_doctor "$@" ;;
   pm2-persist) shift; cmd_pm2_persist "$@" ;;
   access-fix) shift; cmd_access_fix "$@" ;;
+  access-doctor-json) shift; cmd_access_doctor_json "$@" ;;
+  access-guide) shift; cmd_access_guide "$@" ;;
+  disk-doctor-json) shift; cmd_disk_doctor_json "$@" ;;
+  disk-expand) shift; cmd_disk_expand "$@" ;;
+  disk-guide) shift; cmd_disk_guide "$@" ;;
   ftp-fix) shift; ensure_vsftpd_external_access; log "FTP external access fixed" ;;
   backup-run) shift; cmd_backup_run "$@" ;;
   backup-schedule) shift; cmd_backup_schedule "$@" ;;
@@ -2042,6 +2272,9 @@ Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
        hyper-host-ctl panel-domain set panel.example.com
        hyper-host-ctl panel-ssl panel.example.com email@example.com
        hyper-host-ctl pm2-persist
+       hyper-host-ctl access-doctor-json
+       hyper-host-ctl disk-doctor-json
+       hyper-host-ctl disk-expand
        hyper-host-ctl ssl-fix-site DOMAIN
        hyper-host-ctl ssl-ip-selfsigned 192.168.0.179
        hyper-host-ctl repair
