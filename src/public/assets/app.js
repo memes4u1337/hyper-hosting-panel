@@ -1,4 +1,9 @@
 function copyText(text){navigator.clipboard.writeText(text).then(()=>showToast('Скопировано'));}
+document.addEventListener('click', function(e){
+  const btn = e.target.closest('[data-copy]');
+  if(!btn) return;
+  copyText(btn.getAttribute('data-copy') || '');
+});
 function copyValue(id){const el=document.getElementById(id); if(el){el.select(); copyText(el.value);}}
 function showToast(message){let t=document.createElement('div');t.className='position-fixed bottom-0 end-0 m-4 alert alert-success shadow';t.style.zIndex=9999;t.innerText=message;document.body.appendChild(t);setTimeout(()=>t.remove(),1800)}
 
@@ -22,8 +27,11 @@ document.addEventListener('click', function(e){
     const panels = Array.from(document.querySelectorAll('.flyout-panel'));
 
     function moveIndicator(btn){
-      if(!indicator || !btn) return;
-      indicator.style.transform = `translateY(${btn.offsetTop}px)`;
+      if(!indicator || !btn || !rail) return;
+      const railBox = rail.getBoundingClientRect();
+      const btnBox = btn.getBoundingClientRect();
+      const y = Math.round(btnBox.top - railBox.top + rail.scrollTop);
+      indicator.style.transform = `translateY(${y}px)`;
       const accent = getComputedStyle(btn).getPropertyValue('--cat-accent').trim();
       if(accent) indicator.style.setProperty('--cat-color', accent);
     }
@@ -36,8 +44,12 @@ document.addEventListener('click', function(e){
     buttons.forEach(b => b.addEventListener('click', () => setActive(b.dataset.cat)));
     window.addEventListener('resize', () => {
       const activeBtn = buttons.find(b => b.classList.contains('active'));
-      if(activeBtn) moveIndicator(activeBtn);
+      if(activeBtn) requestAnimationFrame(() => moveIndicator(activeBtn));
     });
+    rail.addEventListener('scroll', () => {
+      const activeBtn = buttons.find(b => b.classList.contains('active'));
+      if(activeBtn) requestAnimationFrame(() => moveIndicator(activeBtn));
+    }, {passive:true});
     // initial position (server already marks correct .active button/panel for current page)
     const initial = buttons.find(b => b.classList.contains('active')) || buttons[0];
     if(initial) requestAnimationFrame(() => moveIndicator(initial));
@@ -45,10 +57,6 @@ document.addEventListener('click', function(e){
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();
 
-// HYPER-HOST v30: live dashboard + PM2 stats without page reload.
-// Оптимизации против v29: пауза опроса на скрытой вкладке (Page Visibility API),
-// отмена зависших запросов через AbortController (не копятся параллельные fetch),
-// экспоненциальный backoff при ошибках сети/сервера вместо долбёжки каждые 3 сек.
 (function(){
   const fmtBytes = (bytes) => {
     bytes = Number(bytes || 0);
@@ -184,8 +192,8 @@ document.addEventListener('click', function(e){
   }
 
   function startLive(){
-    scheduler(updateDashboard, 3000, () => !!q('[data-live-stats]'));
-    scheduler(updateBots, 3000, () => !!q('[data-live-bots]'));
+    scheduler(updateDashboard, 4000, () => !!q('[data-live-stats]'));
+    scheduler(updateBots, 4000, () => !!q('[data-live-bots]'));
   }
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startLive); else startLive();
 })();

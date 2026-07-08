@@ -189,7 +189,7 @@ function handle_post(string $action): void
             case 'access_fix': { hh_clear_cache(); $res=run_ctl(['access-fix'],180); if($res['code']!==0) throw new RuntimeException($res['output']); flash('Доступ с других ПК включён на Ubuntu. Роутер всё равно нужно пробросить вручную.','success'); redirect('/?page=access'); }
             case 'disk_expand': { hh_clear_cache(); $res=run_ctl(['disk-expand'],600); if($res['code']!==0) throw new RuntimeException($res['output']); flash('Диск расширен. Проверь новый размер root-раздела.','success'); redirect('/?page=disk'); }
                         case 'save_panel_domain': { $domain=strtolower(trim((string)($_POST['panel_domain']??''))); if(!is_valid_domain($domain)) throw new RuntimeException('Неверный домен панели'); $res=run_ctl(['panel-domain','set',$domain],120); if($res['code']!==0) throw new RuntimeException($res['output']); setting_set('panel_domain_override',$domain); hh_clear_cache(); flash('Домен панели сохранён: '.$domain,'success'); redirect('/?page=network'); }
-            case 'dns_wizard': { $domain=strtolower(trim((string)($_POST['domain']??''))); $ip=trim((string)($_POST['public_ip']??'')); $panel=trim((string)($_POST['panel_subdomain']??'panel')); if(!is_valid_domain($domain)) throw new RuntimeException('Неверный домен'); if($ip!=='' && !filter_var($ip,FILTER_VALIDATE_IP,FILTER_FLAG_IPV4)) throw new RuntimeException('Неверный IP'); $primary='ns1.'.$domain.'.'; $admin='admin.'.$domain.'.'; db()->prepare('INSERT INTO dns_zones(domain,primary_ns,admin_email) VALUES(?,?,?) ON CONFLICT(domain) DO UPDATE SET primary_ns=excluded.primary_ns,admin_email=excluded.admin_email')->execute([$domain,$primary,$admin]); $res=run_ctl(['dns-wizard',$domain,$ip,$panel],180); if($res['code']!==0) throw new RuntimeException($res['output']); flash("DNS-зона создана. У регистратора поставь NS: ns1.$domain и ns2.$domain. Если просит glue — IP $ip",'success'); redirect('/?page=dns'); }
+            case 'dns_wizard': { $domain=strtolower(trim((string)($_POST['domain']??''))); $ip=trim((string)($_POST['public_ip']??'')); $panel=trim((string)($_POST['panel_subdomain']??'panel')); if(!is_valid_domain($domain)) throw new RuntimeException('Неверный домен'); if($ip!=='' && !filter_var($ip,FILTER_VALIDATE_IP,FILTER_FLAG_IPV4)) throw new RuntimeException('Неверный IP'); $primary='ns1.'.$domain.'.'; $admin='admin.'.$domain.'.'; db()->prepare('INSERT INTO dns_zones(domain,primary_ns,admin_email) VALUES(?,?,?) ON CONFLICT(domain) DO UPDATE SET primary_ns=excluded.primary_ns,admin_email=excluded.admin_email')->execute([$domain,$primary,$admin]); $res=run_ctl(['dns-wizard',$domain,$ip,$panel],180); if($res['code']!==0) throw new RuntimeException($res['output']); flash("DNS-зона создана: $domain",'success'); redirect('/?page=dns'); }
             case 'create_dns_zone': { $domain=strtolower(trim((string)($_POST['domain']??''))); if(!is_valid_domain($domain)) throw new RuntimeException('Неверный домен'); db()->prepare('INSERT INTO dns_zones(domain,primary_ns,admin_email) VALUES(?,?,?) ON CONFLICT(domain) DO UPDATE SET primary_ns=excluded.primary_ns,admin_email=excluded.admin_email')->execute([$domain, trim((string)($_POST['primary_ns']??'ns1.local.')), trim((string)($_POST['admin_email']??'admin.local.'))]); dns_apply_zone($domain); redirect('/?page=dns'); }
             case 'add_dns_record': { $zone=(int)($_POST['zone_id']??0); $type=strtoupper(trim((string)($_POST['type']??'A'))); $name=trim((string)($_POST['name']??'@')); $value=trim((string)($_POST['value']??'')); $ttl=(int)($_POST['ttl']??3600); if($value==='') throw new RuntimeException('Значение DNS записи пустое'); db()->prepare('INSERT INTO dns_records(zone_id,type,name,value,ttl) VALUES(?,?,?,?,?)')->execute([$zone,$type,$name,$value,$ttl]); $z=db()->prepare('SELECT domain FROM dns_zones WHERE id=?'); $z->execute([$zone]); $zr=$z->fetch(); if($zr) dns_apply_zone((string)$zr['domain']); redirect('/?page=dns'); }
             case 'delete_dns_record': { $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT z.domain FROM dns_records r JOIN dns_zones z ON z.id=r.zone_id WHERE r.id=?'); $st->execute([$id]); $z=$st->fetch(); db()->prepare('DELETE FROM dns_records WHERE id=?')->execute([$id]); if($z) dns_apply_zone((string)$z['domain']); redirect('/?page=dns'); }
@@ -285,15 +285,15 @@ function fm_delete(): void
 function rrmdir(string $path): void { if(is_dir($path)&&!is_link($path)){ foreach(scandir($path)?:[] as $i){ if($i==='.'||$i==='..') continue; rrmdir($path.'/'.$i);} if(!@rmdir($path)){ run_ctl(['repair'],180); @rmdir($path); } } else { if(!@unlink($path)){ run_ctl(['repair'],180); @unlink($path); } } }
 
 
-function hh_app_version(): string { return '1.0'; }
+function hh_app_version(): string { return '1.1-ui'; }
 
 function hh_nav_config(): array
 {
     return [
-        'main'    => ['label'=>'Главное','icon'=>'fa-rocket','accent'=>'#4f7dff','items'=>['dashboard'=>['fa-gauge-high','Дашборд'],'files'=>['fa-folder-open','Файлы'],'settings'=>['fa-sliders','Настройки'],'access'=>['fa-plug-circle-bolt','Доступ'],'disk'=>['fa-hard-drive','Диск']]],
+        'main'    => ['label'=>'Сервер','icon'=>'fa-gauge-high','accent'=>'#4f7dff','items'=>['dashboard'=>['fa-chart-line','Дашборд'],'files'=>['fa-folder-open','Файлы'],'disk'=>['fa-hard-drive','Диск'],'settings'=>['fa-sliders','Настройки']]],
         'hosting' => ['label'=>'Хостинг','icon'=>'fa-server','accent'=>'#22d3ee','items'=>['sites'=>['fa-globe','Сайты'],'ftp'=>['fa-network-wired','FTP'],'databases'=>['fa-database','Базы'],'php'=>['fa-code','PHP']]],
-        'auto'    => ['label'=>'Автоматизация','icon'=>'fa-wand-magic-sparkles','accent'=>'#a855f7','items'=>['bots'=>['fa-robot','Боты PM2'],'backups'=>['fa-box-archive','Backup'],'cron'=>['fa-clock','Cron'],'logs'=>['fa-file-lines','Логи']]],
-        'secure'  => ['label'=>'Домены и защита','icon'=>'fa-shield-halved','accent'=>'#f472b6','items'=>['dns'=>['fa-diagram-project','DNS'],'network'=>['fa-tower-broadcast','Сеть'],'ssl'=>['fa-shield-halved','SSL'],'security'=>['fa-lock','Безопасность']]],
+        'auto'    => ['label'=>'Боты','icon'=>'fa-robot','accent'=>'#a855f7','items'=>['bots'=>['fa-robot','PM2 боты'],'backups'=>['fa-box-archive','Backup'],'cron'=>['fa-clock','Cron'],'logs'=>['fa-file-lines','Логи']]],
+        'secure'  => ['label'=>'Доступ','icon'=>'fa-shield-halved','accent'=>'#f472b6','items'=>['access'=>['fa-plug-circle-bolt','Внешний доступ'],'dns'=>['fa-diagram-project','DNS'],'network'=>['fa-tower-broadcast','Сеть'],'ssl'=>['fa-shield-halved','SSL'],'security'=>['fa-lock','Безопасность']]],
     ];
 }
 
@@ -308,7 +308,7 @@ function nav_item(string $id,string $icon,string $label,string $page): string { 
 function render_login(): void
 {
     $flash=flash(); $need2fa=setting_get('security_2fa_enabled','0')==='1'; ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=31" rel="stylesheet"></head><body class="login-body">
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=33" rel="stylesheet"></head><body class="login-body">
 <div class="login-orb login-orb-a"></div><div class="login-orb login-orb-b"></div><div class="login-orb login-orb-c"></div>
 <div class="login-shell-v2">
   <div class="login-side">
@@ -350,7 +350,7 @@ function render_page(string $page, array $user): void
 <link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
-<link href="/assets/style.css?v=31" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell">
+<link href="/assets/style.css?v=33" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell">
 <aside class="sidebar sidebar-v2">
   <div class="rail" data-active-cat="<?= e($activeCat) ?>">
     <a href="/?page=dashboard" class="rail-logo"><i class="fa-solid fa-bolt"></i></a>
@@ -363,7 +363,7 @@ function render_page(string $page, array $user): void
   </div>
   <div class="flyout">
     <div class="flyout-head"><b>HYPER-HOST</b><span>powered by memes4u1337</span></div>
-    <div class="sidebar-status"><span class="status-dot"></span><div><b><?= e(host_name()) ?></b><em>сервер онлайн · авто-обновление</em></div></div>
+    <div class="sidebar-status"><span class="status-dot"></span><div><b><?= e(host_name()) ?></b><em>сервер онлайн</em></div></div>
     <div class="flyout-panels">
     <?php foreach($nav as $key=>$cat): ?>
       <div class="flyout-panel<?= $key===$activeCat?' active':'' ?>" data-panel="<?= e($key) ?>">
@@ -380,7 +380,7 @@ function render_page(string $page, array $user): void
     </div>
   </div>
 </aside>
-<main class="content"><header class="topbar"><div><h1><?= e($title) ?></h1><div class="small muted">Сервер: <code><?= e(host_name()) ?></code> <span class="speed-badge"><i class="fa-solid fa-bolt"></i> fast mode</span></div></div><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft"><i class="fa-solid fa-rotate me-2"></i>Синхронизация</button></form></header><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?><?php route_view($page); ?></main></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script><script src="/assets/app.js?v=31" defer></script></body></html><?php
+<main class="content" style="--cat-accent:<?= e($nav[$activeCat]['accent']??'#4f7dff') ?>"><header class="topbar"><div><div class="topbar-kicker"><i class="fa-solid <?= e($nav[$activeCat]['icon']??'fa-rocket') ?>"></i><?= e($nav[$activeCat]['label']??'') ?></div><h1><?= e($title) ?></h1><div class="small muted">Сервер: <code><?= e(host_name()) ?></code></div></div><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft"><i class="fa-solid fa-rotate me-2"></i>Обновить</button></form></header><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?><?php route_view($page); ?></main></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script><script src="/assets/app.js?v=33" defer></script></body></html><?php
 }
 function route_view(string $page): void { match($page){ 'files'=>view_files(), 'sites'=>view_sites(), 'ftp'=>view_ftp(), 'databases'=>view_databases(), 'pma_login'=>view_pma_login(), 'bots'=>view_bots(), 'bot_logs'=>view_bot_logs(), 'backups'=>view_backups(), 'dns'=>view_dns(), 'network'=>view_network(), 'ssl'=>view_ssl(), 'php'=>view_php(), 'cron'=>view_cron(), 'logs'=>view_logs(), 'security'=>view_security(), 'settings'=>view_settings(), 'access'=>view_access(), 'disk'=>view_disk(), default=>view_dashboard(), }; }
 function stat_card(string $icon,string $label,string $value,string $sub=''): void { ?><div class="stat-card"><div class="stat-icon"><i class="fa-solid <?= e($icon) ?>"></i></div><div><span><?= e($label) ?></span><b><?= e($value) ?></b><?php if($sub): ?><em><?= e($sub) ?></em><?php endif; ?></div></div><?php }
@@ -399,63 +399,57 @@ function view_dashboard(): void
     $diskUsed = (float)($stats['disk_used'] ?? 0);
     $diskTotal = (float)($stats['disk_total'] ?? 0);
     $cpuPercent = (float)($stats['cpu_percent'] ?? 0);
-    $loadPercent = (float)($stats['load_percent'] ?? 0);
     $memPercent = percent($memUsed, $memTotal);
     $diskPercent = percent($diskUsed, $diskTotal);
     ?>
-<div class="dashboard-live-v29" data-live-stats>
-  <section class="dashboard-hero dashboard-hero-v29 mb-4">
-    <div class="hero-main-v25">
-      <div class="eyebrow"><i class="fa-solid fa-gauge-high"></i> live dashboard</div>
-      <h2>Панель управления</h2>
-      <div class="hero-metrics-v29">
-        <span><i class="fa-solid fa-globe"></i><b><?= (int)$sites ?></b><em>сайтов</em></span>
-        <span><i class="fa-solid fa-database"></i><b><?= (int)$dbs ?></b><em>баз</em></span>
-        <span><i class="fa-solid fa-robot"></i><b><?= (int)$bots ?></b><em>ботов</em></span>
-        <span><i class="fa-solid fa-network-wired"></i><b><?= (int)$ftp ?></b><em>FTP</em></span>
-      </div>
+<div class="dashboard-v33" data-live-stats>
+  <section class="dash-hero-v33 mb-4">
+    <div class="dash-hero-main-v33">
+      <div class="kicker"><i class="fa-solid fa-chart-line me-2"></i>Обзор сервера</div>
+      <h2>HYPER-HOST</h2>
+      <div class="dash-host-line"><span data-stat="hostnameShort"><?= e((string)($stats['hostname'] ?? host_name())) ?></span><code><?= e(host_name()) ?></code></div>
     </div>
-    <div class="hero-actions-v25">
-      <a class="hero-action primary" href="/?page=sites"><i class="fa-solid fa-plus"></i><b>Новый сайт</b><small>создать папку и nginx</small></a>
-      <a class="hero-action" href="/?page=bots"><i class="fa-solid fa-robot"></i><b>Боты 24/7</b><small>PM2 live stats</small></a>
-      <a class="hero-action" href="/?page=databases"><i class="fa-solid fa-database"></i><b>MySQL</b><small>базы и доступы</small></a>
-      <a class="hero-action" href="/?page=ftp"><i class="fa-solid fa-folder-tree"></i><b>FTP/SFTP</b><small>подключение к файлам</small></a>
+    <div class="dash-actions-v33">
+      <a class="dash-action-v33 primary" href="/?page=sites"><i class="fa-solid fa-plus"></i><span>Сайт</span></a>
+      <a class="dash-action-v33" href="/?page=bots"><i class="fa-solid fa-robot"></i><span>Бот</span></a>
+      <a class="dash-action-v33" href="/?page=databases"><i class="fa-solid fa-database"></i><span>База</span></a>
+      <a class="dash-action-v33" href="/?page=files"><i class="fa-solid fa-folder-open"></i><span>Файлы</span></a>
     </div>
   </section>
 
   <?php if(isset($stats['_error'])): ?>
     <div class="alert alert-warning"><?= e((string)$stats['_error']) ?></div>
   <?php else: ?>
-  <div class="live-hardware-grid-v29 mb-4">
-    <div class="live-card-v29 cpu-card-v29">
-      <div class="live-card-head"><span><i class="fa-solid fa-microchip"></i> CPU</span><b data-stat="cpuPercent"><?= e((string)$cpuPercent) ?>%</b></div>
-      <div class="live-meter"><div data-stat-bar="cpu" style="width:<?= e((string)$cpuPercent) ?>%"></div></div>
-      <div class="live-meta"><b data-stat="cpuModel"><?= e((string)($stats['cpu_model'] ?? 'unknown')) ?></b><span><span data-stat="cpuCores"><?= e((string)($stats['cpu_cores'] ?? 0)) ?></span> cores · load <span data-stat="loadText"><?= e((string)($stats['load1'] ?? 0)) ?> / <?= e((string)($stats['load5'] ?? 0)) ?> / <?= e((string)($stats['load15'] ?? 0)) ?></span></span></div>
-    </div>
-    <div class="live-card-v29 ram-card-v29">
-      <div class="live-card-head"><span><i class="fa-solid fa-memory"></i> Оперативка</span><b data-stat="memPercent"><?= $memPercent ?>%</b></div>
-      <div class="live-meter"><div data-stat-bar="mem" style="width:<?= $memPercent ?>%"></div></div>
-      <div class="live-meta"><b data-stat="memText"><?= e(human_bytes($memUsed).' / '.human_bytes($memTotal)) ?></b><span>свободно <span data-stat="memAvailable"><?= e(human_bytes((float)($stats['mem_available'] ?? 0))) ?></span> · кэш <span data-stat="memCached"><?= e(human_bytes((float)($stats['mem_cached'] ?? 0))) ?></span></span></div>
-    </div>
-    <div class="live-card-v29 disk-card-v29">
-      <div class="live-card-head"><span><i class="fa-solid fa-hard-drive"></i> Диск /</span><b data-stat="diskPercent"><?= $diskPercent ?>%</b></div>
-      <div class="live-meter"><div data-stat-bar="disk" style="width:<?= $diskPercent ?>%"></div></div>
-      <div class="live-meta"><b data-stat="diskText"><?= e(human_bytes($diskUsed).' / '.human_bytes($diskTotal)) ?></b><span>свободно <span data-stat="diskFree"><?= e(human_bytes((float)($stats['disk_free'] ?? 0))) ?></span></span></div>
-    </div>
-    <div class="live-card-v29 system-card-v29">
-      <div class="live-card-head"><span><i class="fa-solid fa-server"></i> Система</span><b data-stat="uptime"><?= e((string)($stats['uptime'] ?? '—')) ?></b></div>
-      <div class="system-lines-v29">
-        <div><span>Host</span><b data-stat="hostname"><?= e((string)($stats['hostname'] ?? host_name())) ?></b></div>
-        <div><span>PM2</span><b data-stat="pm2Version"><?= e((string)($stats['pm2_version'] ?: 'not installed')) ?></b></div>
-        <div><span>Kernel</span><b data-stat="kernel"><?= e((string)($stats['kernel'] ?? '')) ?></b></div>
+  <div class="dash-layout-v33">
+    <div class="dash-main-v33">
+      <div class="dash-resource-grid-v33 mb-4">
+        <div class="dash-resource-card-v33 cpu-card-v29">
+          <div class="dash-resource-top"><span><i class="fa-solid fa-microchip"></i>CPU</span><b data-stat="cpuPercent"><?= e((string)$cpuPercent) ?>%</b></div>
+          <div class="live-meter"><div data-stat-bar="cpu" style="width:<?= e((string)$cpuPercent) ?>%"></div></div>
+          <div class="dash-resource-meta"><b data-stat="cpuModel"><?= e((string)($stats['cpu_model'] ?? 'unknown')) ?></b><small><span data-stat="cpuCores"><?= e((string)($stats['cpu_cores'] ?? 0)) ?></span> cores · load <span data-stat="loadText"><?= e((string)($stats['load1'] ?? 0)) ?> / <?= e((string)($stats['load5'] ?? 0)) ?> / <?= e((string)($stats['load15'] ?? 0)) ?></span></small></div>
+        </div>
+        <div class="dash-resource-card-v33 ram-card-v29">
+          <div class="dash-resource-top"><span><i class="fa-solid fa-memory"></i>RAM</span><b data-stat="memPercent"><?= $memPercent ?>%</b></div>
+          <div class="live-meter"><div data-stat-bar="mem" style="width:<?= $memPercent ?>%"></div></div>
+          <div class="dash-resource-meta"><b data-stat="memText"><?= e(human_bytes($memUsed).' / '.human_bytes($memTotal)) ?></b><small>свободно <span data-stat="memAvailable"><?= e(human_bytes((float)($stats['mem_available'] ?? 0))) ?></span> · кэш <span data-stat="memCached"><?= e(human_bytes((float)($stats['mem_cached'] ?? 0))) ?></span></small></div>
+        </div>
+        <div class="dash-resource-card-v33 disk-card-v29">
+          <div class="dash-resource-top"><span><i class="fa-solid fa-hard-drive"></i>Диск /</span><b data-stat="diskPercent"><?= $diskPercent ?>%</b></div>
+          <div class="live-meter"><div data-stat-bar="disk" style="width:<?= $diskPercent ?>%"></div></div>
+          <div class="dash-resource-meta"><b data-stat="diskText"><?= e(human_bytes($diskUsed).' / '.human_bytes($diskTotal)) ?></b><small>свободно <span data-stat="diskFree"><?= e(human_bytes((float)($stats['disk_free'] ?? 0))) ?></span></small></div>
+        </div>
+        <div class="dash-resource-card-v33 system-card-v29">
+          <div class="dash-resource-top"><span><i class="fa-solid fa-server"></i>Система</span><b data-stat="uptime"><?= e((string)($stats['uptime'] ?? '—')) ?></b></div>
+          <div class="dash-system-list-v33">
+            <div><span>Host</span><b data-stat="hostname"><?= e((string)($stats['hostname'] ?? host_name())) ?></b></div>
+            <div><span>PM2</span><b data-stat="pm2Version"><?= e((string)($stats['pm2_version'] ?: 'not installed')) ?></b></div>
+            <div><span>Kernel</span><b data-stat="kernel"><?= e((string)($stats['kernel'] ?? '')) ?></b></div>
+          </div>
+        </div>
       </div>
-    </div>
-  </div>
 
-  <div class="row g-4 mb-4">
-    <div class="col-xl-8">
-      <div class="panel-card live-disk-panel-v29">
-        <div class="card-title-row"><h2><i class="fa-solid fa-chart-simple me-2"></i>Диски и папки</h2><div class="live-pill"><i class="fa-solid fa-circle"></i> обновляется каждые 3 сек</div></div>
+      <div class="panel-card dash-disk-panel-v33 mb-4">
+        <div class="card-title-row"><h2><i class="fa-solid fa-chart-simple me-2"></i>Диски и папки</h2><a class="btn btn-sm btn-soft" href="/?page=disk">Открыть диск</a></div>
         <div class="disk-path-grid-v29">
           <?php foreach(['root'=>'Корень /','sites'=>'Сайты','bots'=>'Боты','ftp'=>'FTP','backups'=>'Backup'] as $key=>$label): $d=$stats['disks'][$key]??[]; $pct=(float)($d['percent']??0); ?>
             <div class="disk-path-v29" data-disk-path="<?= e($key) ?>">
@@ -466,8 +460,24 @@ function view_dashboard(): void
           <?php endforeach; ?>
         </div>
       </div>
+
+      <div class="quick-grid">
+        <a class="quick-card" href="/?page=files"><i class="fa-solid fa-folder-open"></i><b>Файлы</b><span>папки сайтов и ботов</span></a>
+        <a class="quick-card" href="/?page=access"><i class="fa-solid fa-plug-circle-bolt"></i><b>Доступ</b><span>порты и внешний IP</span></a>
+        <a class="quick-card" href="/?page=ssl"><i class="fa-solid fa-shield-halved"></i><b>SSL</b><span>сертификаты</span></a>
+        <a class="quick-card" href="/?page=settings"><i class="fa-solid fa-sliders"></i><b>Настройки</b><span>пароль и ремонт</span></a>
+      </div>
     </div>
-    <div class="col-xl-4">
+
+    <aside class="dash-side-v33">
+      <div class="panel-card dash-counts-v33">
+        <h2><i class="fa-solid fa-layer-group me-2"></i>Ресурсы</h2>
+        <a href="/?page=sites"><span>Сайты</span><b><?= (int)$sites ?></b></a>
+        <a href="/?page=databases"><span>Базы</span><b><?= (int)$dbs ?></b></a>
+        <a href="/?page=bots"><span>Боты</span><b><?= (int)$bots ?></b></a>
+        <a href="/?page=ftp"><span>FTP</span><b><?= (int)$ftp ?></b></a>
+      </div>
+
       <div class="panel-card service-live-panel-v29">
         <h2><i class="fa-solid fa-heart-pulse me-2"></i>Сервисы</h2>
         <div class="service-row-v29" data-services>
@@ -476,23 +486,14 @@ function view_dashboard(): void
           <?php endforeach; ?>
         </div>
       </div>
-    </div>
+
+      <div class="panel-card dash-events-v33">
+        <h2><i class="fa-solid fa-clock-rotate-left me-2"></i>События</h2>
+        <?php foreach($events as $ev): ?><div class="event"><b><?= e($ev['type']) ?></b><span><?= e($ev['message']) ?></span><small><?= e($ev['created_at']) ?></small></div><?php endforeach; if(!$events): ?><div class="empty">Событий пока нет</div><?php endif; ?>
+      </div>
+    </aside>
   </div>
   <?php endif; ?>
-
-  <div class="row g-4">
-    <div class="col-xl-8">
-      <div class="quick-grid">
-        <a class="quick-card" href="/?page=files"><i class="fa-solid fa-folder-open"></i><b>Файлы</b><span>сайты, боты, FTP</span></a>
-        <a class="quick-card" href="/?page=access"><i class="fa-solid fa-plug-circle-bolt"></i><b>Доступ</b><span>роутер, SSH, порты</span></a>
-        <a class="quick-card" href="/?page=disk"><i class="fa-solid fa-hard-drive"></i><b>Диск</b><span>LVM и свободное место</span></a>
-        <a class="quick-card" href="/?page=ssl"><i class="fa-solid fa-shield-halved"></i><b>SSL</b><span>сертификаты доменов</span></a>
-      </div>
-    </div>
-    <div class="col-xl-4">
-      <div class="panel-card"><h2><i class="fa-solid fa-clock-rotate-left me-2"></i>Последние события</h2><?php foreach($events as $ev): ?><div class="event"><b><?= e($ev['type']) ?></b><span><?= e($ev['message']) ?></span><small><?= e($ev['created_at']) ?></small></div><?php endforeach; if(!$events): ?><div class="empty">Событий пока нет</div><?php endif; ?></div>
-    </div>
-  </div>
 </div>
 <?php }
 
@@ -501,7 +502,7 @@ function view_files(): void
 <div class="file-manager-layout">
   <section class="panel-card pc-panel">
     <h2><i class="fa-solid fa-desktop me-2"></i>Мой ПК</h2>
-    <p class="muted">Выбери один или несколько файлов с компьютера и загрузи в текущую папку сервера.</p>
+    
     <form method="post" enctype="multipart/form-data" class="upload-dropzone">
       <?= csrf_field() ?><input type="hidden" name="action" value="upload_file"><input type="hidden" name="root" value="<?= e($rootKey) ?>"><input type="hidden" name="path" value="<?= e($currentDir) ?>">
       <i class="fa-solid fa-cloud-arrow-up"></i>
@@ -534,14 +535,14 @@ function view_pma_login(): void
     ?>
     <div class="panel-card pma-auto-card">
       <h2><i class="fa-solid fa-database me-2"></i>Вход в phpMyAdmin</h2>
-      <p class="muted">Панель сейчас передаст логин и пароль в phpMyAdmin. Если браузер заблокировал автопереход, нажми кнопку ниже.</p>
+      
       <form id="pmaAutoForm" method="post" action="<?= e($url) ?>" class="vstack gap-3">
         <input type="hidden" name="pma_username" value="<?= e($r['db_user']) ?>">
         <input type="hidden" name="pma_password" value="<?= e($r['db_password_plain']) ?>">
         <input type="hidden" name="server" value="1">
         <button class="btn btn-primary btn-lg"><i class="fa-solid fa-right-to-bracket me-2"></i>Перейти в phpMyAdmin</button>
       </form>
-      <div class="mt-3 small muted">Логин: <code><?= e($r['db_user']) ?></code><br>Если браузер/версия phpMyAdmin не приняла автологин — скопируй логин/пароль из таблицы баз.</div>
+      <div class="mt-3 small muted">Логин: <code><?= e($r['db_user']) ?></code></div>
     </div>
     <script>setTimeout(()=>document.getElementById('pmaAutoForm')?.submit(), 450);</script>
     <?php
@@ -686,7 +687,40 @@ document.querySelectorAll('.db-access-pills input[type="radio"]').forEach(functi
 
 function view_ftp(): void
 { $rows=db()->query('SELECT * FROM ftp_accounts ORDER BY id DESC')->fetchAll(); $gen=default_ftp_password(); ?>
-<div class="ftp-layout-v25 row g-4"><div class="col-lg-4"><div class="panel-card ftp-create-card"><div class="eyebrow"><i class="fa-solid fa-folder-tree"></i> FTP/SFTP доступ</div><h2>Создать аккаунт</h2><p class="muted">Для FileZilla с другого ПК используй хост <b><?= e(setting_get('public_ip_override', host_name())) ?></b> или домен панели. Внутри будет <code>common/sites</code> и <code>common/bots</code>.</p><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_ftp"><input class="form-control" name="username" placeholder="hyperhost" required><div class="input-group"><input class="form-control" name="password" id="ftpPass" value="<?= e($gen) ?>" minlength="8" required><button class="btn btn-outline-light" type="button" onclick="copyValue('ftpPass')"><i class="fa-regular fa-copy"></i></button></div><button class="btn btn-primary btn-lg"><i class="fa-solid fa-plus me-2"></i>Создать FTP</button></form><form method="post" class="mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="repair_panel"><button class="btn btn-soft w-100"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Починить FTP/доступ</button></form></div></div><div class="col-lg-8"><div class="ftp-help-v25 mb-3"><div><i class="fa-solid fa-circle-nodes"></i><b>С другого ПК в этой сети</b><span>Хост: <?= e(host_name()) ?>, порт 21</span></div><div><i class="fa-solid fa-earth-europe"></i><b>Из интернета</b><span>Хост: <?= e(setting_get('public_ip_override', host_name())) ?>, порты 21 и 40000-40100 на роутере</span></div><div><i class="fa-solid fa-terminal"></i><b>SSH/SFTP</b><span>Порт 22, сервер: <?= e(host_name()) ?></span></div></div><div class="row g-3"><?php foreach($rows as $r): ?><div class="col-md-6"><div class="ftp-card ftp-card-v25"><h3><i class="fa-solid fa-user-lock me-2"></i><?= e($r['username']) ?></h3><div class="cred"><span>FTP хост</span><code><?= e(setting_get('public_ip_override', $r['host']?:host_name())) ?></code></div><div class="cred"><span>Локальный хост</span><code><?= e(host_name()) ?></code></div><div class="cred"><span>Логин</span><code><?= e($r['username']) ?></code></div><div class="cred"><span>Пароль</span><code><?= e($r['password_plain']?:'задать новый') ?></code></div><div class="ftp-tags"><span>Port 21</span><span>Passive 40000-40100</span><span>common/sites</span></div><div class="d-flex gap-2 mt-3 flex-wrap"><button class="btn btn-sm btn-light" onclick="copyText('Host: <?= e(setting_get('public_ip_override', $r['host']?:host_name())) ?>\nLogin: <?= e($r['username']) ?>\nPassword: <?= e($r['password_plain']) ?>\nPort: 21\nPassive: 40000-40100')">Копировать</button><button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#ftp<?= (int)$r['id'] ?>">Пароль</button><form method="post" onsubmit="return confirm('Удалить FTP?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_ftp"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-danger">Удалить</button></form></div></div></div><div class="modal fade hh-modal" id="ftp<?= (int)$r['id'] ?>"><div class="modal-dialog modal-dialog-centered"><div class="modal-content"><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="reset_ftp_password"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><div class="modal-header"><h5>Новый пароль FTP</h5><button class="btn-close" data-bs-dismiss="modal" type="button"></button></div><div class="modal-body"><input class="form-control" name="password" value="<?= e(default_ftp_password()) ?>" minlength="8" required></div><div class="modal-footer"><button class="btn btn-primary">Сохранить</button></div></form></div></div></div><?php endforeach; if(!$rows): ?><div class="empty">FTP аккаунтов пока нет</div><?php endif; ?></div></div></div><?php }
+<div class="ftp-layout-v33 row g-4">
+  <div class="col-lg-4">
+    <div class="panel-card ftp-create-card">
+      <div class="kicker"><i class="fa-solid fa-folder-tree me-2"></i>FTP</div>
+      <h2>Создать аккаунт</h2>
+      <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_ftp">
+        <input class="form-control" name="username" placeholder="hyperhost" required>
+        <div class="input-group"><input class="form-control" name="password" id="ftpPass" value="<?= e($gen) ?>" minlength="8" required><button class="btn btn-outline-light" type="button" onclick="copyValue('ftpPass')"><i class="fa-regular fa-copy"></i></button></div>
+        <button class="btn btn-primary btn-lg"><i class="fa-solid fa-plus me-2"></i>Создать FTP</button>
+      </form>
+      <form method="post" class="mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="repair_panel"><button class="btn btn-soft w-100"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Починить доступ</button></form>
+    </div>
+  </div>
+  <div class="col-lg-8">
+    <div class="row g-3">
+      <?php foreach($rows as $r): ?>
+        <div class="col-md-6"><div class="ftp-card ftp-card-v25">
+          <h3><i class="fa-solid fa-user-lock me-2"></i><?= e($r['username']) ?></h3>
+          <div class="cred"><span>Хост</span><code><?= e(setting_get('public_ip_override', $r['host']?:host_name())) ?></code></div>
+          <div class="cred"><span>Локальный</span><code><?= e(host_name()) ?></code></div>
+          <div class="cred"><span>Логин</span><code><?= e($r['username']) ?></code></div>
+          <div class="cred"><span>Пароль</span><code><?= e($r['password_plain']?:'задать новый') ?></code></div>
+          <div class="ftp-tags"><span>21</span><span>40000-40100</span><span>common/sites</span></div>
+          <div class="d-flex gap-2 mt-3 flex-wrap">
+            <button class="btn btn-sm btn-light" onclick="copyText('Host: <?= e(setting_get('public_ip_override', $r['host']?:host_name())) ?>\nLogin: <?= e($r['username']) ?>\nPassword: <?= e($r['password_plain']) ?>\nPort: 21\nPassive: 40000-40100')">Копировать</button>
+            <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#ftp<?= (int)$r['id'] ?>">Пароль</button>
+            <form method="post" onsubmit="return confirm('Удалить FTP?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_ftp"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-danger">Удалить</button></form>
+          </div>
+        </div></div>
+        <div class="modal fade hh-modal" id="ftp<?= (int)$r['id'] ?>"><div class="modal-dialog modal-dialog-centered"><div class="modal-content"><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="reset_ftp_password"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><div class="modal-header"><h5>Новый пароль FTP</h5><button class="btn-close" data-bs-dismiss="modal" type="button"></button></div><div class="modal-body"><input class="form-control" name="password" value="<?= e(default_ftp_password()) ?>" minlength="8" required></div><div class="modal-footer"><button class="btn btn-primary">Сохранить</button></div></form></div></div></div>
+      <?php endforeach; if(!$rows): ?><div class="empty">FTP аккаунтов пока нет</div><?php endif; ?>
+    </div>
+  </div>
+</div><?php }
 
 function pm2_status_map(): array { $d=run_ctl_json_live(['bot-list-json'],8); $m=[]; if(!isset($d['_error'])) foreach($d as $p) $m[(string)$p['name']]=$p; return $m; }
 function view_bots(): void
@@ -716,14 +750,14 @@ function view_bots(): void
     </div>
     <div class="col-lg-8">
       <div class="panel-card bots-panel-v29">
-        <div class="card-title-row flex-wrap"><h2><i class="fa-solid fa-list-check me-2"></i>Боты — live статистика</h2><div class="live-pill"><i class="fa-solid fa-circle"></i> обновляется без перезагрузки</div></div>
+        <div class="card-title-row flex-wrap"><h2><i class="fa-solid fa-list-check me-2"></i>Боты — статистика</h2><a class="btn btn-sm btn-soft" href="/?page=files&root=bots">Файлы ботов</a></div>
         <div class="bot-grid-v29">
         <?php foreach($bots as $b): $pm=$status[$b['name']]??[]; $st=(string)($pm['status']??'not_found'); $files=$pm['files']??[]; $mem=(float)($pm['memory']??0); $cpu=(float)($pm['cpu_percent']??($pm['cpu']??0)); ob_start(); ?>
           <div class="modal fade hh-modal bot-delete-modal" id="deleteBot<?= (int)$b['id'] ?>" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
               <div class="modal-header"><div><div class="eyebrow"><i class="fa-solid fa-trash"></i> Удаление</div><h5 class="modal-title mb-0"><?= e($b['name']) ?></h5></div><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
               <div class="modal-body">
-                <div class="design-note mb-3">Выбери: убрать только PM2-процесс или удалить полностью вместе с файлами.</div>
+                
                 <div class="small muted mb-3">Папка: <code><?= e($b['path']) ?></code></div>
                 <form method="post" class="mb-3">
                   <?= csrf_field() ?><input type="hidden" name="action" value="delete_bot"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>">
@@ -782,26 +816,14 @@ function view_dns(): void { $zones=db()->query('SELECT * FROM dns_zones ORDER BY
 <div class="row g-4">
   <div class="col-xl-4">
     <div class="panel-card hero-mini">
-      <div class="kicker"><i class="fa-solid fa-diagram-project me-2"></i>DNS перенос доменов</div>
-      <h2>Свои NS для HYPER-HOST</h2>
-      <p class="muted">Создай DNS-зону, потом у регистратора домена поставь <code>ns1.domain</code> и <code>ns2.domain</code>. Для домашнего сервера обязательно пробрось TCP/UDP 53 на сервер.</p>
+      <div class="kicker"><i class="fa-solid fa-diagram-project me-2"></i>DNS</div>
+      <h2>DNS-зона</h2>
       <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="dns_wizard">
         <input class="form-control" name="domain" placeholder="hyper-host.pw" required>
         <input class="form-control" name="public_ip" value="<?= e($pub) ?>" placeholder="90.189.208.25">
         <input class="form-control" name="panel_subdomain" value="panel" placeholder="panel">
-        <button class="btn btn-primary btn-lg"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Создать DNS автоматически</button>
+        <button class="btn btn-primary btn-lg"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Создать DNS</button>
       </form>
-    </div>
-    <div class="panel-card mt-4">
-      <h2>Что ставить у регистратора</h2>
-      <div class="dns-steps">
-        <div><b>NS 1</b><code>ns1.твой-домен</code></div>
-        <div><b>NS 2</b><code>ns2.твой-домен</code></div>
-        <div><b>Glue A</b><code>ns1/ns2 → <?= e($pub) ?></code></div>
-        <div><b>Порты</b><code>53 TCP/UDP → <?= e((string)app_config('server_ip')) ?></code></div>
-      </div>
-      <pre class="logs mt-3">sudo hyper dns wizard hyper-host.pw <?= e($pub) ?> panel
-sudo hyper dns status hyper-host.pw</pre>
     </div>
   </div>
   <div class="col-xl-8">
@@ -817,30 +839,30 @@ sudo hyper dns status hyper-host.pw</pre>
         <form method="post" class="row g-2 mb-3"><?= csrf_field() ?><input type="hidden" name="action" value="add_dns_record"><input type="hidden" name="zone_id" value="<?= (int)$z['id'] ?>"><div class="col-md-2"><select class="form-select" name="type"><option>A</option><option>AAAA</option><option>CNAME</option><option>MX</option><option>TXT</option><option>NS</option></select></div><div class="col-md-2"><input class="form-control" name="name" value="@"></div><div class="col-md-5"><input class="form-control" name="value" placeholder="IP / value"></div><div class="col-md-2"><input class="form-control" name="ttl" value="300"></div><div class="col-md-1"><button class="btn btn-primary w-100">+</button></div></form>
         <div class="table-responsive"><table class="table table-dark-soft align-middle"><thead><tr><th>Тип</th><th>Имя</th><th>Значение</th><th>TTL</th><th></th></tr></thead><tbody><?php foreach($recs as $r): ?><tr><td><span class="badge text-bg-secondary"><?= e($r['type']) ?></span></td><td><?= e($r['name']) ?></td><td><code><?= e($r['value']) ?></code></td><td><?= (int)$r['ttl'] ?></td><td class="text-end"><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="delete_dns_record"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-outline-danger">x</button></form></td></tr><?php endforeach; ?></tbody></table></div>
       </div>
-    <?php endforeach; if(!$zones): ?><div class="panel-card empty">DNS зон пока нет. Нажми “Создать DNS автоматически”.</div><?php endif; ?>
+    <?php endforeach; if(!$zones): ?><div class="panel-card empty">DNS зон пока нет</div><?php endif; ?>
   </div>
 </div><?php }
 
 function view_network(): void { $sites=db()->query('SELECT * FROM sites ORDER BY domain')->fetchAll(); $domain=(string)($_GET['domain']??($sites[0]['domain']??'hyper-host.pw')); $pub=setting_get('public_ip_override',(string)app_config('public_ip','90.189.208.25')); $doctor=run_ctl_json_cached(['network-doctor-json',$domain],8,180); ?>
 <div class="row g-4">
-  <div class="col-xl-5"><div class="panel-card hero-mini"><div class="kicker"><i class="fa-solid fa-tower-broadcast me-2"></i>Внешний / внутренний доступ</div><h2>Поднимаем сайт наружу</h2><p class="muted">Ubuntu работает внутри сети: <code><?= e((string)app_config('server_ip')) ?></code>. Публично домен должен смотреть на роутер: <code><?= e($pub) ?></code>. Кнопка ниже чинит Ubuntu/Nginx/ACME/DNS-зону. Если после этого телефон не открывает сайт — нужен проброс портов на роутере.</p>
-    <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="network_fix"><input class="form-control" name="domain" value="<?= e($domain) ?>" placeholder="hyper-host.pw"><input class="form-control" name="public_ip" value="<?= e($pub) ?>" placeholder="90.189.208.25"><button class="btn btn-primary btn-lg"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Починить сеть и SSL-доступ</button></form>
-    <form method="post" class="vstack gap-2 mt-4"><?= csrf_field() ?><input type="hidden" name="action" value="save_panel_domain"><label class="form-label">Домен панели</label><input class="form-control" name="panel_domain" value="<?= e(setting_get('panel_domain_override', (string)app_config('panel_domain', ''))) ?>" placeholder="panel.hyper-host.pw"><button class="btn btn-soft"><i class="fa-solid fa-link me-2"></i>Привязать именно к панели</button><div class="small muted mt-2">Если этот домен случайно был создан как сайт, панель отключит сайт-конфиг и привяжет домен к HYPER-HOST.</div></form>
+  <div class="col-xl-5"><div class="panel-card hero-mini"><div class="kicker"><i class="fa-solid fa-tower-broadcast me-2"></i>Сеть</div><h2>Внешний доступ</h2>
+    <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="network_fix"><input class="form-control" name="domain" value="<?= e($domain) ?>" placeholder="hyper-host.pw"><input class="form-control" name="public_ip" value="<?= e($pub) ?>" placeholder="90.189.208.25"><button class="btn btn-primary btn-lg"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Починить сеть и SSL</button></form>
+    <form method="post" class="vstack gap-2 mt-4"><?= csrf_field() ?><input type="hidden" name="action" value="save_panel_domain"><label class="form-label">Домен панели</label><input class="form-control" name="panel_domain" value="<?= e(setting_get('panel_domain_override', (string)app_config('panel_domain', ''))) ?>" placeholder="panel.hyper-host.pw"><button class="btn btn-soft"><i class="fa-solid fa-link me-2"></i>Привязать панель</button></form>
   </div></div>
   <div class="col-xl-7"><div class="panel-card"><h2>Диагностика доступа</h2>
   <div class="network-check-grid">
     <div class="network-check"><span>Публичный IP</span><b><?= e((string)($doctor['public_ip'] ?? $pub)) ?></b></div>
-    <div class="network-check"><span>Публичный DNS A</span><b class="<?= (($doctor['dns_status']??'')==='ok')?'hh-ok':'hh-warn' ?>"><?= e(implode(', ', $doctor['dns_a'] ?? [])) ?: 'нет/не обновился' ?></b></div>
+    <div class="network-check"><span>DNS A</span><b class="<?= (($doctor['dns_status']??'')==='ok')?'hh-ok':'hh-warn' ?>"><?= e(implode(', ', $doctor['dns_a'] ?? [])) ?: 'нет' ?></b></div>
     <div class="network-check"><span>Локальный DNS</span><b><?= e(implode(', ', $doctor['dns_a_local'] ?? [])) ?: 'нет' ?></b></div>
-    <div class="network-check"><span>Nginx config</span><b class="<?= !empty($doctor['nginx_ok'])?'hh-ok':'hh-bad' ?>"><?= !empty($doctor['nginx_ok'])?'ok':'bad' ?></b></div>
-    <div class="network-check"><span>Ubuntu 80</span><b class="<?= !empty($doctor['listen_80'])?'hh-ok':'hh-bad' ?>"><?= !empty($doctor['listen_80'])?'слушает':'не слушает' ?></b></div>
-    <div class="network-check"><span>Ubuntu 443</span><b class="<?= !empty($doctor['listen_443'])?'hh-ok':'hh-bad' ?>"><?= !empty($doctor['listen_443'])?'слушает':'не слушает' ?></b></div>
-    <div class="network-check"><span>ACME локально</span><b class="<?= !empty($doctor['local_acme_ok'])?'hh-ok':'hh-warn' ?>"><?= !empty($doctor['local_acme_ok'])?'ok':'fix needed' ?></b></div>
-  </div><?php if(!empty($doctor['problem'])): ?><div class="alert alert-warning mt-3 mb-0"><?= e((string)$doctor['problem']) ?></div><?php endif; ?><div class="design-note mt-3">Если Ubuntu 80/443 уже “слушает”, но с телефона не открывается — это уже роутер/провайдер. На роутере нужен проброс: <b>TCP 80/443</b> → <code><?= e((string)app_config('server_ip')) ?></code>. Для наших DNS ещё <b>TCP/UDP 53</b> → <code><?= e((string)app_config('server_ip')) ?></code>.</div><div class="cmd-stack mt-3">
-  <button type="button" class="cmd-copy" onclick="copyText('sudo hyper network fix <?= e($domain) ?> <?= e($pub) ?>')"><i class="fa-solid fa-copy"></i><code>sudo hyper network fix <?= e($domain) ?> <?= e($pub) ?></code></button>
-  <button type="button" class="cmd-copy" onclick="copyText('sudo hyper network doctor <?= e($domain) ?>')"><i class="fa-solid fa-copy"></i><code>sudo hyper network doctor <?= e($domain) ?></code></button>
-  <button type="button" class="cmd-copy" onclick="copyText('sudo hyper ssl check <?= e($domain) ?>')"><i class="fa-solid fa-copy"></i><code>sudo hyper ssl check <?= e($domain) ?></code></button>
-</div></div></div>
+    <div class="network-check"><span>Nginx</span><b class="<?= !empty($doctor['nginx_ok'])?'hh-ok':'hh-bad' ?>"><?= !empty($doctor['nginx_ok'])?'ok':'bad' ?></b></div>
+    <div class="network-check"><span>Ubuntu 80</span><b class="<?= !empty($doctor['listen_80'])?'hh-ok':'hh-bad' ?>"><?= !empty($doctor['listen_80'])?'слушает':'нет' ?></b></div>
+    <div class="network-check"><span>Ubuntu 443</span><b class="<?= !empty($doctor['listen_443'])?'hh-ok':'hh-bad' ?>"><?= !empty($doctor['listen_443'])?'слушает':'нет' ?></b></div>
+    <div class="network-check"><span>ACME</span><b class="<?= !empty($doctor['local_acme_ok'])?'hh-ok':'hh-warn' ?>"><?= !empty($doctor['local_acme_ok'])?'ok':'fix' ?></b></div>
+  </div><?php if(!empty($doctor['problem'])): ?><div class="alert alert-warning mt-3 mb-0"><?= e((string)$doctor['problem']) ?></div><?php endif; ?>
+  <div class="cmd-stack mt-3">
+    <button type="button" class="cmd-copy" onclick="copyText('sudo hyper network fix <?= e($domain) ?> <?= e($pub) ?>')"><i class="fa-solid fa-copy"></i><code>sudo hyper network fix <?= e($domain) ?> <?= e($pub) ?></code></button>
+    <button type="button" class="cmd-copy" onclick="copyText('sudo hyper ssl check <?= e($domain) ?>')"><i class="fa-solid fa-copy"></i><code>sudo hyper ssl check <?= e($domain) ?></code></button>
+  </div></div></div>
 </div><?php }
 
 function view_ssl(): void {
@@ -853,7 +875,6 @@ function view_ssl(): void {
   <div>
     <div class="eyebrow"><i class="fa-solid fa-shield-halved"></i> Let's Encrypt</div>
     <h2>SSL сертификаты</h2>
-    <p>Быстрая проверка DNS, ACME и Nginx без зависаний. Если статус зелёный — можно выпускать сертификат.</p>
   </div>
   <div class="ssl-hero-actions">
     <form method="post" class="d-flex gap-2 flex-wrap">
@@ -940,14 +961,14 @@ function view_logs(): void { $sites=db()->query('SELECT * FROM sites ORDER BY do
 <div class="panel-card"><h2>Логи сайтов</h2><form method="get" class="row g-2 mb-3"><input type="hidden" name="page" value="logs"><div class="col-md-3"><select class="form-select" name="domain"><?php foreach($sites as $s): ?><option value="<?= e($s['domain']) ?>" <?= $domain===$s['domain']?'selected':'' ?>><?= e($s['domain']) ?></option><?php endforeach; ?></select></div><div class="col-md-2"><select class="form-select" name="kind"><option value="error" <?= $kind==='error'?'selected':'' ?>>error</option><option value="access" <?= $kind==='access'?'selected':'' ?>>access</option></select></div><div class="col-md-5"><input class="form-control" name="filter" value="<?= e($filter) ?>" placeholder="фильтр ошибок"></div><div class="col-md-2"><button class="btn btn-primary w-100">Показать</button></div></form><pre class="logs"><?= e($out?:'Логов пока нет') ?></pre></div><?php }
 
 function view_security(): void { $secret=setting_get('security_2fa_secret',''); if($secret===''){ $secret=base32_random(); setting_set('security_2fa_secret',$secret); } $enabled=setting_get('security_2fa_enabled','0'); $issuer='HYPER-HOST'; $account='admin@'.host_name(); $uri='otpauth://totp/'.rawurlencode($issuer.':'.$account).'?secret='.$secret.'&issuer='.rawurlencode($issuer); $logs=db()->query('SELECT * FROM auth_logs ORDER BY id DESC LIMIT 30')->fetchAll(); ?>
-<div class="row g-4"><div class="col-lg-5"><div class="panel-card"><h2>2FA и IP allowlist</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="save_security"><label class="form-check"><input class="form-check-input" type="checkbox" name="enable_2fa" value="1" <?= $enabled==='1'?'checked':'' ?>> <span class="form-check-label">Включить 2FA</span></label><div><label class="form-label">2FA secret</label><input class="form-control" value="<?= e($secret) ?>" readonly><div class="small muted mt-1">Добавь в Authenticator вручную или через URI:</div><textarea class="form-control mt-2" rows="3" readonly><?= e($uri) ?></textarea></div><div><label class="form-label">IP allowlist</label><textarea class="form-control" name="ip_allowlist" rows="5" placeholder="Один IP на строку. Пусто = все IP разрешены."><?= e(setting_get('security_ip_allowlist','')) ?></textarea></div><button class="btn btn-primary">Сохранить</button></form><form method="post" class="mt-2"><?= csrf_field() ?><input type="hidden" name="action" value="reset_2fa_secret"><button class="btn btn-soft">Сбросить 2FA secret</button></form></div></div><div class="col-lg-7"><div class="panel-card"><h2>Журнал входов</h2><table class="table table-dark-soft"><thead><tr><th>Время</th><th>Логин</th><th>IP</th><th>Статус</th></tr></thead><tbody><?php foreach($logs as $l): ?><tr><td><?= e($l['created_at']) ?></td><td><?= e($l['username']) ?></td><td><?= e($l['ip']) ?></td><td><?= e($l['status']) ?></td></tr><?php endforeach; ?></tbody></table></div></div></div><?php }
+<div class="row g-4"><div class="col-lg-5"><div class="panel-card"><h2>2FA и IP allowlist</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="save_security"><label class="form-check"><input class="form-check-input" type="checkbox" name="enable_2fa" value="1" <?= $enabled==='1'?'checked':'' ?>> <span class="form-check-label">Включить 2FA</span></label><div><label class="form-label">2FA secret</label><input class="form-control" value="<?= e($secret) ?>" readonly><textarea class="form-control mt-2" rows="3" readonly><?= e($uri) ?></textarea></div><div><label class="form-label">IP allowlist</label><textarea class="form-control" name="ip_allowlist" rows="5" placeholder="Один IP на строку. Пусто = все IP разрешены."><?= e(setting_get('security_ip_allowlist','')) ?></textarea></div><button class="btn btn-primary">Сохранить</button></form><form method="post" class="mt-2"><?= csrf_field() ?><input type="hidden" name="action" value="reset_2fa_secret"><button class="btn btn-soft">Сбросить 2FA secret</button></form></div></div><div class="col-lg-7"><div class="panel-card"><h2>Журнал входов</h2><table class="table table-dark-soft"><thead><tr><th>Время</th><th>Логин</th><th>IP</th><th>Статус</th></tr></thead><tbody><?php foreach($logs as $l): ?><tr><td><?= e($l['created_at']) ?></td><td><?= e($l['username']) ?></td><td><?= e($l['ip']) ?></td><td><?= e($l['status']) ?></td></tr><?php endforeach; ?></tbody></table></div></div></div><?php }
 
 
 function view_access(): void
 { $j=run_ctl_json_cached(['access-doctor-json'],3,90); $pub=(string)($j['public_ip']??''); $server=(string)($j['server_ip']??host_name()); $ports=$j['listen_ports']??[]; ?>
 <div class="row g-4">
-  <div class="col-xl-5"><div class="panel-card"><h2><i class="fa-solid fa-plug-circle-bolt me-2"></i>Внешний доступ</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="access_fix"><button class="btn btn-primary btn-lg"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Открыть доступ на Ubuntu</button></form><div class="mt-4 vstack gap-2"><button class="cmd-copy" type="button" data-copy="sudo hyper access fix"><i class="fa-regular fa-copy"></i><code>sudo hyper access fix</code></button><button class="cmd-copy" type="button" data-copy="sudo hyper access doctor"><i class="fa-regular fa-copy"></i><code>sudo hyper access doctor</code></button><button class="cmd-copy" type="button" data-copy="sudo hyper access guide"><i class="fa-regular fa-copy"></i><code>sudo hyper access guide</code></button></div></div></div>
-  <div class="col-xl-7"><div class="panel-card"><h2><i class="fa-solid fa-router me-2"></i>Что пробросить на роутере</h2><div class="network-check-grid mb-3"><div class="network-check"><span>Сервер</span><b><?= e($server) ?></b></div><div class="network-check"><span>Публичный IP</span><b><?= e($pub) ?></b></div><div class="network-check"><span>UFW</span><b><?= e((string)($j['ufw_status']??'')) ?></b></div></div><div class="table-responsive"><table class="table table-dark-soft"><thead><tr><th>Сервис</th><th>Правило Keenetic</th></tr></thead><tbody><?php foreach(($j['router_forwarding_needed']??[]) as $r): ?><tr><td><?= e((string)$r['service']) ?></td><td><code><?= e((string)$r['rule']) ?></code></td></tr><?php endforeach; ?></tbody></table></div><h2 class="mt-4">Порты Ubuntu</h2><div class="service-row"><?php foreach($ports as $k=>$ok): ?><span class="badge rounded-pill text-bg-<?= $ok?'success':'danger' ?>"><?= e((string)$k) ?>: <?= $ok?'open':'closed' ?></span><?php endforeach; ?></div></div></div>
+  <div class="col-xl-5"><div class="panel-card"><h2><i class="fa-solid fa-plug-circle-bolt me-2"></i>Внешний доступ</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="access_fix"><button class="btn btn-primary btn-lg"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Открыть доступ на Ubuntu</button></form><div class="mt-4 vstack gap-2"><button class="cmd-copy" type="button" data-copy="sudo hyper access fix"><i class="fa-regular fa-copy"></i><code>sudo hyper access fix</code></button><button class="cmd-copy" type="button" data-copy="sudo hyper access doctor"><i class="fa-regular fa-copy"></i><code>sudo hyper access doctor</code></button></div></div></div>
+  <div class="col-xl-7"><div class="panel-card"><h2><i class="fa-solid fa-router me-2"></i>Порты</h2><div class="network-check-grid mb-3"><div class="network-check"><span>Сервер</span><b><?= e($server) ?></b></div><div class="network-check"><span>Публичный IP</span><b><?= e($pub) ?></b></div><div class="network-check"><span>UFW</span><b><?= e((string)($j['ufw_status']??'')) ?></b></div></div><div class="table-responsive"><table class="table table-dark-soft"><thead><tr><th>Сервис</th><th>Правило</th></tr></thead><tbody><?php foreach(($j['router_forwarding_needed']??[]) as $r): ?><tr><td><?= e((string)$r['service']) ?></td><td><code><?= e((string)$r['rule']) ?></code></td></tr><?php endforeach; ?></tbody></table></div><h2 class="mt-4">Ubuntu</h2><div class="service-row"><?php foreach($ports as $k=>$ok): ?><span class="badge rounded-pill text-bg-<?= $ok?'success':'danger' ?>"><?= e((string)$k) ?>: <?= $ok?'open':'closed' ?></span><?php endforeach; ?></div></div></div>
 </div><?php }
 
 function view_disk(): void
@@ -955,4 +976,5 @@ function view_disk(): void
 <div class="row g-4"><div class="col-xl-5"><div class="panel-card"><h2><i class="fa-solid fa-hard-drive me-2"></i>Диск и LVM</h2><div class="network-check-grid mb-3"><div class="network-check"><span>Root</span><b><?= e((string)($j['root_total']??'')) ?></b></div><div class="network-check"><span>Свободно</span><b><?= e((string)($j['root_free']??'')) ?></b></div><div class="network-check"><span>VG</span><b><?= e((string)($j['root_vg']??'—')) ?></b></div></div><form method="post" onsubmit="return confirm('Расширить root LVM на всё свободное место диска?')"><?= csrf_field() ?><input type="hidden" name="action" value="disk_expand"><button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-up-right-and-down-left-from-center me-2"></i>Расширить диск автоматически</button></form><div class="mt-3 vstack gap-2"><button class="cmd-copy" type="button" data-copy="sudo hyper disk doctor"><i class="fa-regular fa-copy"></i><code>sudo hyper disk doctor</code></button><button class="cmd-copy" type="button" data-copy="sudo hyper disk expand"><i class="fa-regular fa-copy"></i><code>sudo hyper disk expand</code></button></div></div></div><div class="col-xl-7"><div class="panel-card"><h2>Диагностика</h2><pre class="logs"><?= e(json_encode($j, JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT)) ?></pre></div></div></div><?php }
 
 function view_settings(): void { $dbStatus=db_writable_status(); ?>
-<div class="row g-4"><div class="col-lg-6"><div class="panel-card"><h2>Ремонт панели</h2><p class="muted">Чинит SQLite, sudoers, FTP, ACL-права для сохранения файлов после FileZilla, Nginx и сервисы.</p><form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="repair_panel"><button class="btn btn-primary">Починить права и сервисы</button></form><form method="post" class="d-inline ms-2"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft">Синхронизировать</button></form><hr><form method="post" class="row g-2"><?= csrf_field() ?><input type="hidden" name="action" value="save_public_ip"><div class="col-8"><input class="form-control" name="public_ip" value="<?= e(setting_get('public_ip_override', (string)app_config('public_ip',''))) ?>" placeholder="Публичный IP для SSL, например 90.189.208.25"></div><div class="col-4"><button class="btn btn-soft w-100">IP для SSL</button></div></form></div></div><div class="col-lg-6"><div class="panel-card"><h2>Сменить пароль</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="change_password"><input class="form-control" type="password" name="current_password" placeholder="Текущий пароль" required><input class="form-control" type="password" name="new_password" placeholder="Новый пароль" minlength="10" required><button class="btn btn-primary">Сменить пароль</button></form></div></div><div class="col-12"><div class="panel-card"><h2>Системные пути</h2><div class="hardware-grid"><div><span>SQLite</span><b><?= e($dbStatus['file_writable']?'writable':'not writable') ?></b></div><div><span>Панель</span><b><?= e((string)app_config('panel_dir')) ?></b></div><div><span>Сайты</span><b><?= e((string)app_config('sites_dir')) ?></b></div><div><span>FTP</span><b><?= e((string)app_config('ftp_dir','/var/www/hyper-host-ftp')) ?></b></div><div><span>Боты</span><b><?= e((string)app_config('bots_dir')) ?></b></div></div></div></div></div><?php }
+<div class="row g-4"><div class="col-lg-6"><div class="panel-card"><h2>Ремонт панели</h2><form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="repair_panel"><button class="btn btn-primary">Починить права и сервисы</button></form><form method="post" class="d-inline ms-2"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft">Синхронизировать</button></form><hr><form method="post" class="row g-2"><?= csrf_field() ?><input type="hidden" name="action" value="save_public_ip"><div class="col-8"><input class="form-control" name="public_ip" value="<?= e(setting_get('public_ip_override', (string)app_config('public_ip',''))) ?>" placeholder="Публичный IP"></div><div class="col-4"><button class="btn btn-soft w-100">Сохранить IP</button></div></form></div></div><div class="col-lg-6"><div class="panel-card"><h2>Сменить пароль</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="change_password"><input class="form-control" type="password" name="current_password" placeholder="Текущий пароль" required><input class="form-control" type="password" name="new_password" placeholder="Новый пароль" minlength="10" required><button class="btn btn-primary">Сменить пароль</button></form></div></div><div class="col-12"><div class="panel-card"><h2>Системные пути</h2><div class="hardware-grid"><div><span>SQLite</span><b><?= e($dbStatus['file_writable']?'writable':'not writable') ?></b></div><div><span>Панель</span><b><?= e((string)app_config('panel_dir')) ?></b></div><div><span>Сайты</span><b><?= e((string)app_config('sites_dir')) ?></b></div><div><span>FTP</span><b><?= e((string)app_config('ftp_dir','/var/www/hyper-host-ftp')) ?></b></div><div><span>Боты</span><b><?= e((string)app_config('bots_dir')) ?></b></div></div></div></div></div><?php }
+
