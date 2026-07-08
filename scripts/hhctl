@@ -1344,22 +1344,51 @@ cmd_bot_action() {
 }
 cmd_bot_list_json() {
   ensure_pm2
-  pm2_as_bot jlist 2>/dev/null | python3 -c 'import sys,json,os
+  pm2_as_bot jlist 2>/dev/null | python3 -c 'import sys,json,os,time
 try:
     data=json.load(sys.stdin)
 except Exception:
     data=[]
+
+def rss_from_pid(pid):
+    try:
+        pid=int(pid or 0)
+        if pid <= 0: return 0
+        with open(f"/proc/{pid}/status", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except Exception:
+        pass
+    return 0
+
+def uptime_text(ms):
+    try:
+        sec=max(0, int((time.time()*1000 - int(ms or 0)) / 1000))
+        d,sec=divmod(sec,86400); h,sec=divmod(sec,3600); m,_=divmod(sec,60)
+        return f"{d}д {h}ч {m}м" if d else (f"{h}ч {m}м" if h else f"{m}м")
+    except Exception:
+        return "—"
+
 out=[]
 for p in data:
-    env=p.get("pm2_env",{})
-    cwd=env.get("pm_cwd","")
+    env=p.get("pm2_env",{}) or {}
+    cwd=env.get("pm_cwd","") or ""
     files=[]
     if cwd and os.path.isdir(cwd):
         for n in ("bot.py","main.py","index.py","index.js","bot.php",".env","requirements.txt","package.json",".hyper-start.sh"):
             if os.path.exists(os.path.join(cwd,n)): files.append(n)
-    out.append({"name":p.get("name",""),"status":env.get("status",""),"restarts":env.get("restart_time",0),"memory":p.get("monit",{}).get("memory",0),"cpu":p.get("monit",{}).get("cpu",0),"cwd":cwd,"files":files,"pm2_home":os.environ.get("PM2_HOME","")})
+    pid=p.get("pid") or env.get("pid") or 0
+    memory=int((p.get("monit",{}) or {}).get("memory",0) or 0)
+    if memory <= 0:
+        memory = rss_from_pid(pid)
+    cpu=float((p.get("monit",{}) or {}).get("cpu",0) or 0)
+    status=env.get("status","") or "unknown"
+    created=env.get("pm_uptime") or 0
+    out.append({"name":p.get("name","") or "","pm_id":env.get("pm_id", p.get("pm_id", "")),"pid":pid,"status":status,"restarts":int(env.get("restart_time",0) or 0),"unstable_restarts":int(env.get("unstable_restarts",0) or 0),"memory":memory,"memory_mb":round(memory/1024/1024,1),"cpu":cpu,"cpu_percent":round(cpu,1),"cwd":cwd,"files":files,"uptime":uptime_text(created),"pm_uptime":created,"updated_at":int(time.time()),"pm2_home":os.environ.get("PM2_HOME","")})
 print(json.dumps(out, ensure_ascii=False))'
 }
+
 cmd_bot_doctor() {
   ensure_pm2
   echo "=== HYPER-HOST BOT DOCTOR ==="
@@ -1470,33 +1499,89 @@ print(json.dumps(items, ensure_ascii=False))
 PY
 }
 
-cmd_stats_json() { python3 - <<'PY'
-import os,json,subprocess,shutil
+cmd_stats_json() { PANEL_DIR="$PANEL_DIR" SITES_DIR="$SITES_DIR" BOTS_DIR="$BOTS_DIR" FTP_DIR="$FTP_DIR" BACKUP_DIR="$BACKUP_DIR" PHPMYADMIN_PATH="$PHPMYADMIN_PATH" SERVER_IP="$SERVER_IP" PANEL_DOMAIN="$PANEL_DOMAIN" python3 - <<'PY'
+import os,json,subprocess,shutil,time
+
 def run(cmd):
     try: return subprocess.check_output(cmd,shell=True,text=True,stderr=subprocess.DEVNULL).strip()
     except Exception: return ''
+
 def service(name): return run(f'systemctl is-active {name}') or 'inactive'
+
 def meminfo():
     data={}
     try:
         for line in open('/proc/meminfo'):
             k,v=line.split(':',1); data[k]=int(v.strip().split()[0])*1024
     except Exception: pass
-    t=data.get('MemTotal',0); a=data.get('MemAvailable',0); return t,max(0,t-a),a
-def cpu():
+    total=data.get('MemTotal',0)
+    available=data.get('MemAvailable',0)
+    free=data.get('MemFree',0)
+    buffers=data.get('Buffers',0)
+    cached=data.get('Cached',0)+data.get('SReclaimable',0)-data.get('Shmem',0)
+    used=max(0,total-available)
+    swap_total=data.get('SwapTotal',0)
+    swap_free=data.get('SwapFree',0)
+    swap_used=max(0,swap_total-swap_free)
+    return {"total":total,"used":used,"available":available,"free":free,"buffers":buffers,"cached":max(0,cached),"swap_total":swap_total,"swap_used":swap_used,"swap_free":swap_free}
+
+def cpu_model():
     try:
         for l in open('/proc/cpuinfo',encoding='utf-8',errors='ignore'):
             if l.lower().startswith('model name'): return l.split(':',1)[1].strip()
     except Exception: pass
     return run('uname -m') or 'unknown'
-def upt():
+
+def cpu_stat():
+    try:
+        vals=list(map(int, open('/proc/stat').readline().split()[1:]))
+        idle=vals[3]+(vals[4] if len(vals)>4 else 0)
+        total=sum(vals)
+        return idle,total
+    except Exception:
+        return 0,0
+
+def cpu_percent():
+    a=cpu_stat(); time.sleep(0.18); b=cpu_stat()
+    idle=b[0]-a[0]; total=b[1]-a[1]
+    if total <= 0: return 0.0
+    return round(max(0,min(100,(1-idle/total)*100)),1)
+
+def uptime_text():
     try:
         s=int(float(open('/proc/uptime').read().split()[0])); d,s=divmod(s,86400); h,s=divmod(s,3600); m,_=divmod(s,60); return f'{d}д {h}ч {m}м' if d else f'{h}ч {m}м'
     except Exception: return 'unknown'
-du=shutil.disk_usage('/'); mt,mu,ma=meminfo(); load=os.getloadavg() if hasattr(os,'getloadavg') else (0,0,0)
+
+def disk_usage(path):
+    path=path or '/'
+    try:
+        if not os.path.exists(path): path='/'
+        du=shutil.disk_usage(path)
+        pct=round((du.used/du.total*100) if du.total else 0,1)
+        return {'path':path,'total':du.total,'used':du.used,'free':du.free,'percent':pct}
+    except Exception:
+        return {'path':path,'total':0,'used':0,'free':0,'percent':0}
+
+def temp_c():
+    vals=[]
+    try:
+        for item in os.listdir('/sys/class/thermal'):
+            p=os.path.join('/sys/class/thermal', item, 'temp')
+            if os.path.exists(p):
+                try:
+                    v=int(open(p).read().strip())/1000
+                    if 0 < v < 120: vals.append(v)
+                except Exception: pass
+    except Exception: pass
+    return round(max(vals),1) if vals else None
+
+mem=meminfo(); cores=os.cpu_count() or 0; load=os.getloadavg() if hasattr(os,'getloadavg') else (0,0,0)
 php=run("systemctl list-units --type=service --state=running --no-legend 'php*-fpm.service' | awk '{print $1}' | head -n1") or 'php-fpm'
 pm2=run('command -v pm2 >/dev/null 2>&1 && pm2 -v || true')
-print(json.dumps({'server_ip':os.environ.get('SERVER_IP',''),'panel_domain':os.environ.get('PANEL_DOMAIN',''),'cpu_model':cpu(),'cpu_cores':os.cpu_count() or 0,'load1':load[0],'load5':load[1],'load15':load[2],'uptime':upt(),'disk_total':du.total,'disk_used':du.used,'disk_free':du.free,'mem_total':mt,'mem_used':mu,'mem_available':ma,'pm2_version':pm2,'services':{'nginx':service('nginx'),'mariadb':service('mariadb'),'vsftpd':service('vsftpd'),'php_fpm':service(php),'bind9':service('bind9')},'paths':{'panel':os.environ.get('PANEL_DIR',''),'sites':os.environ.get('SITES_DIR',''),'bots':os.environ.get('BOTS_DIR',''),'ftp':os.environ.get('FTP_DIR',''),'backups':os.environ.get('BACKUP_DIR',''),'phpmyadmin':os.environ.get('PHPMYADMIN_PATH','/usr/share/phpmyadmin')}},ensure_ascii=False))
+paths={'root':'/','sites':os.environ.get('SITES_DIR','/var/www/hyper-host-sites'),'bots':os.environ.get('BOTS_DIR','/var/www/hyper-host-bots'),'ftp':os.environ.get('FTP_DIR','/var/www/hyper-host-ftp'),'backups':os.environ.get('BACKUP_DIR','/opt/hyper-host/backups')}
+disks={k:disk_usage(v) for k,v in paths.items()}
+root=disks['root']
+print(json.dumps({'server_ip':os.environ.get('SERVER_IP',''),'panel_domain':os.environ.get('PANEL_DOMAIN',''),'hostname':run('hostname'),'kernel':run('uname -srmo'),'cpu_model':cpu_model(),'cpu_cores':cores,'cpu_percent':cpu_percent(),'cpu_temp':temp_c(),'load1':round(load[0],2),'load5':round(load[1],2),'load15':round(load[2],2),'load_percent':round((load[0]/cores*100) if cores else 0,1),'uptime':uptime_text(),'disk_total':root['total'],'disk_used':root['used'],'disk_free':root['free'],'disk_percent':root['percent'],'disks':disks,'mem_total':mem['total'],'mem_used':mem['used'],'mem_available':mem['available'],'mem_free':mem['free'],'mem_cached':mem['cached'],'mem_buffers':mem['buffers'],'mem_percent':round((mem['used']/mem['total']*100) if mem['total'] else 0,1),'swap_total':mem['swap_total'],'swap_used':mem['swap_used'],'swap_free':mem['swap_free'],'pm2_version':pm2,'services':{'nginx':service('nginx'),'mariadb':service('mariadb'),'vsftpd':service('vsftpd'),'php_fpm':service(php),'bind9':service('bind9'),'hyperbot_pm2':service('hyperbot-pm2')},'paths':{'panel':os.environ.get('PANEL_DIR',''),'sites':paths['sites'],'bots':paths['bots'],'ftp':paths['ftp'],'backups':paths['backups'],'phpmyadmin':os.environ.get('PHPMYADMIN_PATH','/usr/share/phpmyadmin')},'updated_at':int(time.time())},ensure_ascii=False))
 PY
 }
 
@@ -1763,8 +1848,10 @@ cmd_disk_doctor_json() {
 import json, subprocess, shutil, os
 
 def sh(cmd):
-    try: return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
-    except Exception: return ''
+    try:
+        return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        return ''
 
 def hb(n):
     try: n=float(n)
@@ -1773,31 +1860,58 @@ def hb(n):
         if n < 1024 or u == 'TB': return f'{n:.1f} {u}' if u!='B' else f'{n:.0f} {u}'
         n/=1024
 
+def real(path):
+    try: return os.path.realpath(path)
+    except Exception: return path
+
 usage=shutil.disk_usage('/')
 root_source=sh('findmnt -n -o SOURCE /')
 root_fstype=sh('findmnt -n -o FSTYPE /')
-root_target=sh('readlink -f "$(findmnt -n -o SOURCE /)"')
+root_realpath=real(root_source)
 lsblk=sh('lsblk -b -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS')
 lvs=sh('lvs --noheadings --units b --nosuffix -o lv_path,vg_name,lv_size 2>/dev/null')
 pvs=sh('pvs --noheadings --units b --nosuffix -o pv_name,vg_name,pv_size,pv_free 2>/dev/null')
 vgs=sh('vgs --noheadings --units b --nosuffix -o vg_name,vg_size,vg_free 2>/dev/null')
-root_lv=root_target if '/dev/mapper/' in root_target or '/dev/' in root_target else root_source
+root_lv=''
 vg=''
+lv_size=''
 for line in lvs.splitlines():
     parts=line.split()
-    if len(parts)>=3 and (parts[0] == root_lv or os.path.basename(parts[0]) in os.path.basename(root_lv)):
-        vg=parts[1]
+    if len(parts) < 3:
+        continue
+    lv_path, vg_name, size = parts[0], parts[1], parts[2]
+    lv_real=real(lv_path)
+    if lv_path == root_source or lv_real == root_realpath or os.path.basename(lv_path) == os.path.basename(root_source):
+        root_lv=lv_path
+        vg=vg_name
+        lv_size=size
         break
+# fallback for Ubuntu mapper naming: /dev/mapper/ubuntu--vg-ubuntu--lv -> VG ubuntu-vg
+if not vg and root_source.startswith('/dev/mapper/'):
+    encoded=os.path.basename(root_source)
+    # lvs raw knows the actual lv path; compare by realpath first, then derive if possible
+    for line in lvs.splitlines():
+        parts=line.split()
+        if len(parts) >= 3 and real(parts[0]) == root_realpath:
+            root_lv, vg, lv_size = parts[0], parts[1], parts[2]
+            break
 pv_candidates=[]
+vg_free=0
+vg_size=0
 if vg:
+    for line in vgs.splitlines():
+        parts=line.split()
+        if len(parts)>=3 and parts[0]==vg:
+            vg_size=float(parts[1]); vg_free=float(parts[2])
     for line in pvs.splitlines():
         parts=line.split()
         if len(parts)>=4 and parts[1]==vg:
             pv_candidates.append({'pv':parts[0], 'vg':parts[1], 'size_bytes':float(parts[2]), 'free_bytes':float(parts[3]), 'size':hb(parts[2]), 'free':hb(parts[3])})
-can_lvm=bool(vg and pv_candidates)
+can_lvm=bool(vg and root_lv)
 print(json.dumps({
   'root_source': root_source,
-  'root_realpath': root_target,
+  'root_realpath': root_realpath,
+  'root_lv_path': root_lv,
   'root_fstype': root_fstype,
   'root_total_bytes': usage.total,
   'root_used_bytes': usage.used,
@@ -1808,6 +1922,10 @@ print(json.dumps({
   'root_used_percent': round(usage.used*100/usage.total,2) if usage.total else 0,
   'lvm_detected': can_lvm,
   'root_vg': vg,
+  'vg_size_bytes': vg_size,
+  'vg_free_bytes': vg_free,
+  'vg_size': hb(vg_size),
+  'vg_free': hb(vg_free),
   'pv_candidates': pv_candidates,
   'vgs_raw': vgs,
   'lvs_raw': lvs,
@@ -1820,23 +1938,56 @@ PYDISK
 
 cmd_disk_expand() {
   [[ "${EUID}" -eq 0 ]] || err "Запусти: sudo hyper disk expand"
-  command -v pvresize >/dev/null 2>&1 || apt-get update && apt-get install -y lvm2
-  local root_src root_lv vg pv
+  if ! command -v pvresize >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y lvm2
+  fi
+
+  local root_src root_real lv_path vg pv vg_free
   root_src="$(findmnt -n -o SOURCE /)"
-  root_lv="$(readlink -f "$root_src")"
-  [[ -n "$root_lv" && -b "$root_lv" ]] || root_lv="$root_src"
-  vg="$(lvs --noheadings -o vg_name "$root_lv" 2>/dev/null | head -n1 | xargs || true)"
+  root_real="$(readlink -f "$root_src" 2>/dev/null || echo "$root_src")"
+
+  lv_path=""
+  vg=""
+  while read -r lp vgname; do
+    [[ -z "$lp" || -z "$vgname" ]] && continue
+    if [[ "$lp" == "$root_src" || "$(readlink -f "$lp" 2>/dev/null || echo "$lp")" == "$root_real" ]]; then
+      lv_path="$lp"
+      vg="$vgname"
+      break
+    fi
+  done < <(lvs --noheadings -o lv_path,vg_name 2>/dev/null | awk '{print $1" "$2}')
+
+  # fallback: try direct lvs on the original mapper path before failing
+  if [[ -z "$vg" ]]; then
+    vg="$(lvs --noheadings -o vg_name "$root_src" 2>/dev/null | head -n1 | xargs || true)"
+    lv_path="$root_src"
+  fi
+  if [[ -z "$vg" ]]; then
+    vg="$(lvs --noheadings -o vg_name "$root_real" 2>/dev/null | head -n1 | xargs || true)"
+    lv_path="$root_real"
+  fi
   [[ -n "$vg" ]] || err "Root раздел не похож на LVM. Пришли вывод: lsblk; pvs; vgs; lvs"
+
   pv="$(pvs --noheadings -o pv_name --select "vg_name=$vg" 2>/dev/null | head -n1 | xargs || true)"
   [[ -n "$pv" ]] || err "Не нашёл physical volume для VG=$vg. Пришли вывод: pvs; vgs; lvs"
-  echo "[HYPER-HOST] Root LV: $root_lv"
-  echo "[HYPER-HOST] VG:      $vg"
-  echo "[HYPER-HOST] PV:      $pv"
+
+  vg_free="$(vgs --noheadings --units g --nosuffix -o vg_free "$vg" 2>/dev/null | head -n1 | xargs || echo 0)"
+
+  echo "[HYPER-HOST] Root source: $root_src"
+  echo "[HYPER-HOST] Root real:   $root_real"
+  echo "[HYPER-HOST] Root LV:     $lv_path"
+  echo "[HYPER-HOST] VG:          $vg"
+  echo "[HYPER-HOST] PV:          $pv"
+  echo "[HYPER-HOST] VG free:     ${vg_free}G"
+  echo
   echo "[HYPER-HOST] Расширяю PV до размера диска..."
   pvresize "$pv"
-  echo "[HYPER-HOST] Расширяю root LV на всё свободное место..."
-  lvextend -r -l +100%FREE "$root_lv"
   echo
+  echo "[HYPER-HOST] Расширяю root LV на всё свободное место..."
+  lvextend -r -l +100%FREE "$lv_path"
+  echo
+  echo "[HYPER-HOST] Готово. Новый размер root:"
   df -hT /
   echo
   lsblk

@@ -28,8 +28,32 @@ if ($page === 'login') {
 }
 
 $user = require_auth();
+if (isset($_GET['api'])) { render_api((string)$_GET['api']); exit; }
 if ($_SERVER['REQUEST_METHOD'] === 'POST') { check_csrf(); handle_post((string)$action); }
 render_page($page, $user);
+
+function render_api(string $api): void
+{
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    try {
+        if ($api === 'stats') {
+            $data = run_ctl_json_live(['stats-json'], 8);
+            echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            return;
+        }
+        if ($api === 'bots') {
+            $pm2 = run_ctl_json_live(['bot-list-json'], 8);
+            echo json_encode(is_array($pm2) ? $pm2 : ['_error' => 'PM2 JSON error'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            return;
+        }
+        http_response_code(404);
+        echo json_encode(['_error' => 'API not found'], JSON_UNESCAPED_UNICODE);
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['_error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+    }
+}
 
 function csrf_field(): string { return '<input type="hidden" name="_csrf" value="'.e(csrf_token()).'">'; }
 function host_name(): string { return panel_host_for_connections(); }
@@ -263,7 +287,7 @@ function rrmdir(string $path): void { if(is_dir($path)&&!is_link($path)){ foreac
 
 function hh_ui_critical_css(): string
 {
-    return '<style id="hh-v27-critical">
+    return '<style id="hh-v29-critical">
 html,body{background:#030712!important;color:#eef5ff!important}.sidebar *,.topbar *,.panel-card *{box-sizing:border-box}.nav-group-toggle,.cmd-copy,button.btn{appearance:none!important;-webkit-appearance:none!important;border-radius:16px!important}.nav-group-toggle{width:100%!important;border:1px solid rgba(148,163,184,.14)!important;background:linear-gradient(135deg,rgba(15,23,42,.92),rgba(30,41,59,.64))!important;color:#eef5ff!important;display:flex!important;align-items:center!important;justify-content:space-between!important;padding:12px 13px!important;font-weight:950!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.04),0 10px 26px rgba(0,0,0,.18)!important}.nav-group-toggle span{display:flex!important;gap:10px!important;align-items:center!important}.nav-group-toggle:hover{border-color:rgba(94,234,212,.36)!important;transform:translateY(-1px)!important}.nav-submenu{overflow:hidden!important;transition:max-height .28s ease,opacity .22s ease!important;max-height:0!important;opacity:.25!important}.nav-group.open .nav-submenu{max-height:320px!important;opacity:1!important}.nav-link{border:none!important;text-decoration:none!important}.cmd-copy{background:linear-gradient(135deg,rgba(15,23,42,.96),rgba(30,41,59,.74))!important;border:1px solid rgba(148,163,184,.18)!important;color:#dbeafe!important;display:flex!important;align-items:center!important;gap:10px!important;padding:12px 14px!important;text-align:left!important;width:100%!important}.cmd-copy code{background:transparent!important;color:#a5f3fc!important;white-space:normal!important;word-break:break-word!important}.cmd-copy:hover{border-color:rgba(94,234,212,.42)!important;box-shadow:0 12px 34px rgba(0,0,0,.24)!important}.form-select,.form-control{background:#0b1220!important;color:#eef5ff!important;border:1px solid rgba(148,163,184,.18)!important;border-radius:15px!important}.form-select option{background:#0b1220!important;color:#eef5ff!important}.network-check-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}.network-check{padding:16px;border-radius:20px;background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.025));border:1px solid rgba(148,163,184,.14)}.network-check span{display:block;color:#93a4bf;font-size:12px;text-transform:uppercase;letter-spacing:.06em}.network-check b{display:block;margin-top:6px;font-size:16px}.hh-ok{color:#86efac!important}.hh-bad{color:#fca5a5!important}.hh-warn{color:#fde68a!important}.design-note{padding:14px 16px;border-radius:18px;background:rgba(34,211,238,.08);border:1px solid rgba(34,211,238,.18);color:#dbeafe}
 </style>';
 }
@@ -271,13 +295,13 @@ html,body{background:#030712!important;color:#eef5ff!important}.sidebar *,.topba
 function render_login(): void
 {
     $flash=flash(); $need2fa=setting_get('security_2fa_enabled','0')==='1'; ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=27" rel="stylesheet"><?= hh_ui_critical_css() ?></head><body class="login-body"><div class="login-shell"><div class="login-card card-glass"><div class="brand-mark"><i class="fa-solid fa-bolt"></i></div><h1>HYPER-HOST</h1><p>powered by memes4u1337</p><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> py-2"><?= e($flash['message']) ?></div><?php endif; ?><form method="post" class="vstack gap-3"><?= csrf_field() ?><input class="form-control form-control-lg" name="username" placeholder="Логин" autofocus required><input class="form-control form-control-lg" type="password" name="password" placeholder="Пароль" required><?php if($need2fa): ?><input class="form-control form-control-lg" name="totp" placeholder="2FA код" inputmode="numeric"><?php endif; ?><button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-right-to-bracket me-2"></i>Войти</button></form></div></div></body></html><?php
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=29" rel="stylesheet"><?= hh_ui_critical_css() ?></head><body class="login-body"><div class="login-shell"><div class="login-card card-glass"><div class="brand-mark"><i class="fa-solid fa-bolt"></i></div><h1>HYPER-HOST</h1><p>powered by memes4u1337</p><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> py-2"><?= e($flash['message']) ?></div><?php endif; ?><form method="post" class="vstack gap-3"><?= csrf_field() ?><input class="form-control form-control-lg" name="username" placeholder="Логин" autofocus required><input class="form-control form-control-lg" type="password" name="password" placeholder="Пароль" required><?php if($need2fa): ?><input class="form-control form-control-lg" name="totp" placeholder="2FA код" inputmode="numeric"><?php endif; ?><button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-right-to-bracket me-2"></i>Войти</button></form></div></div></body></html><?php
 }
 
 function render_page(string $page, array $user): void
 {
     $titles=['dashboard'=>'Панель управления','files'=>'Файловый менеджер','sites'=>'Сайты и папки','ftp'=>'FTP','databases'=>'Базы данных','bots'=>'Боты PM2 24/7','bot_logs'=>'Логи бота','backups'=>'Backup','dns'=>'DNS','network'=>'Сеть и доступ','ssl'=>'SSL','php'=>'PHP-версии','cron'=>'Cron','logs'=>'Логи сайтов','security'=>'Безопасность','settings'=>'Настройки','access'=>'Внешний доступ','disk'=>'Диск и LVM']; $title=$titles[$page]??'Дашборд'; $flash=flash(); ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($title) ?> — HYPER-HOST</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=27" rel="stylesheet"><?= hh_ui_critical_css() ?></head><body class="hh-v17"><div class="app-shell"><aside class="sidebar"><div class="brand"><div class="brand-icon"><i class="fa-solid fa-bolt"></i></div><div><b>HYPER-HOST</b><span>powered by memes4u1337</span></div></div><nav class="nav flex-column gap-2 mt-4">
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($title) ?> — HYPER-HOST</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=29" rel="stylesheet"><?= hh_ui_critical_css() ?></head><body class="hh-v17"><div class="app-shell"><aside class="sidebar"><div class="brand"><div class="brand-icon"><i class="fa-solid fa-bolt"></i></div><div><b>HYPER-HOST</b><span>powered by memes4u1337</span></div></div><nav class="nav flex-column gap-2 mt-4">
 <?= nav_group('Главное','fa-rocket',['dashboard'=>['fa-gauge-high','Дашборд'],'files'=>['fa-folder-open','Файлы'],'settings'=>['fa-sliders','Настройки'],'access'=>['fa-plug-circle-bolt','Доступ'],'disk'=>['fa-hard-drive','Диск']],$page) ?>
 <?= nav_group('Хостинг','fa-server',['sites'=>['fa-globe','Сайты'],'ftp'=>['fa-network-wired','FTP'],'databases'=>['fa-database','Базы'],'php'=>['fa-code','PHP']],$page) ?>
 <?= nav_group('Автоматизация','fa-wand-magic-sparkles',['bots'=>['fa-robot','Боты PM2'],'backups'=>['fa-box-archive','Backup'],'cron'=>['fa-clock','Cron'],'logs'=>['fa-file-lines','Логи']],$page) ?>
@@ -291,39 +315,114 @@ function stat_card(string $icon,string $label,string $value,string $sub=''): voi
 function progress_block(string $label,float $used,float $total): string { $p=percent($used,$total); return '<div class="usage"><div class="d-flex justify-content-between"><span>'.e($label).'</span><b>'.e(human_bytes($used).' / '.human_bytes($total)).'</b></div><div class="progress"><div class="progress-bar" style="width:'.$p.'%"></div></div></div>'; }
 
 function view_dashboard(): void
-{ $stats=run_ctl_json_cached(['stats-json'],8,180); $events=db()->query('SELECT * FROM events ORDER BY id DESC LIMIT 8')->fetchAll(); $sites=table_count('sites'); $ftp=table_count('ftp_accounts'); $bots=table_count('bots'); $backups=table_count('backup_jobs'); ?>
-<div class="dashboard-hero dashboard-hero-v25 mb-4">
-  <div class="hero-orb hero-orb-a"></div><div class="hero-orb hero-orb-b"></div>
-  <div class="hero-main-v25">
-    <div class="eyebrow"><i class="fa-solid fa-gem"></i> HYPER-HOST</div>
-    <h2>Панель управления</h2>
-    <div class="hero-metrics-v25">
-      <span><i class="fa-solid fa-bolt"></i> fast UI</span>
-      <span><i class="fa-solid fa-shield-halved"></i> SSL ready</span>
-      <span><i class="fa-solid fa-robot"></i> bots 24/7</span>
-      <span><i class="fa-solid fa-network-wired"></i> FTP/SFTP</span>
+{
+    $stats = run_ctl_json_live(['stats-json'], 8);
+    $events = db()->query('SELECT * FROM events ORDER BY id DESC LIMIT 8')->fetchAll();
+    $sites = table_count('sites');
+    $ftp = table_count('ftp_accounts');
+    $bots = table_count('bots');
+    $dbs = table_count('databases');
+    $memUsed = (float)($stats['mem_used'] ?? 0);
+    $memTotal = (float)($stats['mem_total'] ?? 0);
+    $diskUsed = (float)($stats['disk_used'] ?? 0);
+    $diskTotal = (float)($stats['disk_total'] ?? 0);
+    $cpuPercent = (float)($stats['cpu_percent'] ?? 0);
+    $loadPercent = (float)($stats['load_percent'] ?? 0);
+    $memPercent = percent($memUsed, $memTotal);
+    $diskPercent = percent($diskUsed, $diskTotal);
+    ?>
+<div class="dashboard-live-v29" data-live-stats>
+  <section class="dashboard-hero dashboard-hero-v29 mb-4">
+    <div class="hero-main-v25">
+      <div class="eyebrow"><i class="fa-solid fa-gauge-high"></i> live dashboard</div>
+      <h2>Панель управления</h2>
+      <div class="hero-metrics-v29">
+        <span><i class="fa-solid fa-globe"></i><b><?= (int)$sites ?></b><em>сайтов</em></span>
+        <span><i class="fa-solid fa-database"></i><b><?= (int)$dbs ?></b><em>баз</em></span>
+        <span><i class="fa-solid fa-robot"></i><b><?= (int)$bots ?></b><em>ботов</em></span>
+        <span><i class="fa-solid fa-network-wired"></i><b><?= (int)$ftp ?></b><em>FTP</em></span>
+      </div>
+    </div>
+    <div class="hero-actions-v25">
+      <a class="hero-action primary" href="/?page=sites"><i class="fa-solid fa-plus"></i><b>Новый сайт</b><small>создать папку и nginx</small></a>
+      <a class="hero-action" href="/?page=bots"><i class="fa-solid fa-robot"></i><b>Боты 24/7</b><small>PM2 live stats</small></a>
+      <a class="hero-action" href="/?page=databases"><i class="fa-solid fa-database"></i><b>MySQL</b><small>базы и доступы</small></a>
+      <a class="hero-action" href="/?page=ftp"><i class="fa-solid fa-folder-tree"></i><b>FTP/SFTP</b><small>подключение к файлам</small></a>
+    </div>
+  </section>
+
+  <?php if(isset($stats['_error'])): ?>
+    <div class="alert alert-warning"><?= e((string)$stats['_error']) ?></div>
+  <?php else: ?>
+  <div class="live-hardware-grid-v29 mb-4">
+    <div class="live-card-v29 cpu-card-v29">
+      <div class="live-card-head"><span><i class="fa-solid fa-microchip"></i> CPU</span><b data-stat="cpuPercent"><?= e((string)$cpuPercent) ?>%</b></div>
+      <div class="live-meter"><div data-stat-bar="cpu" style="width:<?= e((string)$cpuPercent) ?>%"></div></div>
+      <div class="live-meta"><b data-stat="cpuModel"><?= e((string)($stats['cpu_model'] ?? 'unknown')) ?></b><span><span data-stat="cpuCores"><?= e((string)($stats['cpu_cores'] ?? 0)) ?></span> cores · load <span data-stat="loadText"><?= e((string)($stats['load1'] ?? 0)) ?> / <?= e((string)($stats['load5'] ?? 0)) ?> / <?= e((string)($stats['load15'] ?? 0)) ?></span></span></div>
+    </div>
+    <div class="live-card-v29 ram-card-v29">
+      <div class="live-card-head"><span><i class="fa-solid fa-memory"></i> Оперативка</span><b data-stat="memPercent"><?= $memPercent ?>%</b></div>
+      <div class="live-meter"><div data-stat-bar="mem" style="width:<?= $memPercent ?>%"></div></div>
+      <div class="live-meta"><b data-stat="memText"><?= e(human_bytes($memUsed).' / '.human_bytes($memTotal)) ?></b><span>свободно <span data-stat="memAvailable"><?= e(human_bytes((float)($stats['mem_available'] ?? 0))) ?></span> · кэш <span data-stat="memCached"><?= e(human_bytes((float)($stats['mem_cached'] ?? 0))) ?></span></span></div>
+    </div>
+    <div class="live-card-v29 disk-card-v29">
+      <div class="live-card-head"><span><i class="fa-solid fa-hard-drive"></i> Диск /</span><b data-stat="diskPercent"><?= $diskPercent ?>%</b></div>
+      <div class="live-meter"><div data-stat-bar="disk" style="width:<?= $diskPercent ?>%"></div></div>
+      <div class="live-meta"><b data-stat="diskText"><?= e(human_bytes($diskUsed).' / '.human_bytes($diskTotal)) ?></b><span>свободно <span data-stat="diskFree"><?= e(human_bytes((float)($stats['disk_free'] ?? 0))) ?></span></span></div>
+    </div>
+    <div class="live-card-v29 system-card-v29">
+      <div class="live-card-head"><span><i class="fa-solid fa-server"></i> Система</span><b data-stat="uptime"><?= e((string)($stats['uptime'] ?? '—')) ?></b></div>
+      <div class="system-lines-v29">
+        <div><span>Host</span><b data-stat="hostname"><?= e((string)($stats['hostname'] ?? host_name())) ?></b></div>
+        <div><span>PM2</span><b data-stat="pm2Version"><?= e((string)($stats['pm2_version'] ?: 'not installed')) ?></b></div>
+        <div><span>Kernel</span><b data-stat="kernel"><?= e((string)($stats['kernel'] ?? '')) ?></b></div>
+      </div>
     </div>
   </div>
-  <div class="hero-actions hero-actions-v25">
-    <a class="hero-action primary" href="/?page=sites"><i class="fa-solid fa-globe"></i><b>Новый сайт</b><small>домен + папка</small></a>
-    <a class="hero-action" href="/?page=bots"><i class="fa-solid fa-robot"></i><b>Запустить бота</b><small>PM2 24/7</small></a>
-    <a class="hero-action" href="/?page=databases"><i class="fa-solid fa-database"></i><b>База данных</b><small>MySQL/phpMyAdmin</small></a>
-    <a class="hero-action" href="/?page=ftp"><i class="fa-solid fa-folder-tree"></i><b>FTP доступ</b><small>FileZilla</small></a>
+
+  <div class="row g-4 mb-4">
+    <div class="col-xl-8">
+      <div class="panel-card live-disk-panel-v29">
+        <div class="card-title-row"><h2><i class="fa-solid fa-chart-simple me-2"></i>Диски и папки</h2><div class="live-pill"><i class="fa-solid fa-circle"></i> обновляется каждые 3 сек</div></div>
+        <div class="disk-path-grid-v29">
+          <?php foreach(['root'=>'Корень /','sites'=>'Сайты','bots'=>'Боты','ftp'=>'FTP','backups'=>'Backup'] as $key=>$label): $d=$stats['disks'][$key]??[]; $pct=(float)($d['percent']??0); ?>
+            <div class="disk-path-v29" data-disk-path="<?= e($key) ?>">
+              <div><span><?= e($label) ?></span><b data-disk-field="text"><?= e(human_bytes((float)($d['used']??0)).' / '.human_bytes((float)($d['total']??0))) ?></b></div>
+              <div class="mini-meter"><i data-disk-field="bar" style="width:<?= e((string)$pct) ?>%"></i></div>
+              <small data-disk-field="free">свободно <?= e(human_bytes((float)($d['free']??0))) ?></small>
+            </div>
+          <?php endforeach; ?>
+        </div>
+      </div>
+    </div>
+    <div class="col-xl-4">
+      <div class="panel-card service-live-panel-v29">
+        <h2><i class="fa-solid fa-heart-pulse me-2"></i>Сервисы</h2>
+        <div class="service-row-v29" data-services>
+          <?php foreach(($stats['services']??[]) as $name=>$st): ?>
+            <span data-service="<?= e((string)$name) ?>" class="service-chip-v29 <?= $st==='active'?'ok':'bad' ?>"><i class="fa-solid fa-circle"></i><?= e($name) ?>: <?= e((string)$st) ?></span>
+          <?php endforeach; ?>
+        </div>
+      </div>
+    </div>
+  </div>
+  <?php endif; ?>
+
+  <div class="row g-4">
+    <div class="col-xl-8">
+      <div class="quick-grid">
+        <a class="quick-card" href="/?page=files"><i class="fa-solid fa-folder-open"></i><b>Файлы</b><span>сайты, боты, FTP</span></a>
+        <a class="quick-card" href="/?page=access"><i class="fa-solid fa-plug-circle-bolt"></i><b>Доступ</b><span>роутер, SSH, порты</span></a>
+        <a class="quick-card" href="/?page=disk"><i class="fa-solid fa-hard-drive"></i><b>Диск</b><span>LVM и свободное место</span></a>
+        <a class="quick-card" href="/?page=ssl"><i class="fa-solid fa-shield-halved"></i><b>SSL</b><span>сертификаты доменов</span></a>
+      </div>
+    </div>
+    <div class="col-xl-4">
+      <div class="panel-card"><h2><i class="fa-solid fa-clock-rotate-left me-2"></i>Последние события</h2><?php foreach($events as $ev): ?><div class="event"><b><?= e($ev['type']) ?></b><span><?= e($ev['message']) ?></span><small><?= e($ev['created_at']) ?></small></div><?php endforeach; if(!$events): ?><div class="empty">Событий пока нет</div><?php endif; ?></div>
+    </div>
   </div>
 </div>
-<div class="row g-3 mb-4">
-  <div class="col-md-3"><?php stat_card('fa-globe','Сайты',(string)$sites,'домены') ?></div>
-  <div class="col-md-3"><?php stat_card('fa-network-wired','FTP',(string)$ftp,'аккаунты') ?></div>
-  <div class="col-md-3"><?php stat_card('fa-robot','Боты',(string)$bots,'PM2 24/7') ?></div>
-  <div class="col-md-3"><?php stat_card('fa-box-archive','Backup',(string)$backups,'задачи') ?></div>
-</div>
-<div class="quick-grid mb-4">
-  <a class="quick-card" href="/?page=files"><i class="fa-solid fa-folder-open"></i><b>Файлы</b><span>Загрузка и редактор</span></a>
-  <a class="quick-card" href="/?page=databases"><i class="fa-solid fa-database"></i><b>Базы</b><span>MySQL/phpMyAdmin</span></a>
-  <a class="quick-card" href="/?page=backups"><i class="fa-solid fa-box-archive"></i><b>Backup</b><span>Архивы и расписание</span></a>
-  <a class="quick-card" href="/?page=settings"><i class="fa-solid fa-screwdriver-wrench"></i><b>Ремонт</b><span>Права и сервисы</span></a>
-</div>
-<div class="row g-4"><div class="col-xl-8"><div class="panel-card"><div class="card-title-row"><h2><i class="fa-solid fa-microchip me-2"></i>Железо сервера</h2><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="repair_panel"><button class="btn btn-primary btn-sm"><i class="fa-solid fa-screwdriver-wrench me-1"></i>Починить</button></form></div><?php if(isset($stats['_error'])): ?><div class="alert alert-warning"><?= e($stats['_error']) ?></div><?php else: ?><div class="hardware-grid"><div><span>CPU</span><b><?= e((string)$stats['cpu_model']) ?></b></div><div><span>Ядра</span><b><?= e((string)$stats['cpu_cores']) ?></b></div><div><span>Uptime</span><b><?= e((string)$stats['uptime']) ?></b></div><div><span>PM2</span><b><?= e((string)($stats['pm2_version']?:'not installed')) ?></b></div></div><?= progress_block('RAM',(float)$stats['mem_used'],(float)$stats['mem_total']) ?><?= progress_block('Диск /',(float)$stats['disk_used'],(float)$stats['disk_total']) ?><div class="service-row mt-3"><?php foreach(($stats['services']??[]) as $name=>$st): ?><span class="badge rounded-pill text-bg-<?= $st==='active'?'success':'danger' ?>"><?= e($name) ?>: <?= e((string)$st) ?></span><?php endforeach; ?></div><?php endif; ?></div></div><div class="col-xl-4"><div class="panel-card"><h2><i class="fa-solid fa-clock-rotate-left me-2"></i>Последние события</h2><?php foreach($events as $ev): ?><div class="event"><b><?= e($ev['type']) ?></b><span><?= e($ev['message']) ?></span><small><?= e($ev['created_at']) ?></small></div><?php endforeach; if(!$events): ?><div class="empty">Событий пока нет</div><?php endif; ?></div></div></div><?php }
+<?php }
 
 function view_files(): void
 { $rootKey=(string)($_GET['root']??'sites'); $rel=safe_rel_path((string)($_GET['path']??'')); [$rootKey,$root,$rel,$path]=fm_resolve($rootKey,$rel); $items=is_dir($path)?array_values(array_diff(scandir($path)?:[],['.','..'])):[]; sort($items); $currentDir=is_dir($path)?$rel:dirname($rel); if($currentDir==='.')$currentDir=''; ?>
@@ -517,70 +616,84 @@ function view_ftp(): void
 { $rows=db()->query('SELECT * FROM ftp_accounts ORDER BY id DESC')->fetchAll(); $gen=default_ftp_password(); ?>
 <div class="ftp-layout-v25 row g-4"><div class="col-lg-4"><div class="panel-card ftp-create-card"><div class="eyebrow"><i class="fa-solid fa-folder-tree"></i> FTP/SFTP доступ</div><h2>Создать аккаунт</h2><p class="muted">Для FileZilla с другого ПК используй хост <b><?= e(setting_get('public_ip_override', host_name())) ?></b> или домен панели. Внутри будет <code>common/sites</code> и <code>common/bots</code>.</p><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_ftp"><input class="form-control" name="username" placeholder="hyperhost" required><div class="input-group"><input class="form-control" name="password" id="ftpPass" value="<?= e($gen) ?>" minlength="8" required><button class="btn btn-outline-light" type="button" onclick="copyValue('ftpPass')"><i class="fa-regular fa-copy"></i></button></div><button class="btn btn-primary btn-lg"><i class="fa-solid fa-plus me-2"></i>Создать FTP</button></form><form method="post" class="mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="repair_panel"><button class="btn btn-soft w-100"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Починить FTP/доступ</button></form></div></div><div class="col-lg-8"><div class="ftp-help-v25 mb-3"><div><i class="fa-solid fa-circle-nodes"></i><b>С другого ПК в этой сети</b><span>Хост: <?= e(host_name()) ?>, порт 21</span></div><div><i class="fa-solid fa-earth-europe"></i><b>Из интернета</b><span>Хост: <?= e(setting_get('public_ip_override', host_name())) ?>, порты 21 и 40000-40100 на роутере</span></div><div><i class="fa-solid fa-terminal"></i><b>SSH/SFTP</b><span>Порт 22, сервер: <?= e(host_name()) ?></span></div></div><div class="row g-3"><?php foreach($rows as $r): ?><div class="col-md-6"><div class="ftp-card ftp-card-v25"><h3><i class="fa-solid fa-user-lock me-2"></i><?= e($r['username']) ?></h3><div class="cred"><span>FTP хост</span><code><?= e(setting_get('public_ip_override', $r['host']?:host_name())) ?></code></div><div class="cred"><span>Локальный хост</span><code><?= e(host_name()) ?></code></div><div class="cred"><span>Логин</span><code><?= e($r['username']) ?></code></div><div class="cred"><span>Пароль</span><code><?= e($r['password_plain']?:'задать новый') ?></code></div><div class="ftp-tags"><span>Port 21</span><span>Passive 40000-40100</span><span>common/sites</span></div><div class="d-flex gap-2 mt-3 flex-wrap"><button class="btn btn-sm btn-light" onclick="copyText('Host: <?= e(setting_get('public_ip_override', $r['host']?:host_name())) ?>\nLogin: <?= e($r['username']) ?>\nPassword: <?= e($r['password_plain']) ?>\nPort: 21\nPassive: 40000-40100')">Копировать</button><button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#ftp<?= (int)$r['id'] ?>">Пароль</button><form method="post" onsubmit="return confirm('Удалить FTP?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_ftp"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-danger">Удалить</button></form></div></div></div><div class="modal fade hh-modal" id="ftp<?= (int)$r['id'] ?>"><div class="modal-dialog modal-dialog-centered"><div class="modal-content"><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="reset_ftp_password"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><div class="modal-header"><h5>Новый пароль FTP</h5><button class="btn-close" data-bs-dismiss="modal" type="button"></button></div><div class="modal-body"><input class="form-control" name="password" value="<?= e(default_ftp_password()) ?>" minlength="8" required></div><div class="modal-footer"><button class="btn btn-primary">Сохранить</button></div></form></div></div></div><?php endforeach; if(!$rows): ?><div class="empty">FTP аккаунтов пока нет</div><?php endif; ?></div></div></div><?php }
 
-function pm2_status_map(): array { $d=run_ctl_json_cached(['bot-list-json'],8,120); $m=[]; if(!isset($d['_error'])) foreach($d as $p) $m[$p['name']]=$p; return $m; }
+function pm2_status_map(): array { $d=run_ctl_json_live(['bot-list-json'],8); $m=[]; if(!isset($d['_error'])) foreach($d as $p) $m[(string)$p['name']]=$p; return $m; }
 function view_bots(): void
 {
   $bots=db()->query('SELECT * FROM bots ORDER BY id DESC')->fetchAll();
   $status=pm2_status_map();
   $modals=[];
   ?>
-<div class="row g-4">
-  <div class="col-lg-4">
-    <div class="panel-card bot-upload-card">
-      <div class="eyebrow"><i class="fa-solid fa-robot"></i> PM2 24/7</div>
-      <h2>Загрузить бота</h2>
-      <form method="post" enctype="multipart/form-data" class="vstack gap-3">
-        <?= csrf_field() ?><input type="hidden" name="action" value="create_bot">
-        <input class="form-control" name="name" placeholder="HYPER-HOST-BOT" required>
-        <div class="row g-2"><div class="col-5"><select class="form-select" name="runtime"><option value="python">Python</option><option value="node">Node.js</option><option value="php">PHP</option><option value="custom">Custom</option></select></div><div class="col-7"><input class="form-control" name="main_file" value="bot.py" placeholder="bot.py"></div></div>
-        <label class="upload-mini"><span>Основной файл</span><input class="form-control" type="file" name="bot_file" accept=".py,.js,.php,.sh,.txt"></label>
-        <label class="upload-mini"><span>.env</span><input class="form-control" type="file" name="env_file" accept=".env,.txt"></label>
-        <label class="upload-mini"><span>requirements.txt / package.json</span><input class="form-control" type="file" name="requirements_file" accept=".txt,.json"></label>
-        <input class="form-control" type="number" name="memory_limit_mb" placeholder="RAM лимит, MB, например 512">
-        <button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-play me-2"></i>Загрузить и запустить</button>
-      </form>
+<div class="bots-live-page-v29" data-live-bots>
+  <div class="row g-4">
+    <div class="col-lg-4">
+      <div class="panel-card bot-upload-card bot-upload-card-v29">
+        <div class="eyebrow"><i class="fa-solid fa-robot"></i> PM2 24/7</div>
+        <h2>Загрузить бота</h2>
+        <form method="post" enctype="multipart/form-data" class="vstack gap-3">
+          <?= csrf_field() ?><input type="hidden" name="action" value="create_bot">
+          <input class="form-control" name="name" placeholder="HYPER-HOST-BOT" required>
+          <div class="row g-2"><div class="col-5"><select class="form-select" name="runtime"><option value="python">Python</option><option value="node">Node.js</option><option value="php">PHP</option><option value="custom">Custom</option></select></div><div class="col-7"><input class="form-control" name="main_file" value="bot.py" placeholder="bot.py"></div></div>
+          <label class="upload-mini"><span>Основной файл</span><input class="form-control" type="file" name="bot_file" accept=".py,.js,.php,.sh,.txt"></label>
+          <label class="upload-mini"><span>.env</span><input class="form-control" type="file" name="env_file" accept=".env,.txt"></label>
+          <label class="upload-mini"><span>requirements.txt / package.json</span><input class="form-control" type="file" name="requirements_file" accept=".txt,.json"></label>
+          <input class="form-control" type="number" name="memory_limit_mb" placeholder="RAM лимит, MB, например 512">
+          <button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-play me-2"></i>Загрузить и запустить</button>
+        </form>
+        <form method="post" class="mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="pm2_persist"><button class="btn btn-soft w-100"><i class="fa-solid fa-shield-heart me-2"></i>Включить 24/7</button></form>
+      </div>
     </div>
-  </div>
-  <div class="col-lg-8">
-    <div class="panel-card">
-      <div class="card-title-row flex-wrap"><h2><i class="fa-solid fa-list-check me-2"></i>Боты</h2><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="pm2_persist"><button class="btn btn-soft btn-sm"><i class="fa-solid fa-shield-heart me-1"></i>Включить 24/7</button></form></div>
-      <div class="bot-grid-v24">
-      <?php foreach($bots as $b): $pm=$status[$b['name']]??[]; $st=$pm['status']??'not_found'; $files=$pm['files']??[]; ob_start(); ?>
-        <div class="modal fade hh-modal bot-delete-modal" id="deleteBot<?= (int)$b['id'] ?>" tabindex="-1" aria-hidden="true">
-          <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-            <div class="modal-header"><div><div class="eyebrow"><i class="fa-solid fa-trash"></i> Удаление</div><h5 class="modal-title mb-0"><?= e($b['name']) ?></h5></div><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
-            <div class="modal-body">
-              <div class="design-note mb-3">Выбери: убрать только PM2-процесс или удалить полностью вместе с файлами.</div>
-              <div class="small muted mb-3">Папка: <code><?= e($b['path']) ?></code></div>
-              <form method="post" class="mb-3">
-                <?= csrf_field() ?><input type="hidden" name="action" value="delete_bot"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>">
-                <button class="btn btn-outline-warning w-100">Удалить только из PM2, файлы оставить</button>
-              </form>
-              <form method="post" class="vstack gap-3">
-                <?= csrf_field() ?><input type="hidden" name="action" value="delete_bot"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="delete_files" value="1">
-                <label class="form-label">Подтверди имя бота:</label>
-                <input class="form-control form-control-lg" name="confirm_name" placeholder="<?= e($b['name']) ?>" autocomplete="off" required>
-                <button class="btn btn-danger btn-lg w-100">Удалить PM2 + файлы с сервера</button>
-              </form>
-            </div>
-          </div></div>
-        </div>
-      <?php $modals[] = ob_get_clean(); ?>
-        <div class="bot-card-v24">
-          <div class="bot-head"><div><b><?= e($b['name']) ?></b><span><?= e($b['runtime']) ?> / <?= e($b['main_file']?:'bot.py') ?></span></div><span class="bot-status <?= $st==='online'?'ok':'bad' ?>"><?= e($st) ?></span></div>
-          <div class="bot-path"><code><?= e($b['path']) ?></code></div>
-          <div class="bot-files"><?php if($files): foreach($files as $f): ?><span><?= e($f) ?></span><?php endforeach; else: ?><em>файлы не прочитаны</em><?php endif; ?></div>
-          <div class="bot-actions">
-            <?php foreach(['start'=>'Start','stop'=>'Stop','restart'=>'Restart','install'=>'Deps'] as $cmd=>$label): ?>
-              <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="bot_action"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="bot_action" value="<?= e($cmd) ?>"><button class="btn btn-sm btn-soft"><?= e($label) ?></button></form>
-            <?php endforeach; ?>
-            <form method="post" onsubmit="return confirm('Остановить локальные дубли этого бота?')"><?= csrf_field() ?><input type="hidden" name="action" value="bot_action"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="bot_action" value="kill-conflicts"><button class="btn btn-sm btn-outline-warning">Fix</button></form>
-            <a class="btn btn-sm btn-soft" href="/?page=bot_logs&id=<?= (int)$b['id'] ?>">Logs</a>
-            <a class="btn btn-sm btn-soft" href="/?page=files&root=bots&path=<?= e($b['name']) ?>">Files</a>
-            <button type="button" class="btn btn-sm btn-outline-danger" data-bs-toggle="modal" data-bs-target="#deleteBot<?= (int)$b['id'] ?>">Delete</button>
+    <div class="col-lg-8">
+      <div class="panel-card bots-panel-v29">
+        <div class="card-title-row flex-wrap"><h2><i class="fa-solid fa-list-check me-2"></i>Боты — live статистика</h2><div class="live-pill"><i class="fa-solid fa-circle"></i> обновляется без перезагрузки</div></div>
+        <div class="bot-grid-v29">
+        <?php foreach($bots as $b): $pm=$status[$b['name']]??[]; $st=(string)($pm['status']??'not_found'); $files=$pm['files']??[]; $mem=(float)($pm['memory']??0); $cpu=(float)($pm['cpu_percent']??($pm['cpu']??0)); ob_start(); ?>
+          <div class="modal fade hh-modal bot-delete-modal" id="deleteBot<?= (int)$b['id'] ?>" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+              <div class="modal-header"><div><div class="eyebrow"><i class="fa-solid fa-trash"></i> Удаление</div><h5 class="modal-title mb-0"><?= e($b['name']) ?></h5></div><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+              <div class="modal-body">
+                <div class="design-note mb-3">Выбери: убрать только PM2-процесс или удалить полностью вместе с файлами.</div>
+                <div class="small muted mb-3">Папка: <code><?= e($b['path']) ?></code></div>
+                <form method="post" class="mb-3">
+                  <?= csrf_field() ?><input type="hidden" name="action" value="delete_bot"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>">
+                  <button class="btn btn-outline-warning w-100">Удалить только из PM2, файлы оставить</button>
+                </form>
+                <form method="post" class="vstack gap-3">
+                  <?= csrf_field() ?><input type="hidden" name="action" value="delete_bot"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="delete_files" value="1">
+                  <label class="form-label">Подтверди имя бота:</label>
+                  <input class="form-control form-control-lg" name="confirm_name" placeholder="<?= e($b['name']) ?>" autocomplete="off" required>
+                  <button class="btn btn-danger btn-lg w-100">Удалить PM2 + файлы с сервера</button>
+                </form>
+              </div>
+            </div></div>
           </div>
+        <?php $modals[] = ob_get_clean(); ?>
+          <div class="bot-card-v29 bot-card-live" data-bot-name="<?= e($b['name']) ?>">
+            <div class="bot-top-v29">
+              <div class="bot-avatar-v29"><i class="fa-solid fa-robot"></i></div>
+              <div class="bot-title-v29"><b><?= e($b['name']) ?></b><span><?= e($b['runtime']) ?> / <?= e($b['main_file']?:'bot.py') ?></span></div>
+              <span class="bot-status-v29 <?= $st==='online'?'ok':'bad' ?>" data-bot-status><?= e($st) ?></span>
+            </div>
+            <div class="bot-live-stats-v29">
+              <div><span>RAM</span><b data-bot-memory><?= e(human_bytes($mem)) ?></b></div>
+              <div><span>CPU</span><b data-bot-cpu><?= e((string)$cpu) ?>%</b></div>
+              <div><span>UPTIME</span><b data-bot-uptime><?= e((string)($pm['uptime']??'—')) ?></b></div>
+              <div><span>RESTARTS</span><b data-bot-restarts><?= e((string)($pm['restarts']??0)) ?></b></div>
+            </div>
+            <div class="bot-meter-row-v29"><span>Нагрузка RAM</span><div class="mini-meter"><i data-bot-memory-bar style="width:<?= min(100, max(2, round($mem/1024/1024/10))) ?>%"></i></div></div>
+            <div class="bot-path"><code><?= e($b['path']) ?></code></div>
+            <div class="bot-files"><?php if($files): foreach($files as $f): ?><span><?= e($f) ?></span><?php endforeach; else: ?><em>файлы не прочитаны</em><?php endif; ?></div>
+            <div class="bot-actions">
+              <?php foreach(['start'=>'Start','stop'=>'Stop','restart'=>'Restart','install'=>'Deps'] as $cmd=>$label): ?>
+                <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="bot_action"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="bot_action" value="<?= e($cmd) ?>"><button class="btn btn-sm btn-soft"><?= e($label) ?></button></form>
+              <?php endforeach; ?>
+              <form method="post" onsubmit="return confirm('Остановить локальные дубли этого бота?')"><?= csrf_field() ?><input type="hidden" name="action" value="bot_action"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="bot_action" value="kill-conflicts"><button class="btn btn-sm btn-outline-warning">Fix</button></form>
+              <a class="btn btn-sm btn-soft" href="/?page=bot_logs&id=<?= (int)$b['id'] ?>">Logs</a>
+              <a class="btn btn-sm btn-soft" href="/?page=files&root=bots&path=<?= e($b['name']) ?>">Files</a>
+              <button type="button" class="btn btn-sm btn-outline-danger" data-bs-toggle="modal" data-bs-target="#deleteBot<?= (int)$b['id'] ?>">Delete</button>
+            </div>
+          </div>
+        <?php endforeach; if(!$bots): ?><div class="empty">Ботов пока нет</div><?php endif; ?>
         </div>
-      <?php endforeach; if(!$bots): ?><div class="empty">Ботов пока нет</div><?php endif; ?>
       </div>
     </div>
   </div>

@@ -265,6 +265,13 @@ function run_ctl_json(array $args, int $timeout = 60): array
 }
 
 
+function run_ctl_json_live(array $args, int $timeout = 8): array
+{
+    // HYPER-HOST v29: живые данные для dashboard/PM2 без старого кэша.
+    return run_ctl_json($args, $timeout);
+}
+
+
 function hh_cache_dir(): string
 {
     $dir = (string)app_config('cache_dir', '/opt/hyper-host/cache');
@@ -281,6 +288,9 @@ function hh_cache_key(array $args): string
 
 function run_ctl_json_cached(array $args, int $timeout = 20, int $ttl = 8): array
 {
+    if ($ttl <= 0) {
+        return run_ctl_json_live($args, $timeout);
+    }
     // HYPER-HOST v18 fast mode:
     // тяжёлые shell-проверки больше не запускаются на каждое открытие вкладки.
     // Если кэш свежий — отдаём его сразу. Если команда временно зависла/упала —
