@@ -295,6 +295,14 @@ function run_ctl_json_cached(array $args, int $timeout = 20, int $ttl = 8): arra
     // тяжёлые shell-проверки больше не запускаются на каждое открытие вкладки.
     // Если кэш свежий — отдаём его сразу. Если команда временно зависла/упала —
     // отдаём старый кэш до 30 минут, чтобы панель не тормозила и не висела.
+    //
+    // v31 fix: некоторые команды (php-list-json, ssl-status-json) возвращают
+    // JSON-СПИСОК, а не объект. Раньше сюда дописывались служебные ключи
+    // _cached/_cache_age прямо в массив — список из индексов 0,1,2 превращался
+    // в смешанный массив, и foreach() по нему отдавал "true"/число вместо
+    // строки в последней итерации (спискок PHP-версий/SSL сертификатов ломался,
+    // в логе сыпались "Trying to access array offset on bool/int"). Теперь
+    // метаданные добавляются только к ассоциативным массивам (объектам).
     $ttl = max($ttl, 60);
     $staleTtl = max($ttl, 1800);
     $dir = hh_cache_dir();
@@ -304,29 +312,40 @@ function run_ctl_json_cached(array $args, int $timeout = 20, int $ttl = 8): arra
         $data = json_decode((string)$raw, true);
         return is_array($data) ? $data : null;
     };
+    $tagMeta = static function(array $data, bool $stale, int $age): array {
+        if (array_is_list($data)) {
+            return $data;
+        }
+        $data['_cached'] = true;
+        if ($stale) $data['_stale'] = true;
+        $data['_cache_age'] = $age;
+        return $data;
+    };
     if (is_file($file)) {
         $age = time() - filemtime($file);
         if ($ttl > 0 && $age <= $ttl) {
             $data = $readCached($file);
             if (is_array($data)) {
-                $data['_cached'] = true;
-                $data['_cache_age'] = $age;
-                return $data;
+                return $tagMeta($data, false, $age);
             }
         }
     }
     $data = run_ctl_json($args, min($timeout, 12));
     if (!isset($data['_error'])) {
-        @file_put_contents($file, json_encode($data, JSON_UNESCAPED_UNICODE));
+        // Атомарная запись: пишем во временный файл и переименовываем.
+        // Раньше при двух одновременных запросах один поток мог читать файл кэша
+        // в момент, когда другой ещё дописывает его — json_decode() получал
+        // обрезанный JSON и отдавал не-массив, что роняло страницу PHP-версий/Сайтов.
+        $tmp = $file . '.' . getmypid() . '.tmp';
+        if (@file_put_contents($tmp, json_encode($data, JSON_UNESCAPED_UNICODE)) !== false) {
+            @rename($tmp, $file);
+        }
         return $data;
     }
     if (is_file($file) && (time() - filemtime($file) <= $staleTtl)) {
         $cached = $readCached($file);
         if (is_array($cached)) {
-            $cached['_cached'] = true;
-            $cached['_stale'] = true;
-            $cached['_cache_age'] = time() - filemtime($file);
-            return $cached;
+            return $tagMeta($cached, true, time() - filemtime($file));
         }
     }
     return $data;

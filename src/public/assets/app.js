@@ -12,15 +12,37 @@ document.addEventListener('click', function(e){
   if(modal.parentElement !== document.body) document.body.appendChild(modal);
 }, true);
 
-// HYPER-HOST v16: animated sidebar groups
+// HYPER-HOST v31: icon-rail sidebar — sliding indicator + animated flyout switch.
 (function(){
-  document.addEventListener('click', function(e){
-    const btn=e.target.closest('.nav-group-toggle');
-    if(!btn) return;
-    const group=btn.closest('.nav-group');
-    if(!group) return;
-    group.classList.toggle('open');
-  });
+  function init(){
+    const rail = document.querySelector('.rail');
+    if(!rail) return;
+    const indicator = rail.querySelector('.rail-indicator');
+    const buttons = Array.from(rail.querySelectorAll('.rail-btn[data-cat]'));
+    const panels = Array.from(document.querySelectorAll('.flyout-panel'));
+
+    function moveIndicator(btn){
+      if(!indicator || !btn) return;
+      indicator.style.transform = `translateY(${btn.offsetTop}px)`;
+      const accent = getComputedStyle(btn).getPropertyValue('--cat-accent').trim();
+      if(accent) indicator.style.setProperty('--cat-color', accent);
+    }
+    function setActive(cat){
+      buttons.forEach(b => b.classList.toggle('active', b.dataset.cat === cat));
+      panels.forEach(p => p.classList.toggle('active', p.dataset.panel === cat));
+      const activeBtn = buttons.find(b => b.dataset.cat === cat);
+      moveIndicator(activeBtn);
+    }
+    buttons.forEach(b => b.addEventListener('click', () => setActive(b.dataset.cat)));
+    window.addEventListener('resize', () => {
+      const activeBtn = buttons.find(b => b.classList.contains('active'));
+      if(activeBtn) moveIndicator(activeBtn);
+    });
+    // initial position (server already marks correct .active button/panel for current page)
+    const initial = buttons.find(b => b.classList.contains('active')) || buttons[0];
+    if(initial) requestAnimationFrame(() => moveIndicator(initial));
+  }
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();
 
 // HYPER-HOST v30: live dashboard + PM2 stats without page reload.
@@ -38,7 +60,14 @@ document.addEventListener('click', function(e){
   const pct = (used,total) => total > 0 ? Math.max(0, Math.min(100, Math.round((used/total)*100))) : 0;
   const q = (sel,root=document) => root.querySelector(sel);
   const qa = (sel,root=document) => Array.from(root.querySelectorAll(sel));
-  const setText = (name, value) => { const el=q(`[data-stat="${name}"]`); if(el) el.textContent = value; };
+  const setNode = (el, value) => {
+    if(!el || el.textContent === value) return;
+    el.textContent = value;
+    el.classList.remove('flash');
+    void el.offsetWidth; // restart animation
+    el.classList.add('flash');
+  };
+  const setText = (name, value) => setNode(q(`[data-stat="${name}"]`), value);
   const setBar = (name, value) => { const el=q(`[data-stat-bar="${name}"]`); if(el) el.style.width = Math.max(0, Math.min(100, Number(value)||0)) + '%'; };
 
   async function fetchJson(url, controllerRef){
@@ -89,8 +118,8 @@ document.addEventListener('click', function(e){
           const text=q('[data-disk-field="text"]', row);
           const free=q('[data-disk-field="free"]', row);
           const bar=q('[data-disk-field="bar"]', row);
-          if(text) text.textContent = `${fmtBytes(val.used)} / ${fmtBytes(val.total)}`;
-          if(free) free.textContent = `свободно ${fmtBytes(val.free)}`;
+          setNode(text, `${fmtBytes(val.used)} / ${fmtBytes(val.total)}`);
+          setNode(free, `свободно ${fmtBytes(val.free)}`);
           if(bar) bar.style.width = Math.max(0, Math.min(100, Number(val.percent)||0)) + '%';
         });
       }
@@ -124,10 +153,10 @@ document.addEventListener('click', function(e){
         }
         const mem = Number(b.memory || 0);
         const cpu = Number(b.cpu_percent ?? b.cpu ?? 0);
-        const memEl = q('[data-bot-memory]', card); if(memEl) memEl.textContent = fmtBytes(mem);
-        const cpuEl = q('[data-bot-cpu]', card); if(cpuEl) cpuEl.textContent = cpu.toFixed(1).replace('.0','') + '%';
-        const upEl = q('[data-bot-uptime]', card); if(upEl) upEl.textContent = b.uptime || '—';
-        const reEl = q('[data-bot-restarts]', card); if(reEl) reEl.textContent = String(b.restarts ?? 0);
+        setNode(q('[data-bot-memory]', card), fmtBytes(mem));
+        setNode(q('[data-bot-cpu]', card), cpu.toFixed(1).replace('.0','') + '%');
+        setNode(q('[data-bot-uptime]', card), b.uptime || '—');
+        setNode(q('[data-bot-restarts]', card), String(b.restarts ?? 0));
         const bar = q('[data-bot-memory-bar]', card); if(bar) bar.style.width = Math.max(2, Math.min(100, mem / 1024 / 1024 / 10)) + '%';
       });
       return true;

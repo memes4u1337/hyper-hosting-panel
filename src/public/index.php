@@ -285,46 +285,103 @@ function fm_delete(): void
 function rrmdir(string $path): void { if(is_dir($path)&&!is_link($path)){ foreach(scandir($path)?:[] as $i){ if($i==='.'||$i==='..') continue; rrmdir($path.'/'.$i);} if(!@rmdir($path)){ run_ctl(['repair'],180); @rmdir($path); } } else { if(!@unlink($path)){ run_ctl(['repair'],180); @unlink($path); } } }
 
 
-function hh_ui_critical_css(): string
+function hh_app_version(): string { return '1.0'; }
+
+function hh_nav_config(): array
 {
-    // HYPER-HOST v30: все стили теперь живут в одном файле /assets/style.css.
-    // Инлайновый дублирующий critical-CSS убран — меньше байт на каждый запрос страницы,
-    // меньше конфликтующих !important, быстрее первый рендер и парсинг CSSOM.
-    return '';
+    return [
+        'main'    => ['label'=>'Главное','icon'=>'fa-rocket','accent'=>'#4f7dff','items'=>['dashboard'=>['fa-gauge-high','Дашборд'],'files'=>['fa-folder-open','Файлы'],'settings'=>['fa-sliders','Настройки'],'access'=>['fa-plug-circle-bolt','Доступ'],'disk'=>['fa-hard-drive','Диск']]],
+        'hosting' => ['label'=>'Хостинг','icon'=>'fa-server','accent'=>'#22d3ee','items'=>['sites'=>['fa-globe','Сайты'],'ftp'=>['fa-network-wired','FTP'],'databases'=>['fa-database','Базы'],'php'=>['fa-code','PHP']]],
+        'auto'    => ['label'=>'Автоматизация','icon'=>'fa-wand-magic-sparkles','accent'=>'#a855f7','items'=>['bots'=>['fa-robot','Боты PM2'],'backups'=>['fa-box-archive','Backup'],'cron'=>['fa-clock','Cron'],'logs'=>['fa-file-lines','Логи']]],
+        'secure'  => ['label'=>'Домены и защита','icon'=>'fa-shield-halved','accent'=>'#f472b6','items'=>['dns'=>['fa-diagram-project','DNS'],'network'=>['fa-tower-broadcast','Сеть'],'ssl'=>['fa-shield-halved','SSL'],'security'=>['fa-lock','Безопасность']]],
+    ];
 }
 
-function hh_app_version(): string { return '1.0'; }
+function hh_active_category(string $page): string
+{
+    foreach (hh_nav_config() as $key => $cat) { if (isset($cat['items'][$page])) return $key; }
+    return 'main';
+}
+
+function nav_item(string $id,string $icon,string $label,string $page): string { $active=$id===$page?' active':''; return '<a class="nav-link'.$active.'" href="/?page='.e($id).'"><i class="fa-solid '.e($icon).'"></i><span>'.e($label).'</span></a>'; }
 
 function render_login(): void
 {
     $flash=flash(); $need2fa=setting_get('security_2fa_enabled','0')==='1'; ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=30" rel="stylesheet"><?= hh_ui_critical_css() ?></head><body class="login-body"><div class="login-shell"><div class="login-card card-glass"><div class="brand-mark"><i class="fa-solid fa-bolt"></i></div><h1>HYPER-HOST</h1><p>powered by memes4u1337</p><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> py-2"><?= e($flash['message']) ?></div><?php endif; ?><form method="post" class="vstack gap-3"><?= csrf_field() ?><input class="form-control form-control-lg" name="username" placeholder="Логин" autofocus required><input class="form-control form-control-lg" type="password" name="password" placeholder="Пароль" required><?php if($need2fa): ?><input class="form-control form-control-lg" name="totp" placeholder="2FA код" inputmode="numeric"><?php endif; ?><button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-right-to-bracket me-2"></i>Войти</button></form></div></div></body></html><?php
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=31" rel="stylesheet"></head><body class="login-body">
+<div class="login-orb login-orb-a"></div><div class="login-orb login-orb-b"></div><div class="login-orb login-orb-c"></div>
+<div class="login-shell-v2">
+  <div class="login-side">
+    <div class="login-side-logo"><div class="brand-mark"><i class="fa-solid fa-bolt"></i></div><b>HYPER-HOST</b></div>
+    <h1>Твой сервер.<br>Под полным контролем.</h1>
+    <p>Сайты, боты, базы данных, FTP и SSL — в одной панели, которая живёт на твоём железе.</p>
+    <div class="login-side-points">
+      <div><i class="fa-solid fa-bolt"></i><span>Живая статистика CPU / RAM / диска</span></div>
+      <div><i class="fa-solid fa-robot"></i><span>PM2-боты 24/7 с автозапуском</span></div>
+      <div><i class="fa-solid fa-shield-halved"></i><span>SSL, 2FA и IP allowlist из коробки</span></div>
+    </div>
+    <div class="login-side-foot">powered by memes4u1337</div>
+  </div>
+  <div class="login-form-wrap">
+    <div class="login-card card-glass">
+      <div class="brand-mark login-card-mark"><i class="fa-solid fa-bolt"></i></div>
+      <h2>Вход в панель</h2>
+      <p>HYPER-HOST control panel</p>
+      <?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> py-2"><?= e($flash['message']) ?></div><?php endif; ?>
+      <form method="post" class="vstack gap-3"><?= csrf_field() ?>
+        <label class="hh-field"><span>Логин</span><input class="form-control form-control-lg" name="username" placeholder="admin" autofocus required></label>
+        <label class="hh-field"><span>Пароль</span><input class="form-control form-control-lg" type="password" name="password" placeholder="••••••••" required></label>
+        <?php if($need2fa): ?><label class="hh-field"><span>2FA код</span><input class="form-control form-control-lg" name="totp" placeholder="123456" inputmode="numeric"></label><?php endif; ?>
+        <button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-right-to-bracket me-2"></i>Войти в панель</button>
+      </form>
+      <div class="login-version">HYPER-HOST <b>version: <?= e(hh_app_version()) ?></b></div>
+    </div>
+  </div>
+</div>
+</body></html><?php
 }
 
 function render_page(string $page, array $user): void
 {
-    $titles=['dashboard'=>'Панель управления','files'=>'Файловый менеджер','sites'=>'Сайты и папки','ftp'=>'FTP','databases'=>'Базы данных','bots'=>'Боты PM2 24/7','bot_logs'=>'Логи бота','backups'=>'Backup','dns'=>'DNS','network'=>'Сеть и доступ','ssl'=>'SSL','php'=>'PHP-версии','cron'=>'Cron','logs'=>'Логи сайтов','security'=>'Безопасность','settings'=>'Настройки','access'=>'Внешний доступ','disk'=>'Диск и LVM']; $title=$titles[$page]??'Дашборд'; $flash=flash(); ?>
+    $titles=['dashboard'=>'Панель управления','files'=>'Файловый менеджер','sites'=>'Сайты и папки','ftp'=>'FTP','databases'=>'Базы данных','bots'=>'Боты PM2 24/7','bot_logs'=>'Логи бота','backups'=>'Backup','dns'=>'DNS','network'=>'Сеть и доступ','ssl'=>'SSL','php'=>'PHP-версии','cron'=>'Cron','logs'=>'Логи сайтов','security'=>'Безопасность','settings'=>'Настройки','access'=>'Внешний доступ','disk'=>'Диск и LVM']; $title=$titles[$page]??'Дашборд'; $flash=flash();
+    $nav=hh_nav_config(); $activeCat=hh_active_category($page);
+    ?>
 <!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($title) ?> — HYPER-HOST</title>
 <link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
-<link href="/assets/style.css?v=30" rel="stylesheet"><?= hh_ui_critical_css() ?></head><body class="hh-v17"><div class="app-shell"><aside class="sidebar">
-<div class="brand"><div class="brand-icon"><i class="fa-solid fa-bolt"></i></div><div><b>HYPER-HOST</b><span>powered by memes4u1337</span></div></div>
-<div class="sidebar-status"><span class="status-dot"></span><div><b data-stat="hostnameShort"><?= e(host_name()) ?></b><em>сервер онлайн · авто-обновление</em></div></div>
-<nav class="nav flex-column gap-2">
-<?= nav_group('Главное','fa-rocket',['dashboard'=>['fa-gauge-high','Дашборд'],'files'=>['fa-folder-open','Файлы'],'settings'=>['fa-sliders','Настройки'],'access'=>['fa-plug-circle-bolt','Доступ'],'disk'=>['fa-hard-drive','Диск']],$page) ?>
-<?= nav_group('Хостинг','fa-server',['sites'=>['fa-globe','Сайты'],'ftp'=>['fa-network-wired','FTP'],'databases'=>['fa-database','Базы'],'php'=>['fa-code','PHP']],$page) ?>
-<?= nav_group('Автоматизация','fa-wand-magic-sparkles',['bots'=>['fa-robot','Боты PM2'],'backups'=>['fa-box-archive','Backup'],'cron'=>['fa-clock','Cron'],'logs'=>['fa-file-lines','Логи']],$page) ?>
-<?= nav_group('Домены и защита','fa-shield-halved',['dns'=>['fa-diagram-project','DNS'],'network'=>['fa-tower-broadcast','Сеть'],'ssl'=>['fa-shield-halved','SSL'],'security'=>['fa-lock','Безопасность']],$page) ?>
-</nav>
-<div class="sidebar-footer">
-  <a href="/?page=logout" class="btn-logout"><i class="fa-solid fa-arrow-right-from-bracket"></i>Выйти</a>
-  <div class="sidebar-version">HYPER-HOST <b>version: <?= e(hh_app_version()) ?></b></div>
-</div>
-</aside><main class="content"><header class="topbar"><div><h1><?= e($title) ?></h1><div class="small muted">Сервер: <code><?= e(host_name()) ?></code> <span class="speed-badge"><i class="fa-solid fa-bolt"></i> fast mode</span></div></div><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft"><i class="fa-solid fa-rotate me-2"></i>Синхронизация</button></form></header><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?><?php route_view($page); ?></main></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script><script src="/assets/app.js?v=30" defer></script></body></html><?php
+<link href="/assets/style.css?v=31" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell">
+<aside class="sidebar sidebar-v2">
+  <div class="rail" data-active-cat="<?= e($activeCat) ?>">
+    <a href="/?page=dashboard" class="rail-logo"><i class="fa-solid fa-bolt"></i></a>
+    <div class="rail-indicator"></div>
+    <?php foreach($nav as $key=>$cat): ?>
+      <button type="button" class="rail-btn<?= $key===$activeCat?' active':'' ?>" data-cat="<?= e($key) ?>" style="--cat-accent:<?= e($cat['accent']) ?>" title="<?= e($cat['label']) ?>"><i class="fa-solid <?= e($cat['icon']) ?>"></i></button>
+    <?php endforeach; ?>
+    <div class="rail-spacer"></div>
+    <a href="/?page=logout" class="rail-btn rail-logout" title="Выйти"><i class="fa-solid fa-arrow-right-from-bracket"></i></a>
+  </div>
+  <div class="flyout">
+    <div class="flyout-head"><b>HYPER-HOST</b><span>powered by memes4u1337</span></div>
+    <div class="sidebar-status"><span class="status-dot"></span><div><b><?= e(host_name()) ?></b><em>сервер онлайн · авто-обновление</em></div></div>
+    <div class="flyout-panels">
+    <?php foreach($nav as $key=>$cat): ?>
+      <div class="flyout-panel<?= $key===$activeCat?' active':'' ?>" data-panel="<?= e($key) ?>">
+        <div class="flyout-panel-title" style="--cat-accent:<?= e($cat['accent']) ?>"><i class="fa-solid <?= e($cat['icon']) ?>"></i><?= e($cat['label']) ?></div>
+        <nav class="nav flex-column">
+        <?php foreach($cat['items'] as $id=>$it): ?><?= nav_item($id,$it[0],$it[1],$page) ?><?php endforeach; ?>
+        </nav>
+      </div>
+    <?php endforeach; ?>
+    </div>
+    <div class="sidebar-footer">
+      <a href="/?page=logout" class="btn-logout"><i class="fa-solid fa-arrow-right-from-bracket"></i>Выйти</a>
+      <div class="sidebar-version">HYPER-HOST <b>version: <?= e(hh_app_version()) ?></b></div>
+    </div>
+  </div>
+</aside>
+<main class="content"><header class="topbar"><div><h1><?= e($title) ?></h1><div class="small muted">Сервер: <code><?= e(host_name()) ?></code> <span class="speed-badge"><i class="fa-solid fa-bolt"></i> fast mode</span></div></div><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft"><i class="fa-solid fa-rotate me-2"></i>Синхронизация</button></form></header><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?><?php route_view($page); ?></main></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script><script src="/assets/app.js?v=31" defer></script></body></html><?php
 }
-function nav_item(string $id,string $icon,string $label,string $page): string { $active=$id===$page?' active':''; return '<a class="nav-link'.$active.'" href="/?page='.e($id).'"><i class="fa-solid '.e($icon).'"></i><span>'.e($label).'</span></a>'; }
-function nav_group(string $label,string $icon,array $items,string $page): string { $open=false; foreach(array_keys($items) as $id){ if($id===$page){$open=true;break;} } $html='<div class="nav-group'.($open?' open':'').'"><button type="button" class="nav-group-toggle"><span><i class="fa-solid '.e($icon).'"></i>'.e($label).'</span><i class="fa-solid fa-chevron-down chevron"></i></button><div class="nav-submenu">'; foreach($items as $id=>$it){ $html.=nav_item($id,$it[0],$it[1],$page); } return $html.'</div></div>'; }
 function route_view(string $page): void { match($page){ 'files'=>view_files(), 'sites'=>view_sites(), 'ftp'=>view_ftp(), 'databases'=>view_databases(), 'pma_login'=>view_pma_login(), 'bots'=>view_bots(), 'bot_logs'=>view_bot_logs(), 'backups'=>view_backups(), 'dns'=>view_dns(), 'network'=>view_network(), 'ssl'=>view_ssl(), 'php'=>view_php(), 'cron'=>view_cron(), 'logs'=>view_logs(), 'security'=>view_security(), 'settings'=>view_settings(), 'access'=>view_access(), 'disk'=>view_disk(), default=>view_dashboard(), }; }
 function stat_card(string $icon,string $label,string $value,string $sub=''): void { ?><div class="stat-card"><div class="stat-icon"><i class="fa-solid <?= e($icon) ?>"></i></div><div><span><?= e($label) ?></span><b><?= e($value) ?></b><?php if($sub): ?><em><?= e($sub) ?></em><?php endif; ?></div></div><?php }
 function progress_block(string $label,float $used,float $total): string { $p=percent($used,$total); return '<div class="usage"><div class="d-flex justify-content-between"><span>'.e($label).'</span><b>'.e(human_bytes($used).' / '.human_bytes($total)).'</b></div><div class="progress"><div class="progress-bar" style="width:'.$p.'%"></div></div></div>'; }
@@ -579,7 +636,7 @@ function view_databases(): void
       <div class="panel-card">
         <div class="card-title-row"><h2><i class="fa-solid fa-table me-2"></i>Базы</h2><div class="d-flex gap-2"><button class="btn btn-sm btn-soft" onclick="copyText('<?= e(mysql_env_block($mysqlExternalHost)) ?>')">SQL host</button><button class="btn btn-sm btn-soft" onclick="copyText('<?= e($pma) ?>')">phpMyAdmin</button></div></div>
         <div class="db-cards-list">
-        <?php foreach($rows as $r): $a=$accountByUser[$r['db_user']]??null; $hostPattern=(string)($a['host_pattern']??($r['remote_allowed']?'%':'localhost')); $connHost=(int)$r['remote_allowed']?$mysqlLanHost:mysqlLocalHost; ?>
+        <?php foreach($rows as $r): $a=$accountByUser[$r['db_user']]??null; $hostPattern=(string)($a['host_pattern']??($r['remote_allowed']?'%':'localhost')); $connHost=(int)$r['remote_allowed']?$mysqlLanHost:$mysqlLocalHost; ?>
           <div class="db-row-card">
             <div><span>База</span><b><?= e($r['db_name']) ?></b><small><?= (int)$r['remote_allowed']?'Внешний вход':'Локально' ?></small></div>
             <div><span>Пользователь</span><code><?= e($r['db_user']) ?></code><small><?= e(mysql_host_label($hostPattern)) ?></small></div>
@@ -685,7 +742,7 @@ function view_bots(): void
           <div class="bot-card-v29 bot-card-live" data-bot-name="<?= e($b['name']) ?>">
             <div class="bot-top-v29">
               <div class="bot-avatar-v29"><i class="fa-solid fa-robot"></i></div>
-              <div class="bot-title-v29"><b><?= e($b['name']) ?></b><span><?= e($b['runtime']) ?> / <?= e($b['main_file']?:'bot.py') ?></span></div>
+              <div class="bot-title-v29"><b><?= e($b['name']) ?></b><span><?= e($b['runtime']) ?> / <?= e($b['start_command']?:'bot.py') ?></span></div>
               <span class="bot-status-v29 <?= $st==='online'?'ok':'bad' ?>" data-bot-status><?= e($st) ?></span>
             </div>
             <div class="bot-live-stats-v29">
@@ -890,7 +947,7 @@ function view_access(): void
 { $j=run_ctl_json_cached(['access-doctor-json'],3,90); $pub=(string)($j['public_ip']??''); $server=(string)($j['server_ip']??host_name()); $ports=$j['listen_ports']??[]; ?>
 <div class="row g-4">
   <div class="col-xl-5"><div class="panel-card"><h2><i class="fa-solid fa-plug-circle-bolt me-2"></i>Внешний доступ</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="access_fix"><button class="btn btn-primary btn-lg"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Открыть доступ на Ubuntu</button></form><div class="mt-4 vstack gap-2"><button class="cmd-copy" type="button" data-copy="sudo hyper access fix"><i class="fa-regular fa-copy"></i><code>sudo hyper access fix</code></button><button class="cmd-copy" type="button" data-copy="sudo hyper access doctor"><i class="fa-regular fa-copy"></i><code>sudo hyper access doctor</code></button><button class="cmd-copy" type="button" data-copy="sudo hyper access guide"><i class="fa-regular fa-copy"></i><code>sudo hyper access guide</code></button></div></div></div>
-  <div class="col-xl-7"><div class="panel-card"><h2><i class="fa-solid fa-router me-2"></i>Что пробросить на роутере</h2><div class="network-check-grid mb-3"><div class="network-check"><span>Сервер</span><b><?= e($server) ?></b></div><div class="network-check"><span>Публичный IP</span><b><?= e($pub) ?></b></div><div class="network-check"><span>UFW</span><b><?= e((string)($j['ufw_status']??'')) ?></b></div></div><div class="table-responsive"><table class="table table-dark-soft"><thead><tr><th>Сервис</th><th>Правило Keenetic</th></tr></thead><tbody><?php foreach(($j['router_forwarding_needed']??[]) as $r): ?><tr><td><?= e((string)$r['service']) ?></td><td><code><?= e((string)$r['rule']) ?></code></td></tr><?php endforeach; ?></tbody></table></div><h2 class="mt-4">Порты Ubuntu</h2><div class="service-row"><?php foreach($ports as $k=>$ok): ?><span class="badge rounded-pill text-bg-<?= $ok?'success':'danger' ?>"><?= e($k) ?>: <?= $ok?'open':'closed' ?></span><?php endforeach; ?></div></div></div>
+  <div class="col-xl-7"><div class="panel-card"><h2><i class="fa-solid fa-router me-2"></i>Что пробросить на роутере</h2><div class="network-check-grid mb-3"><div class="network-check"><span>Сервер</span><b><?= e($server) ?></b></div><div class="network-check"><span>Публичный IP</span><b><?= e($pub) ?></b></div><div class="network-check"><span>UFW</span><b><?= e((string)($j['ufw_status']??'')) ?></b></div></div><div class="table-responsive"><table class="table table-dark-soft"><thead><tr><th>Сервис</th><th>Правило Keenetic</th></tr></thead><tbody><?php foreach(($j['router_forwarding_needed']??[]) as $r): ?><tr><td><?= e((string)$r['service']) ?></td><td><code><?= e((string)$r['rule']) ?></code></td></tr><?php endforeach; ?></tbody></table></div><h2 class="mt-4">Порты Ubuntu</h2><div class="service-row"><?php foreach($ports as $k=>$ok): ?><span class="badge rounded-pill text-bg-<?= $ok?'success':'danger' ?>"><?= e((string)$k) ?>: <?= $ok?'open':'closed' ?></span><?php endforeach; ?></div></div></div>
 </div><?php }
 
 function view_disk(): void
