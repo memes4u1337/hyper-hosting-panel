@@ -961,6 +961,27 @@ cmd_mysql_test() {
 }
 
 
+configure_phpmyadmin_label() {
+  mkdir -p /etc/phpmyadmin/conf.d
+  local pma_host="${PANEL_DOMAIN:-}"
+  [[ -z "$pma_host" || "$pma_host" == "_" ]] && pma_host="${PUBLIC_IP:-${SERVER_IP:-127.0.0.1}}"
+  cat > /etc/phpmyadmin/conf.d/hyper-host-server.php <<EOPMA
+<?php
+// HYPER-HOST: показываем понятный SQL host в phpMyAdmin.
+if (isset(\$i)) {
+    \$cfg['Servers'][\$i]['verbose'] = '${pma_host}:3306';
+    \$cfg['Servers'][\$i]['host'] = '127.0.0.1';
+    \$cfg['Servers'][\$i]['port'] = '3306';
+}
+EOPMA
+  chmod 0644 /etc/phpmyadmin/conf.d/hyper-host-server.php || true
+}
+
+cmd_phpmyadmin_fix() {
+  configure_phpmyadmin_label
+  log "phpMyAdmin label fixed: ${PANEL_DOMAIN:-${PUBLIC_IP:-${SERVER_IP:-127.0.0.1}}}:3306"
+}
+
 ensure_bot_user() {
   id "$BOT_USER" >/dev/null 2>&1 || useradd --system --home "$BOTS_DIR" --shell /usr/sbin/nologin "$BOT_USER"
   usermod -d "$BOTS_DIR" -s /usr/sbin/nologin "$BOT_USER" 2>/dev/null || true
@@ -1904,6 +1925,7 @@ cmd_panel_ssl() {
 
 
 cmd_repair() {
+  configure_phpmyadmin_label # v26
   ensure_cli_links; ensure_dirs; ensure_nologin_shell; ensure_bot_user; cleanup_hyper_host_mounts; ensure_acme_locations_all
   if [[ -n "${PANEL_DOMAIN:-}" && "${PANEL_DOMAIN:-_}" != "_" ]]; then
     panel_domain_conflict_cleanup "$PANEL_DOMAIN"
@@ -1969,6 +1991,7 @@ case "${1:-}" in
   delete-mysql-account) shift; cmd_delete_mysql_account "$@" ;;
   mysql-external) shift; cmd_mysql_external "$@" ;;
   mysql-status-json) shift; cmd_mysql_status_json "$@" ;;
+  phpmyadmin-fix) shift; cmd_phpmyadmin_fix "$@" ;;
   mysql-doctor-json) shift; cmd_mysql_doctor_json "$@" ;;
   mysql-test) shift; cmd_mysql_test "$@" ;;
   bot-create) shift; cmd_bot_create "$@" ;;

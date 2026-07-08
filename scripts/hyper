@@ -154,8 +154,8 @@ print('────────────────────────'
 print(f"MariaDB: {m.get('service','unknown')} | bind: {m.get('bind_address','unknown')} | 3306: {'listen' if m.get('listen_3306') else 'closed/local'}")
 print(f"Для бота на сервере: MYSQL_HOST=127.0.0.1 MYSQL_PORT=3306")
 print(f"Для бота на ПК в той же сети: MYSQL_HOST={m.get('lan_host','')} MYSQL_PORT=3306")
-print(f"Для бота из интернета: MYSQL_HOST={m.get('external_host','')} MYSQL_PORT=3306")
-print("phpMyAdmin может показывать Сервер: localhost:3306 — это нормально, он сам стоит на сервере.")
+print(f"SQL host для внешнего подключения: {m.get('external_host','')}:3306")
+print(f"SQL host внутри сети: {m.get('lan_host','')}:3306")
 if not items:
     print('Баз данных панели пока нет.'); raise SystemExit
 print(f"{'DB':<32} {'USER':<32} REMOTE")
@@ -165,9 +165,10 @@ PY
       ;;
     external) [[ "${1:-}" == enable || "${1:-}" == disable ]] || err "Используй: sudo hyper db external enable|disable"; $CTL mysql-external "$1"; $CTL mysql-status-json | json_pretty ;;
     doctor) $CTL mysql-doctor-json | json_pretty ;;
+    pma-fix) $CTL phpmyadmin-fix ;;
     test) shift || true; [[ -n "${1:-}" && -n "${2:-}" && -n "${3:-}" ]] || err "Используй: sudo hyper db test HOST USER PASS [DB]"; $CTL mysql-test "$@" ;;
     user) [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper db user USER PASS [DB] [HOST]"; $CTL create-mysql-account "$1" "$2" "${4:-%}" "${3:-}" ALL ;;
-    *) err "Используй: sudo hyper db list | doctor | external enable|disable | user USER PASS [DB] [%|IP] | test HOST USER PASS [DB]" ;;
+    *) err "Используй: sudo hyper db list | doctor | pma-fix | external enable|disable | user USER PASS [DB] [%|IP] | test HOST USER PASS [DB]" ;;
   esac
 }
 
@@ -376,6 +377,7 @@ cmd_help() {
   sudo hyper db user USER PASS DB %
   sudo hyper db test HOST USER PASS DB                     базы данных
   sudo hyper db external enable      открыть MySQL 3306 наружу
+  sudo hyper db pma-fix              показать правильный SQL host в phpMyAdmin
   sudo hyper db user USER PASS DB %    создать пользователя для внешнего входа
   sudo hyper db user USER PASS DB    создать MySQL/phpMyAdmin аккаунт
   sudo hyper php                     PHP-FPM версии

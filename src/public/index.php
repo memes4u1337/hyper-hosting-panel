@@ -261,7 +261,7 @@ function rrmdir(string $path): void { if(is_dir($path)&&!is_link($path)){ foreac
 
 function hh_ui_critical_css(): string
 {
-    return '<style id="hh-v17-critical">
+    return '<style id="hh-v26-critical">
 html,body{background:#030712!important;color:#eef5ff!important}.sidebar *,.topbar *,.panel-card *{box-sizing:border-box}.nav-group-toggle,.cmd-copy,button.btn{appearance:none!important;-webkit-appearance:none!important;border-radius:16px!important}.nav-group-toggle{width:100%!important;border:1px solid rgba(148,163,184,.14)!important;background:linear-gradient(135deg,rgba(15,23,42,.92),rgba(30,41,59,.64))!important;color:#eef5ff!important;display:flex!important;align-items:center!important;justify-content:space-between!important;padding:12px 13px!important;font-weight:950!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.04),0 10px 26px rgba(0,0,0,.18)!important}.nav-group-toggle span{display:flex!important;gap:10px!important;align-items:center!important}.nav-group-toggle:hover{border-color:rgba(94,234,212,.36)!important;transform:translateY(-1px)!important}.nav-submenu{overflow:hidden!important;transition:max-height .28s ease,opacity .22s ease!important;max-height:0!important;opacity:.25!important}.nav-group.open .nav-submenu{max-height:320px!important;opacity:1!important}.nav-link{border:none!important;text-decoration:none!important}.cmd-copy{background:linear-gradient(135deg,rgba(15,23,42,.96),rgba(30,41,59,.74))!important;border:1px solid rgba(148,163,184,.18)!important;color:#dbeafe!important;display:flex!important;align-items:center!important;gap:10px!important;padding:12px 14px!important;text-align:left!important;width:100%!important}.cmd-copy code{background:transparent!important;color:#a5f3fc!important;white-space:normal!important;word-break:break-word!important}.cmd-copy:hover{border-color:rgba(94,234,212,.42)!important;box-shadow:0 12px 34px rgba(0,0,0,.24)!important}.form-select,.form-control{background:#0b1220!important;color:#eef5ff!important;border:1px solid rgba(148,163,184,.18)!important;border-radius:15px!important}.form-select option{background:#0b1220!important;color:#eef5ff!important}.network-check-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}.network-check{padding:16px;border-radius:20px;background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.025));border:1px solid rgba(148,163,184,.14)}.network-check span{display:block;color:#93a4bf;font-size:12px;text-transform:uppercase;letter-spacing:.06em}.network-check b{display:block;margin-top:6px;font-size:16px}.hh-ok{color:#86efac!important}.hh-bad{color:#fca5a5!important}.hh-warn{color:#fde68a!important}.design-note{padding:14px 16px;border-radius:18px;background:rgba(34,211,238,.08);border:1px solid rgba(34,211,238,.18);color:#dbeafe}
 </style>';
 }
@@ -269,13 +269,13 @@ html,body{background:#030712!important;color:#eef5ff!important}.sidebar *,.topba
 function render_login(): void
 {
     $flash=flash(); $need2fa=setting_get('security_2fa_enabled','0')==='1'; ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=25" rel="stylesheet"><?= hh_ui_critical_css() ?></head><body class="login-body"><div class="login-shell"><div class="login-card card-glass"><div class="brand-mark"><i class="fa-solid fa-bolt"></i></div><h1>HYPER-HOST</h1><p>powered by memes4u1337</p><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> py-2"><?= e($flash['message']) ?></div><?php endif; ?><form method="post" class="vstack gap-3"><?= csrf_field() ?><input class="form-control form-control-lg" name="username" placeholder="Логин" autofocus required><input class="form-control form-control-lg" type="password" name="password" placeholder="Пароль" required><?php if($need2fa): ?><input class="form-control form-control-lg" name="totp" placeholder="2FA код" inputmode="numeric"><?php endif; ?><button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-right-to-bracket me-2"></i>Войти</button></form></div></div></body></html><?php
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=26" rel="stylesheet"><?= hh_ui_critical_css() ?></head><body class="login-body"><div class="login-shell"><div class="login-card card-glass"><div class="brand-mark"><i class="fa-solid fa-bolt"></i></div><h1>HYPER-HOST</h1><p>powered by memes4u1337</p><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> py-2"><?= e($flash['message']) ?></div><?php endif; ?><form method="post" class="vstack gap-3"><?= csrf_field() ?><input class="form-control form-control-lg" name="username" placeholder="Логин" autofocus required><input class="form-control form-control-lg" type="password" name="password" placeholder="Пароль" required><?php if($need2fa): ?><input class="form-control form-control-lg" name="totp" placeholder="2FA код" inputmode="numeric"><?php endif; ?><button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-right-to-bracket me-2"></i>Войти</button></form></div></div></body></html><?php
 }
 
 function render_page(string $page, array $user): void
 {
-    $titles=['dashboard'=>'Дашборд','files'=>'Файловый менеджер','sites'=>'Сайты и папки','ftp'=>'FTP','databases'=>'Базы данных','bots'=>'Боты PM2 24/7','bot_logs'=>'Логи бота','backups'=>'Backup','dns'=>'DNS','network'=>'Сеть и доступ','ssl'=>'SSL','php'=>'PHP-версии','cron'=>'Cron','logs'=>'Логи сайтов','security'=>'Безопасность','settings'=>'Настройки']; $title=$titles[$page]??'Дашборд'; $flash=flash(); ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($title) ?> — HYPER-HOST</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=25" rel="stylesheet"><?= hh_ui_critical_css() ?></head><body class="hh-v17"><div class="app-shell"><aside class="sidebar"><div class="brand"><div class="brand-icon"><i class="fa-solid fa-bolt"></i></div><div><b>HYPER-HOST</b><span>powered by memes4u1337</span></div></div><nav class="nav flex-column gap-2 mt-4">
+    $titles=['dashboard'=>'Панель управления','files'=>'Файловый менеджер','sites'=>'Сайты и папки','ftp'=>'FTP','databases'=>'Базы данных','bots'=>'Боты PM2 24/7','bot_logs'=>'Логи бота','backups'=>'Backup','dns'=>'DNS','network'=>'Сеть и доступ','ssl'=>'SSL','php'=>'PHP-версии','cron'=>'Cron','logs'=>'Логи сайтов','security'=>'Безопасность','settings'=>'Настройки']; $title=$titles[$page]??'Дашборд'; $flash=flash(); ?>
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($title) ?> — HYPER-HOST</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=26" rel="stylesheet"><?= hh_ui_critical_css() ?></head><body class="hh-v17"><div class="app-shell"><aside class="sidebar"><div class="brand"><div class="brand-icon"><i class="fa-solid fa-bolt"></i></div><div><b>HYPER-HOST</b><span>powered by memes4u1337</span></div></div><nav class="nav flex-column gap-2 mt-4">
 <?= nav_group('Главное','fa-rocket',['dashboard'=>['fa-gauge-high','Дашборд'],'files'=>['fa-folder-open','Файлы'],'settings'=>['fa-sliders','Настройки']],$page) ?>
 <?= nav_group('Хостинг','fa-server',['sites'=>['fa-globe','Сайты'],'ftp'=>['fa-network-wired','FTP'],'databases'=>['fa-database','Базы'],'php'=>['fa-code','PHP']],$page) ?>
 <?= nav_group('Автоматизация','fa-wand-magic-sparkles',['bots'=>['fa-robot','Боты PM2'],'backups'=>['fa-box-archive','Backup'],'cron'=>['fa-clock','Cron'],'logs'=>['fa-file-lines','Логи']],$page) ?>
@@ -293,9 +293,8 @@ function view_dashboard(): void
 <div class="dashboard-hero dashboard-hero-v25 mb-4">
   <div class="hero-orb hero-orb-a"></div><div class="hero-orb hero-orb-b"></div>
   <div class="hero-main-v25">
-    <div class="eyebrow"><i class="fa-solid fa-gem"></i> HYPER-HOST powered by memes4u1337</div>
-    <h2>Панель нового уровня</h2>
-    <p>Красивый быстрый центр управления: сайты, домены, SSL, FTP, MySQL, боты PM2 и backup — без лишней возни.</p>
+    <div class="eyebrow"><i class="fa-solid fa-gem"></i> HYPER-HOST</div>
+    <h2>Панель управления</h2>
     <div class="hero-metrics-v25">
       <span><i class="fa-solid fa-bolt"></i> fast UI</span>
       <span><i class="fa-solid fa-shield-halved"></i> SSL ready</span>
@@ -396,18 +395,18 @@ function view_databases(): void
       <div>
         <div class="eyebrow"><i class="fa-solid fa-database"></i> MySQL / phpMyAdmin</div>
         <h2 class="mb-1">Базы данных</h2>
-        <p class="muted mb-0">Создание базы, пользователя и быстрый вход в phpMyAdmin без лишнего мусора.</p>
+        
       </div>
       <div class="d-flex gap-2 flex-wrap">
-        <a class="btn btn-primary" href="<?= e($pma) ?>" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square me-2"></i>phpMyAdmin</a>
-        <form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="mysql_external"><input type="hidden" name="state" value="enable"><button class="btn btn-soft"><i class="fa-solid fa-plug-circle-bolt me-2"></i>Открыть 3306</button></form>
+        <a class="btn btn-primary" href="<?= e($pma) ?>" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square me-2"></i>Открыть phpMyAdmin</a>
+        <form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="mysql_external"><input type="hidden" name="state" value="enable"><button class="btn btn-soft"><i class="fa-solid fa-plug-circle-bolt me-2"></i>Включить внешний SQL</button></form>
       </div>
     </div>
     <div class="db-status-grid mt-3">
       <div><span>MariaDB</span><b class="<?= (($mysql['service']??'')==='active')?'hh-ok':'hh-warn' ?>"><?= e((string)($mysql['service']??'unknown')) ?></b></div>
       <div><span>3306</span><b class="<?= $listen?'hh-ok':'hh-bad' ?>"><?= $listen?'слушает':'закрыт' ?></b></div>
-      <div><span>Доступ</span><b class="<?= $external?'hh-ok':'hh-warn' ?>"><?= $external?'внешний включён':'только локально' ?></b></div>
-      <div><span>Host для ПК</span><b><?= e($mysqlLanHost) ?></b></div>
+      <div><span>Доступ</span><b class="<?= $external?'hh-ok':'hh-warn' ?>"><?= $external?'внешний включён':'локально' ?></b></div>
+      <div><span>SQL host</span><b><?= e($mysqlExternalHost) ?></b></div>
     </div>
     <?php if(!empty($doctor['problem'])): ?><div class="alert alert-warning mt-3 mb-0"><i class="fa-solid fa-triangle-exclamation me-2"></i><?= e((string)$doctor['problem']) ?></div><?php endif; ?>
   </section>
@@ -421,13 +420,13 @@ function view_databases(): void
           <input class="form-control" name="db_user" placeholder="Пользователь, например hyper_bot" value="hyper_bot" required>
           <div class="input-group"><input class="form-control" id="dbPass" name="password" value="<?= e($gen) ?>" minlength="10" required><button class="btn btn-outline-light" type="button" onclick="copyValue('dbPass')"><i class="fa-regular fa-copy"></i></button></div>
           <div class="db-access-pills">
-            <label><input type="radio" name="remote_allowed" value="0" checked><span><i class="fa-solid fa-house"></i> Только локально</span></label>
+            <label><input type="radio" name="remote_allowed" value="0" checked><span><i class="fa-solid fa-house"></i> Локально</span></label>
             <label><input type="radio" name="remote_allowed" value="1"><span><i class="fa-solid fa-globe"></i> Внешний вход</span></label>
           </div>
           <div class="remote-options db-hidden">
             <select class="form-select" name="host_pattern" onchange="this.closest('.remote-options').querySelector('.custom-host').style.display=this.value==='custom'?'block':'none'">
-              <option value="%">Любой внешний IP</option>
-              <option value="<?= e($mysqlLanHost) ?>">Только этот сервер/LAN: <?= e($mysqlLanHost) ?></option>
+              <option value="%">Любой IP</option>
+              <option value="<?= e($mysqlLanHost) ?>">Только LAN: <?= e($mysqlLanHost) ?></option>
               <option value="custom">Свой IP или маска</option>
             </select>
             <input class="form-control custom-host mt-2" style="display:none" name="custom_host" placeholder="пример: 1.2.3.4 или 90.189.208.%">
@@ -449,7 +448,7 @@ function view_databases(): void
           </div>
           <div class="remote-options db-hidden">
             <select class="form-select" name="host_pattern" onchange="this.closest('.remote-options').querySelector('.custom-host').style.display=this.value==='custom'?'block':'none'">
-              <option value="%">Любой внешний IP</option>
+              <option value="%">Любой IP</option>
               <option value="<?= e($mysqlLanHost) ?>">Только <?= e($mysqlLanHost) ?></option>
               <option value="custom">Свой IP или маска</option>
             </select>
@@ -462,11 +461,11 @@ function view_databases(): void
 
     <div class="col-xl-8">
       <div class="panel-card">
-        <div class="card-title-row"><h2><i class="fa-solid fa-table me-2"></i>Базы</h2><div class="d-flex gap-2"><button class="btn btn-sm btn-soft" onclick="copyText('<?= e(mysql_env_block($mysqlLanHost)) ?>')">Host LAN</button><button class="btn btn-sm btn-soft" onclick="copyText('<?= e(mysql_env_block($mysqlExternalHost)) ?>')">Host Internet</button></div></div>
+        <div class="card-title-row"><h2><i class="fa-solid fa-table me-2"></i>Базы</h2><div class="d-flex gap-2"><button class="btn btn-sm btn-soft" onclick="copyText('<?= e(mysql_env_block($mysqlExternalHost)) ?>')">SQL host</button><button class="btn btn-sm btn-soft" onclick="copyText('<?= e($pma) ?>')">phpMyAdmin</button></div></div>
         <div class="db-cards-list">
         <?php foreach($rows as $r): $a=$accountByUser[$r['db_user']]??null; $hostPattern=(string)($a['host_pattern']??($r['remote_allowed']?'%':'localhost')); $connHost=(int)$r['remote_allowed']?$mysqlLanHost:mysqlLocalHost; ?>
           <div class="db-row-card">
-            <div><span>База</span><b><?= e($r['db_name']) ?></b><small><?= (int)$r['remote_allowed']?'Внешний вход разрешён':'Только локально' ?></small></div>
+            <div><span>База</span><b><?= e($r['db_name']) ?></b><small><?= (int)$r['remote_allowed']?'Внешний вход':'Локально' ?></small></div>
             <div><span>Пользователь</span><code><?= e($r['db_user']) ?></code><small><?= e(mysql_host_label($hostPattern)) ?></small></div>
             <div><span>Пароль</span><code><?= e($r['db_password_plain']?:'не сохранён') ?></code></div>
             <div class="db-actions">
@@ -482,7 +481,7 @@ function view_databases(): void
       <div class="panel-card mt-4">
         <h2><i class="fa-solid fa-users-gear me-2"></i>Аккаунты MySQL / phpMyAdmin</h2>
         <div class="db-cards-list">
-        <?php foreach($accounts as $a): $connHost=((int)$a['remote_allowed']?$mysqlLanHost:$mysqlLocalHost); ?>
+        <?php foreach($accounts as $a): $connHost=((int)$a['remote_allowed']?$mysqlExternalHost:$mysqlLanHost); ?>
           <div class="db-row-card compact">
             <div><span>Логин</span><code><?= e($a['username']) ?></code><small><?= e(mysql_host_label((string)$a['host_pattern'])) ?></small></div>
             <div><span>Доступ</span><b><?= e($a['db_name']?:'без базы') ?></b><small><?= e($a['privileges']) ?></small></div>

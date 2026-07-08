@@ -173,6 +173,25 @@ return [
 EOPHP
 chmod 0640 "$PANEL_DIR/app/config.php"
 
+
+log "Настройка phpMyAdmin host label..."
+mkdir -p /etc/phpmyadmin/conf.d
+PMA_VERBOSE_HOST="${PANEL_DOMAIN}"
+if [[ -z "$PMA_VERBOSE_HOST" || "$PMA_VERBOSE_HOST" == "_" ]]; then
+  PMA_VERBOSE_HOST="${PUBLIC_IP:-${SERVER_IP}}"
+fi
+cat > /etc/phpmyadmin/conf.d/hyper-host-server.php <<EOPMA
+<?php
+// HYPER-HOST: phpMyAdmin показывает понятное имя сервера вместо localhost:3306.
+if (isset(\$i)) {
+    \$cfg['Servers'][\$i]['verbose'] = '${PMA_VERBOSE_HOST}:3306';
+    \$cfg['Servers'][\$i]['host'] = '127.0.0.1';
+    \$cfg['Servers'][\$i]['port'] = '3306';
+}
+EOPMA
+chmod 0644 /etc/phpmyadmin/conf.d/hyper-host-server.php || true
+
+
 log "Настройка пользователей и прав..."
 if ! id hyperbot >/dev/null 2>&1; then
   useradd --system --home "$BOTS_DIR" --shell /usr/sbin/nologin hyperbot
