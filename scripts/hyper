@@ -119,6 +119,8 @@ PY
 }
 
 cmd_ftp() {
+  local sub="${1:-list}"
+  if [[ "$sub" == "fix" ]]; then $CTL ftp-fix; return; fi
   local json
   json="$($CTL sync-json 2>/dev/null || echo '{}')"
   JSON="$json" python3 - <<'PY'
@@ -365,6 +367,8 @@ cmd_help() {
   sudo hyper panel domain DOMAIN      привязать домен именно к панели
   sudo hyper panel ssl DOMAIN EMAIL   выпустить SSL для панели
   sudo hyper ftp                     FTP-пользователи
+  sudo hyper ftp fix                 починить FTP для FileZilla
+  sudo hyper access fix              открыть доступ с другого ПК
   sudo hyper dbs
   sudo hyper db status
   sudo hyper db doctor
@@ -460,6 +464,7 @@ case "${1:-help}" in
   bot) shift; cmd_bot "$@" ;;
   sites) shift; cmd_sites "$@" ;;
   ftp) shift; cmd_ftp "$@" ;;
+  access) shift; [[ "${1:-fix}" == "fix" ]] && $CTL access-fix || err "Используй: sudo hyper access fix" ;;
   db|dbs|databases) shift; cmd_dbs "$@" ;;
   ssl) shift; cmd_ssl "$@" ;;
   panel) shift; cmd_panel "$@" ;;

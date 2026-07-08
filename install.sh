@@ -94,7 +94,7 @@ apt-get install -y \
   ca-certificates curl git unzip rsync sudo openssl ufw \
   nginx mariadb-server \
   php-fpm php-cli php-sqlite3 php-mysql php-curl php-mbstring php-xml php-zip php-gd \
-  vsftpd certbot python3-certbot-nginx python3 python3-venv python3-pip acl cron bind9 dnsutils
+  vsftpd openssh-server certbot python3-certbot-nginx python3 python3-venv python3-pip acl cron bind9 dnsutils
 
 log "Установка phpMyAdmin..."
 if ! dpkg -s phpmyadmin >/dev/null 2>&1; then
@@ -278,12 +278,16 @@ ssl_enable=NO
 pasv_enable=YES
 pasv_min_port=40000
 pasv_max_port=40100
-pasv_address=${SERVER_IP}
+pasv_address=${PUBLIC_IP:-$SERVER_IP}
+pasv_addr_resolve=NO
+seccomp_sandbox=NO
 force_dot_files=YES
 utf8_filesystem=YES
 EOFTP
 systemctl enable vsftpd >/dev/null 2>&1 || true
 systemctl restart vsftpd
+systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1 || true
+systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1 || true
 
 log "Настройка Node.js + PM2 для ботов 24/7..."
 node_major() { node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 | grep -E '^[0-9]+$' || echo 0; }
