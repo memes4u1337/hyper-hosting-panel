@@ -23,7 +23,10 @@ document.addEventListener('click', function(e){
   });
 })();
 
-// HYPER-HOST v29: live dashboard + PM2 stats without page reload.
+// HYPER-HOST v30: live dashboard + PM2 stats without page reload.
+// Оптимизации против v29: пауза опроса на скрытой вкладке (Page Visibility API),
+// отмена зависших запросов через AbortController (не копятся параллельные fetch),
+// экспоненциальный backoff при ошибках сети/сервера вместо долбёжки каждые 3 сек.
 (function(){
   const fmtBytes = (bytes) => {
     bytes = Number(bytes || 0);
@@ -38,16 +41,24 @@ document.addEventListener('click', function(e){
   const setText = (name, value) => { const el=q(`[data-stat="${name}"]`); if(el) el.textContent = value; };
   const setBar = (name, value) => { const el=q(`[data-stat-bar="${name}"]`); if(el) el.style.width = Math.max(0, Math.min(100, Number(value)||0)) + '%'; };
 
-  async function fetchJson(url){
-    const res = await fetch(url + (url.includes('?')?'&':'?') + '_=' + Date.now(), {cache:'no-store', credentials:'same-origin'});
+  async function fetchJson(url, controllerRef){
+    if(controllerRef.current) controllerRef.current.abort();
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    const res = await fetch(url + (url.includes('?')?'&':'?') + '_=' + Date.now(), {
+      cache:'no-store', credentials:'same-origin', signal: controller.signal
+    });
     if(!res.ok) throw new Error('HTTP ' + res.status);
     return await res.json();
   }
 
+  const statsRef = {current:null};
+  const botsRef = {current:null};
+
   async function updateDashboard(){
     if(!q('[data-live-stats]')) return;
     try{
-      const d = await fetchJson('/?api=stats');
+      const d = await fetchJson('/?api=stats', statsRef);
       if(d._error) return;
       const memP = Number(d.mem_percent ?? pct(d.mem_used,d.mem_total));
       const diskP = Number(d.disk_percent ?? pct(d.disk_used,d.disk_total));
@@ -68,6 +79,7 @@ document.addEventListener('click', function(e){
       setBar('disk', diskP);
       setText('uptime', d.uptime || '—');
       setText('hostname', d.hostname || '—');
+      setText('hostnameShort', d.hostname || '—');
       setText('pm2Version', d.pm2_version || 'not installed');
       setText('kernel', d.kernel || '');
       if(d.disks){
@@ -91,14 +103,15 @@ document.addEventListener('click', function(e){
           chip.innerHTML = `<i class="fa-solid fa-circle"></i>${name}: ${st}`;
         });
       }
-    }catch(e){ console.debug('dashboard live update failed', e); }
+      return true;
+    }catch(e){ if(e.name !== 'AbortError') console.debug('dashboard live update failed', e); return false; }
   }
 
   async function updateBots(){
-    if(!q('[data-live-bots]')) return;
+    if(!q('[data-live-bots]')) return true;
     try{
-      const data = await fetchJson('/?api=bots');
-      if(!Array.isArray(data)) return;
+      const data = await fetchJson('/?api=bots', botsRef);
+      if(!Array.isArray(data)) return true;
       const map = new Map(data.map(b => [String(b.name || ''), b]));
       qa('.bot-card-live').forEach(card => {
         const name = card.getAttribute('data-bot-name') || '';
@@ -117,13 +130,33 @@ document.addEventListener('click', function(e){
         const reEl = q('[data-bot-restarts]', card); if(reEl) reEl.textContent = String(b.restarts ?? 0);
         const bar = q('[data-bot-memory-bar]', card); if(bar) bar.style.width = Math.max(2, Math.min(100, mem / 1024 / 1024 / 10)) + '%';
       });
-    }catch(e){ console.debug('bot live update failed', e); }
+      return true;
+    }catch(e){ if(e.name !== 'AbortError') console.debug('bot live update failed', e); return false; }
+  }
+
+  // Планировщик с паузой на скрытой вкладке и мягким backoff при ошибках.
+  // Это снимает лишнюю нагрузку с sudo hyper-host-ctl (он запускается как отдельный
+  // процесс на каждый опрос) — если панель открыта в фоновой вкладке, поллинг стоит.
+  function scheduler(fn, baseDelay, hasTarget){
+    if(!hasTarget()) return;
+    let timer = null;
+    let failCount = 0;
+    const tick = async () => {
+      if(document.hidden){ arm(baseDelay); return; }
+      const ok = await fn();
+      failCount = ok ? 0 : Math.min(failCount + 1, 5);
+      arm(baseDelay * Math.pow(1.6, failCount));
+    };
+    const arm = (delay) => { if(timer) clearTimeout(timer); timer = setTimeout(tick, delay); };
+    document.addEventListener('visibilitychange', function(){
+      if(!document.hidden){ if(timer) clearTimeout(timer); tick(); }
+    });
+    tick();
   }
 
   function startLive(){
-    updateDashboard(); updateBots();
-    if(q('[data-live-stats]')) setInterval(updateDashboard, 3000);
-    if(q('[data-live-bots]')) setInterval(updateBots, 3000);
+    scheduler(updateDashboard, 3000, () => !!q('[data-live-stats]'));
+    scheduler(updateBots, 3000, () => !!q('[data-live-bots]'));
   }
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startLive); else startLive();
 })();
