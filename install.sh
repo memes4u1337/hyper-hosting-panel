@@ -203,7 +203,7 @@ apt-get install -y \
   ca-certificates curl git unzip rsync sudo openssl ufw software-properties-common apt-transport-https lsb-release \
   nginx mariadb-server \
   php-fpm php-cli php-sqlite3 php-mysql php-curl php-mbstring php-xml php-zip php-gd \
-  vsftpd openssh-server certbot python3-certbot-nginx python3 python3-venv python3-pip acl cron bind9 dnsutils
+  vsftpd openssh-server certbot python3-certbot-nginx python3 python3-venv python3-pip acl cron bind9 dnsutils whois
 
 install_php_versions
 

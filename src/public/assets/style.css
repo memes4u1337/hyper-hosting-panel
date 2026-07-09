@@ -677,3 +677,20 @@ code{color:#9ee8ff;background:rgba(34,211,238,.09);border-radius:8px;padding:2px
 .login-clean-card .brand-mark{margin-bottom:18px}
 .login-clean-card .form-control{background:rgba(255,255,255,.075);border-color:rgba(255,255,255,.12);color:#fff}
 .login-clean-card .form-control:focus{background:rgba(255,255,255,.1);border-color:rgba(96,165,250,.72);box-shadow:0 0 0 .25rem rgba(79,125,255,.18);color:#fff}
+
+
+/* ---------- v40: readable DNS/network/access cards ---------- */
+.min-w-0{min-width:0!important}
+.panel-card,.network-check,.status-grid>div,.db-row-card,.dns-zone-card-v40{min-width:0}
+.network-check-grid,.status-grid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.network-check b,.status-grid b,.db-status-grid b,.hardware-grid b,.dns-compact-grid b{display:block;max-width:100%;white-space:normal;overflow-wrap:anywhere;word-break:break-word;line-height:1.25}
+.table-dark-soft code,.cmd-copy code,.connection-line code,.dns-transfer-box code{white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.cmd-copy{width:100%;min-width:0;text-align:left}.cmd-copy code{min-width:0}
+.logs{max-width:100%;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+.dns-page-v40 .panel-card,.network-page-v40 .panel-card,.access-page-v40 .panel-card{overflow:visible}
+.dns-hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(420px,.9fr);align-items:end;gap:18px;background:radial-gradient(circle at 0 0,rgba(34,211,238,.12),transparent 34%),linear-gradient(135deg,rgba(15,23,42,.92),rgba(11,18,35,.86))}
+.dns-hero h2{font-size:clamp(28px,3vw,44px);letter-spacing:-.055em;margin:.35rem 0 0}.dns-create-form{display:grid;grid-template-columns:1.1fr .8fr .55fr auto;gap:10px;min-width:0}
+.dns-compact-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px}.dns-compact-grid>div{padding:12px;border-radius:16px;background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.08);min-width:0}.dns-compact-grid span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px}.dns-compact-grid b{color:#eaf0ff;font-size:13px}.dns-transfer-box{grid-template-columns:repeat(auto-fit,minmax(210px,1fr))!important}.dns-transfer-box>div{align-items:flex-start!important}.dns-transfer-box code{display:inline-block;max-width:100%;line-height:1.35}.dns-record-form{display:grid;grid-template-columns:110px 140px minmax(180px,1fr) 100px 48px;gap:10px}.dns-inspect-form{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px}.dns-mini-note{padding:12px 14px;border-radius:16px;background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.08)}.dns-mini-note b{display:block;color:#eaf2ff}.dns-mini-note span{display:block;color:var(--muted);font-size:13px;overflow-wrap:anywhere}.inspector-grid{grid-template-columns:1fr}.network-check-grid-v40{grid-template-columns:repeat(auto-fit,minmax(155px,1fr))}
+.php-page-v40 .table-responsive{overflow:visible}.php-page-v40 form{min-width:0}.php-page-v40 select{min-width:160px}
+@media(max-width:1200px){.dns-hero{grid-template-columns:1fr}.dns-create-form{grid-template-columns:1fr 1fr}.dns-create-form button{grid-column:1/-1}}
+@media(max-width:760px){.dns-create-form,.dns-record-form,.dns-inspect-form{grid-template-columns:1fr}.network-check-grid,.status-grid,.dns-compact-grid{grid-template-columns:1fr}.content{min-width:0}.topbar{min-width:0}}

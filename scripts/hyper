@@ -306,6 +306,10 @@ cmd_dns() {
       [[ -n "${1:-}" ]] || err "Используй: sudo hyper dns status DOMAIN"
       $CTL dns-status-json "$1" | json_pretty
       ;;
+    inspect|whois)
+      [[ -n "${1:-}" ]] || err "Используй: sudo hyper dns inspect DOMAIN"
+      $CTL dns-inspect-json "$1" | json_pretty
+      ;;
     apply)
       [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper dns apply DOMAIN RECORDS_JSON"
       $CTL dns-apply "$@"
@@ -337,11 +341,12 @@ DNS перенос домена на HYPER-HOST:
 
 5) Проверка:
    sudo hyper dns status hyper-host.pw
+   sudo hyper dns inspect hyper-host.pw
    sudo hyper network doctor hyper-host.pw
    sudo hyper ssl check hyper-host.pw
 EODNSGUIDE
       ;;
-    *) err "DNS команды: sudo hyper dns wizard DOMAIN [IP] | status DOMAIN | guide | delete DOMAIN" ;;
+    *) err "DNS команды: sudo hyper dns wizard DOMAIN [IP] | status DOMAIN | inspect DOMAIN | delete DOMAIN" ;;
   esac
 }
 
