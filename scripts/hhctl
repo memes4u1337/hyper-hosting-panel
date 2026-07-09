@@ -715,30 +715,52 @@ ftp_shell_path() {
   if [[ -x /usr/sbin/nologin ]]; then echo /usr/sbin/nologin; else echo /bin/false; fi
 }
 
-cmd_create_ftp() {
-  ensure_dirs
-  ensure_nologin_shell
-  cleanup_hyper_host_mounts
-  local username="${1:-}" password="${2:-}" mode="${3:-common}"
-  [[ -n "$username" && -n "$password" ]] || err "Username and password required"
-  valid_name "$username" || err "Invalid ftp username"
-  [[ "$username" == hhftp_* ]] || username="hhftp_${username}"
-
-  local home="$FTP_DIR/$username" common="$home/common" sites="$common/sites" bots="$common/bots" shell
-  shell="$(ftp_shell_path)"
-
-  # Важно: home для chroot должен принадлежать root и не быть writable пользователем.
-  # Заполняем структуру до useradd без -m, чтобы не ловить ошибки из-за уже существующей папки.
-  mkdir -p "$home" "$common" "$sites" "$bots" "$SITES_DIR" "$BOTS_DIR"
-  if id "$username" >/dev/null 2>&1; then
-    usermod -d "$home" -s "$shell" "$username" || true
+ftp_alias_for() {
+  local username="${1:-}"
+  if [[ "$username" == hhftp_* ]]; then
+    printf '%s' "${username#hhftp_}"
   else
-    useradd -d "$home" -s "$shell" -g www-data "$username"
+    printf 'hhftp_%s' "$username"
+  fi
+}
+
+ensure_single_ftp_os_user() {
+  local username="${1:-}" password="${2:-}" home="${3:-}" shell
+  [[ -n "$username" && -n "$password" && -n "$home" ]] || err "FTP user/password/home required"
+  valid_name "$username" || err "Invalid ftp username: $username"
+  shell="$(ftp_shell_path)"
+  if id "$username" >/dev/null 2>&1; then
+    usermod -d "$home" -s "$shell" "$username" 2>/dev/null || true
+  else
+    useradd -M -d "$home" -s "$shell" -g www-data "$username"
   fi
   usermod -aG www-data "$username" 2>/dev/null || true
   echo "$username:$password" | chpasswd
   chage -E -1 "$username" 2>/dev/null || true
   passwd -u "$username" >/dev/null 2>&1 || true
+}
+
+cmd_create_ftp() {
+  ensure_dirs
+  ensure_nologin_shell
+  cleanup_hyper_host_mounts
+  local username="${1:-}" password="${2:-}" mode="${3:-common}" alias_user=""
+  [[ -n "$username" && -n "$password" ]] || err "Username and password required"
+  valid_name "$username" || err "Invalid ftp username"
+
+  # v36: больше не меняем логин молча. Что ввёл в панели, то и является FTP-логином.
+  # Для совместимости создаём второй алиас: user <-> hhftp_user. Поэтому в FileZilla сработают оба варианта.
+  alias_user="$(ftp_alias_for "$username")"
+  [[ "$alias_user" == "$username" ]] && alias_user=""
+
+  local home="$FTP_DIR/$username" common="$home/common" sites="$common/sites" bots="$common/bots"
+
+  # Важно: home для chroot должен принадлежать root и не быть writable пользователем.
+  mkdir -p "$home" "$common" "$sites" "$bots" "$SITES_DIR" "$BOTS_DIR"
+  ensure_single_ftp_os_user "$username" "$password" "$home"
+  if [[ -n "$alias_user" ]] && valid_name "$alias_user"; then
+    ensure_single_ftp_os_user "$alias_user" "$password" "$home"
+  fi
 
   chown root:root "$home"
   chmod 0755 "$home"
@@ -758,16 +780,26 @@ cmd_create_ftp() {
   fix_web_permissions "$SITES_DIR" "$username"
   fix_web_permissions "$BOTS_DIR" "$username"
   fix_web_permissions "$common" "$username"
+  if [[ -n "$alias_user" ]] && id "$alias_user" >/dev/null 2>&1; then
+    fix_web_permissions "$common" "$alias_user"
+  fi
   ensure_vsftpd_external_access
   systemctl is-active vsftpd >/dev/null 2>&1 || err "vsftpd не запустился. Проверь: systemctl status vsftpd"
-  log "FTP user ready: $username -> $home/common (host 0.0.0.0:21, passive 40000-40100)"
+  if [[ -n "$alias_user" ]]; then
+    log "FTP user ready: $username + alias $alias_user -> $home/common (0.0.0.0:21, passive 40000-40100)"
+  else
+    log "FTP user ready: $username -> $home/common (0.0.0.0:21, passive 40000-40100)"
+  fi
 }
 cmd_delete_ftp() {
-  local username="${1:-}" tmp
+  local username="${1:-}" tmp alias_user=""
   [[ -n "$username" ]] || err "Username required"
   valid_name "$username" || err "Invalid username"
-  [[ "$username" == hhftp_* ]] || username="hhftp_${username}"
-  local home="$FTP_DIR/$username"
+  alias_user="$(ftp_alias_for "$username")"
+  [[ "$alias_user" == "$username" ]] && alias_user=""
+  local home
+  home="$(getent passwd "$username" | cut -d: -f6)"
+  [[ -n "$home" && "$home" == "$FTP_DIR"/* ]] || home="$FTP_DIR/$username"
   for d in "$home/common/sites" "$home/common/bots" "$home/sites" "$home/bots" "$home/site"; do mountpoint -q "$d" && umount -lf "$d" || true; done
   if [[ -f /etc/fstab ]]; then
     tmp="$(mktemp)"
@@ -775,25 +807,40 @@ cmd_delete_ftp() {
     cat "$tmp" > /etc/fstab; rm -f "$tmp"
   fi
   id "$username" >/dev/null 2>&1 && userdel "$username" || true
+  if [[ -n "$alias_user" ]] && id "$alias_user" >/dev/null 2>&1; then
+    local ahome
+    ahome="$(getent passwd "$alias_user" | cut -d: -f6)"
+    [[ "$ahome" == "$home" ]] && userdel "$alias_user" || true
+  fi
   rm -rf "$home"
   systemctl restart vsftpd || true
-  log "FTP user deleted: $username"
+  log "FTP user deleted: $username${alias_user:+ + alias $alias_user}"
 }
 cmd_ftp_password() {
-  local username="${1:-}" password="${2:-}" shell
+  local username="${1:-}" password="${2:-}" alias_user="" home=""
   [[ -n "$username" && -n "$password" ]] || err "Username and password required"
   valid_name "$username" || err "Invalid username"
-  [[ "$username" == hhftp_* ]] || username="hhftp_${username}"
-  id "$username" >/dev/null 2>&1 || err "FTP user not found"
-  shell="$(ftp_shell_path)"
-  usermod -s "$shell" "$username" 2>/dev/null || true
-  echo "$username:$password" | chpasswd
-  chage -E -1 "$username" 2>/dev/null || true
-  passwd -u "$username" >/dev/null 2>&1 || true
+  alias_user="$(ftp_alias_for "$username")"
+  [[ "$alias_user" == "$username" ]] && alias_user=""
+  if ! id "$username" >/dev/null 2>&1; then
+    # v36: если строка в панели есть, а системного пользователя нет — не падаем, а создаём его заново.
+    cmd_create_ftp "$username" "$password" all-sites
+    return
+  fi
+  home="$(getent passwd "$username" | cut -d: -f6)"
+  [[ -n "$home" && "$home" == "$FTP_DIR"/* ]] || home="$FTP_DIR/$username"
+  ensure_single_ftp_os_user "$username" "$password" "$home"
+  if [[ -n "$alias_user" ]] && valid_name "$alias_user"; then
+    ensure_single_ftp_os_user "$alias_user" "$password" "$home"
+  fi
   fix_web_permissions "$SITES_DIR" "$username"
   fix_web_permissions "$BOTS_DIR" "$username"
+  if [[ -d "$home/common" ]]; then
+    fix_web_permissions "$home/common" "$username"
+    [[ -n "$alias_user" ]] && fix_web_permissions "$home/common" "$alias_user"
+  fi
   ensure_vsftpd_external_access
-  log "FTP password updated: $username"
+  log "FTP password updated: $username${alias_user:+ + alias $alias_user}"
 }
 
 cmd_create_db() {
@@ -1763,9 +1810,18 @@ public=os.environ.get('PUBLIC_IP','') or os.environ.get('SERVER_PUBLIC_IP','')
 server=os.environ.get('SERVER_IP','')
 host_public=public or (panel if panel and panel!='_' else server)
 host_lan=server
+by_home={}
 for u in pwd.getpwall():
-    if u.pw_name.startswith('hhftp_'):
-        ftp.append({'username':u.pw_name,'target_path':u.pw_dir,'host':host_public,'host_public':host_public,'host_lan':host_lan,'port':21,'passive_range':'40000-40100'})
+    home=os.path.realpath(u.pw_dir or '')
+    ftp_root=os.path.realpath(FTP_DIR)
+    if not home.startswith(ftp_root + os.sep):
+        continue
+    # v36: FTP может быть user и hhftp_user. Если оба ведут в одну папку, в панели показываем короткий логин.
+    cur=by_home.get(home)
+    if cur is None or (cur.startswith('hhftp_') and not u.pw_name.startswith('hhftp_')):
+        by_home[home]=u.pw_name
+for home, name in sorted(by_home.items(), key=lambda x: x[1]):
+    ftp.append({'username':name,'target_path':home,'host':host_public,'host_public':host_public,'host_lan':host_lan,'port':21,'passive_range':'40000-40100'})
 bots=[]
 try:
     data=json.loads(subprocess.check_output('pm2 jlist',shell=True,text=True,stderr=subprocess.DEVNULL))
@@ -1966,7 +2022,7 @@ EOFTP
 }
 
 cmd_ftp_doctor_json() {
-  local pub pasv listen21 local_banner lan_banner service conf users_count ufw_status ftp21_fw pasv_fw issue hint
+  local pub pasv listen21 local_banner lan_banner service conf users_count auth_fail_users ufw_status ftp21_fw pasv_fw issue hint
   pub="$(ftp_passive_address)"
   pasv="$(grep -E '^pasv_address=' /etc/vsftpd.conf 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
   listen21=0; listen_port_tcp 21 && listen21=1
@@ -1975,7 +2031,8 @@ cmd_ftp_doctor_json() {
   [[ -n "${SERVER_IP:-}" ]] && lan_banner="$(timeout 3 bash -c "head -c 120 < /dev/tcp/${SERVER_IP}/21" 2>/dev/null | tr -d '\r' | head -n1 || true)"
   service="$(systemctl is-active vsftpd 2>/dev/null || true)"
   conf="$(test -s /etc/vsftpd.conf && echo ok || echo missing)"
-  users_count="$(getent passwd | awk -F: '$1 ~ /^hhftp_/ {c++} END{print c+0}')"
+  users_count="$(getent passwd | awk -F: -v d="$FTP_DIR" '$6 ~ "^" d "/" {c++} END{print c+0}')"
+  auth_fail_users="$(journalctl -u vsftpd -n 120 --no-pager 2>/dev/null | grep -Eo 'ruser=[^ ]+' | cut -d= -f2 | sort | uniq -c | sort -rn | head -n 6 | awk '{print $2 "(" $1 ")"}' | paste -sd, - || true)"
   ufw_status="$(ufw status 2>/dev/null | head -n1 | sed 's/^Status: //' || true)"
   ftp21_fw="$(ufw status numbered 2>/dev/null | grep -E '(^| )21/tcp' | head -n1 || true)"
   pasv_fw="$(ufw status numbered 2>/dev/null | grep -E '40000:40100|40000-40100' | head -n1 || true)"
@@ -1984,8 +2041,9 @@ cmd_ftp_doctor_json() {
   if [[ -z "$issue" && "$listen21" != 1 ]]; then issue="порт 21 не слушается локально"; hint="sudo hyper ftp fix"; fi
   if [[ -z "$issue" && -z "$local_banner" ]]; then issue="локальный FTP banner не отвечает"; hint="sudo journalctl -u vsftpd -n 80 --no-pager"; fi
   if [[ -z "$issue" && -n "$pub" && -n "$pasv" && "$pub" != "$pasv" ]]; then issue="PASV IP отличается от сохранённого public IP"; hint="sudo hyper ftp fix"; fi
+  if [[ -z "$issue" && "${users_count:-0}" == "0" ]]; then issue="FTP работает, но FTP-пользователей нет"; hint="Создай FTP в панели или выполни: sudo hyper ftp user LOGIN PASSWORD"; fi
   if [[ -z "$issue" ]]; then issue="локально FTP исправен"; hint="Если FileZilla с другого интернета не подключается — пробрось на роутере TCP 21 и TCP 40000-40100 на LAN IP сервера."; fi
-  SERVER_IP="$SERVER_IP" PUBLIC_IP="$(public_ip)" CONFIGURED_PUBLIC_IP="$(configured_public_ip)" FTP_PASV="$pasv" FTP_PASV_EXPECTED="$pub" LISTEN21="$listen21" LOCAL_BANNER="$local_banner" LAN_BANNER="$lan_banner" SERVICE="$service" CONF_TEST="$conf" USERS_COUNT="$users_count" UFW_STATUS="$ufw_status" FTP21_FW="$ftp21_fw" PASV_FW="$pasv_fw" ISSUE="$issue" HINT="$hint" python3 - <<'PYFTP'
+  SERVER_IP="$SERVER_IP" PUBLIC_IP="$(public_ip)" CONFIGURED_PUBLIC_IP="$(configured_public_ip)" FTP_PASV="$pasv" FTP_PASV_EXPECTED="$pub" LISTEN21="$listen21" LOCAL_BANNER="$local_banner" LAN_BANNER="$lan_banner" SERVICE="$service" CONF_TEST="$conf" USERS_COUNT="$users_count" AUTH_FAIL_USERS="$auth_fail_users" UFW_STATUS="$ufw_status" FTP21_FW="$ftp21_fw" PASV_FW="$pasv_fw" ISSUE="$issue" HINT="$hint" python3 - <<'PYFTP'
 import os,json
 print(json.dumps({
  'server_ip': os.environ.get('SERVER_IP',''),
@@ -1999,6 +2057,7 @@ print(json.dumps({
  'pasv_address': os.environ.get('FTP_PASV',''),
  'pasv_expected': os.environ.get('FTP_PASV_EXPECTED',''),
  'ftp_users': int(os.environ.get('USERS_COUNT','0') or 0),
+ 'recent_failed_logins': os.environ.get('AUTH_FAIL_USERS',''),
  'config_test': os.environ.get('CONF_TEST',''),
  'ufw_status': os.environ.get('UFW_STATUS',''),
  'ufw_rules': {'ftp_21': os.environ.get('FTP21_FW',''), 'passive': os.environ.get('PASV_FW','')},
