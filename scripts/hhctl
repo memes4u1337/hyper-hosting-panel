@@ -30,6 +30,7 @@ PM2_HOME_DIR="${PM2_HOME_DIR:-$BOTS_DIR/.pm2}"
 NODE_MAJOR_MIN="${NODE_MAJOR_MIN:-18}"
 
 log() { echo "[hhctl] $*"; }
+warn() { echo "[hhctl warning] $*" >&2; }
 err() { echo "[hhctl error] $*" >&2; exit 1; }
 valid_domain() { [[ "$1" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]; }
 valid_name() { [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{1,63}$ ]]; }
@@ -385,6 +386,86 @@ p.write_text(text,encoding='utf-8')
 PYCFG
 }
 
+
+path_is_mount_target() {
+  local target="${1:-}"
+  [[ -n "$target" ]] || return 1
+  awk '{print $5}' /proc/self/mountinfo 2>/dev/null | sed 's/\\040/ /g' | grep -Fxq "$target"
+}
+
+safe_fstab_filter_file() {
+  # v41: /etc/fstab на некоторых установках бывает read-only. Для FTP это не должно ломать панель.
+  # Если fstab сейчас нельзя переписать — просто пропускаем постоянную запись, runtime bind-mount уже работает.
+  local tmp="${1:-}"
+  [[ -s "$tmp" ]] || return 0
+  if [[ ! -w /etc/fstab ]]; then
+    mount -o remount,rw / >/dev/null 2>&1 || true
+  fi
+  if ! cat "$tmp" > /etc/fstab 2>/tmp/hyper-host-fstab.err; then
+    warn "Не удалось обновить /etc/fstab. Файловая система read-only; FTP продолжит работать до перезагрузки. Потом выполни: sudo hyper ftp fix"
+    rm -f /tmp/hyper-host-fstab.err 2>/dev/null || true
+    return 0
+  fi
+}
+
+safe_fstab_remove_ftp_paths() {
+  local pattern_file="${1:-}" tmp
+  [[ -f /etc/fstab && -s "$pattern_file" ]] || return 0
+  tmp="$(mktemp)"
+  python3 - /etc/fstab "$pattern_file" > "$tmp" <<'PYFSTABRM' || true
+import sys
+fstab=sys.argv[1]
+patterns=[x.strip() for x in open(sys.argv[2],encoding='utf-8',errors='ignore').read().splitlines() if x.strip()]
+try:
+    lines=open(fstab,encoding='utf-8',errors='ignore').read().splitlines()
+except FileNotFoundError:
+    lines=[]
+for line in lines:
+    raw=line.strip()
+    if not raw or raw.startswith('#'):
+        print(line); continue
+    parts=raw.split()
+    target=parts[1] if len(parts)>1 else ''
+    if any(target == p or target.startswith(p.rstrip('/') + '/') for p in patterns):
+        continue
+    print(line)
+PYFSTABRM
+  safe_fstab_filter_file "$tmp"
+  rm -f "$tmp" "$pattern_file" 2>/dev/null || true
+}
+
+safe_fstab_append_bind() {
+  local src="${1:-}" dst="${2:-}" line
+  [[ -n "$src" && -n "$dst" ]] || return 0
+  [[ -f /etc/fstab ]] || touch /etc/fstab 2>/dev/null || return 0
+  if grep -qs " $dst " /etc/fstab 2>/dev/null; then return 0; fi
+  line="$src $dst none bind,nofail,x-systemd.requires-mounts-for=$src 0 0"
+  if [[ ! -w /etc/fstab ]]; then
+    mount -o remount,rw / >/dev/null 2>&1 || true
+  fi
+  if ! printf '%s\n' "$line" >> /etc/fstab 2>/tmp/hyper-host-fstab.err; then
+    warn "Не удалось сохранить FTP mount в /etc/fstab: $dst. Runtime-доступ уже включён; после перезагрузки выполни: sudo hyper ftp fix"
+    rm -f /tmp/hyper-host-fstab.err 2>/dev/null || true
+  fi
+}
+
+ftp_make_path_visible() {
+  # Делает каталог читаемым/открываемым для FTP-пользователей, не ломая владельцев сайта.
+  local path="${1:-}" user="${2:-}"
+  [[ -n "$path" && -e "$path" ]] || return 0
+  chgrp -R www-data "$path" 2>/dev/null || true
+  find "$path" -xdev -type d -exec chmod u+rwx,g+rwx,o+rx {} + 2>/dev/null || true
+  find "$path" -xdev -type f -exec chmod u+rw,g+rw,o+r {} + 2>/dev/null || true
+  if command -v setfacl >/dev/null 2>&1; then
+    setfacl -R -m g:www-data:rwx "$path" 2>/dev/null || true
+    setfacl -R -d -m g:www-data:rwx "$path" 2>/dev/null || true
+    if [[ -n "$user" ]]; then
+      setfacl -R -m u:"$user":rwx "$path" 2>/dev/null || true
+      setfacl -R -d -m u:"$user":rwx "$path" 2>/dev/null || true
+    fi
+  fi
+}
+
 cleanup_hyper_host_mounts() {
   # v38: чистим только реально сломанные циклические bind-mount'ы.
   # ВАЖНО: больше не снимаем нормальные FTP bind-mount'ы вида:
@@ -422,7 +503,7 @@ cleanup_hyper_host_mounts() {
       /site\/common/ {next}
       {print}
     ' /etc/fstab > "$tmp" || true
-    cat "$tmp" > /etc/fstab
+    safe_fstab_filter_file "$tmp"
     rm -f "$tmp"
   fi
 }
@@ -969,35 +1050,29 @@ ftp_scope_label() {
 }
 
 ftp_bind_mount() {
-  local src="${1:-}" dst="${2:-}" tmp
+  local src="${1:-}" dst="${2:-}"
   [[ -n "$src" && -n "$dst" ]] || return 0
   mkdir -p "$src" "$dst"
-  if ! mountpoint -q "$dst"; then
-    mount --bind "$src" "$dst" 2>/dev/null || true
+  # Не пытаемся монтировать поверх уже смонтированной папки: это давало пустые/дублирующиеся каталоги.
+  if ! path_is_mount_target "$dst"; then
+    if ! mount --bind "$src" "$dst" 2>/tmp/hyper-host-mount.err; then
+      cat /tmp/hyper-host-mount.err >&2 2>/dev/null || true
+      rm -f /tmp/hyper-host-mount.err 2>/dev/null || true
+      err "Не удалось открыть $src через FTP в $dst. Проверь права/mount: sudo dmesg | tail -50"
+    fi
   fi
-  if mountpoint -q "$dst" && ! grep -qs " $dst " /etc/fstab 2>/dev/null; then
-    echo "$src $dst none bind 0 0" >> /etc/fstab
-  fi
+  mountpoint -q "$dst" && safe_fstab_append_bind "$src" "$dst"
 }
 
 ftp_umount_scope_mounts() {
-  local home="${1:-}" tmp mp
+  local home="${1:-}" tmp mp patterns
   [[ -n "$home" && "$home" == "$FTP_DIR"/* ]] || return 0
   for mp in "$home/site" "$home/sites" "$home/bots" "$home/backups" "$home/common/sites" "$home/common/bots" "$home/common/backups"; do
-    mountpoint -q "$mp" && umount -lf "$mp" 2>/dev/null || true
+    path_is_mount_target "$mp" && umount -lf "$mp" 2>/dev/null || true
   done
-  if [[ -f /etc/fstab ]]; then
-    tmp="$(mktemp)"
-    grep -vF " $home/site " /etc/fstab \
-      | grep -vF " $home/sites " \
-      | grep -vF " $home/bots " \
-      | grep -vF " $home/backups " \
-      | grep -vF " $home/common/sites " \
-      | grep -vF " $home/common/bots " \
-      | grep -vF " $home/common/backups " > "$tmp" || true
-    cat "$tmp" > /etc/fstab
-    rm -f "$tmp"
-  fi
+  patterns="$(mktemp)"
+  printf '%s\n' "$home/site" "$home/sites" "$home/bots" "$home/backups" "$home/common/sites" "$home/common/bots" "$home/common/backups" > "$patterns"
+  safe_fstab_remove_ftp_paths "$patterns"
 }
 
 ftp_prepare_scope() {
@@ -1044,6 +1119,13 @@ ftp_prepare_scope() {
       ;;
   esac
   [[ -n "$local_root" ]] || err "FTP local_root не определён"
+  cat > "$home/README_FTP.txt" <<EOFTPREADME 2>/dev/null || true
+HYPER-HOST FTP
+Режим доступа: $(ftp_scope_label "$mode" "$target")
+
+Если папка открывается пустой после перезагрузки сервера, выполни:
+sudo hyper ftp fix
+EOFTPREADME
   echo "$local_root"
 }
 
@@ -1112,10 +1194,10 @@ cmd_create_ftp() {
 
   for u in "${variants[@]}"; do
     id "$u" >/dev/null 2>&1 || continue
-    fix_web_permissions "$SITES_DIR" "$u"
-    fix_web_permissions "$BOTS_DIR" "$u"
-    fix_web_permissions "$BACKUP_DIR" "$u"
-    fix_web_permissions "$home/uploads" "$u"
+    ftp_make_path_visible "$SITES_DIR" "$u"
+    ftp_make_path_visible "$BOTS_DIR" "$u"
+    ftp_make_path_visible "$BACKUP_DIR" "$u"
+    ftp_make_path_visible "$home/uploads" "$u"
   done
 
   # После прав восстанавливаем mount'ы: fix_web_permissions больше их не должен снимать,
@@ -1142,7 +1224,7 @@ cmd_delete_ftp() {
   [[ -n "$home" && "$home" == "$FTP_DIR"/* ]] || home="$FTP_DIR/$username"
   ftp_umount_scope_mounts "$home"
   for d in "$home/common/sites" "$home/common/bots" "$home/common/backups" "$home/sites" "$home/bots" "$home/backups" "$home/site"; do
-    mountpoint -q "$d" && umount -lf "$d" || true
+    path_is_mount_target "$d" && umount -lf "$d" 2>/dev/null || true
   done
   for u in "${variants[@]}"; do
     if id "$u" >/dev/null 2>&1; then
@@ -1152,7 +1234,8 @@ cmd_delete_ftp() {
     fi
     rm -f "/etc/vsftpd.user_conf/$u" 2>/dev/null || true
   done
-  rm -rf "$home"
+  # Не удаляем чужие данные за пределами FTP home и не пересекаем файловые системы.
+  [[ "$home" == "$FTP_DIR"/* ]] && rm -rf --one-file-system "$home" 2>/dev/null || true
   systemctl restart vsftpd || true
   log "FTP user deleted: $username"
 }
@@ -1186,10 +1269,10 @@ cmd_ftp_password() {
 
   for u in "${variants[@]}"; do
     id "$u" >/dev/null 2>&1 || continue
-    fix_web_permissions "$SITES_DIR" "$u"
-    fix_web_permissions "$BOTS_DIR" "$u"
-    fix_web_permissions "$BACKUP_DIR" "$u"
-    fix_web_permissions "$home/uploads" "$u"
+    ftp_make_path_visible "$SITES_DIR" "$u"
+    ftp_make_path_visible "$BOTS_DIR" "$u"
+    ftp_make_path_visible "$BACKUP_DIR" "$u"
+    ftp_make_path_visible "$home/uploads" "$u"
   done
   local_root="$(ftp_prepare_scope "$username" "$mode" "$target" "$home")"
   for u in "${variants[@]}"; do
@@ -2383,6 +2466,12 @@ local_enable=YES
 write_enable=YES
 local_umask=002
 file_open_mode=0664
+dirlist_enable=YES
+download_enable=YES
+anon_world_readable_only=NO
+virtual_use_local_privs=YES
+hide_ids=NO
+use_sendfile=NO
 dirmessage_enable=NO
 use_localtime=YES
 xferlog_enable=YES
@@ -2430,6 +2519,39 @@ EOFTP
     tail -n 80 /var/log/vsftpd.log >&2 || true
     err "vsftpd не запустился после FTP fix"
   }
+}
+
+
+cmd_ftp_fix_all() {
+  # v41: ftp fix теперь не только правит vsftpd, но и восстанавливает bind-mount'ы аккаунтов из базы панели.
+  ensure_vsftpd_external_access
+  local db="${BASE_DIR}/data/hyperhost.sqlite" line username password scope target
+  if [[ -f "$db" ]]; then
+    while IFS=$'\t' read -r username password scope target; do
+      [[ -n "$username" ]] || continue
+      scope="$(ftp_scope_normalize "${scope:-all}")"
+      if [[ -n "$password" && ${#password} -ge 8 ]]; then
+        cmd_ftp_password "$username" "$password" "$scope" "${target:-}" >/dev/null 2>&1 || warn "Не удалось восстановить FTP $username"
+      else
+        home="$FTP_DIR/$username"
+        mkdir -p "$home"
+        ftp_prepare_scope "$username" "$scope" "${target:-}" "$home" >/dev/null || warn "Не удалось восстановить mount'ы FTP $username"
+      fi
+    done < <(python3 - "$db" <<'PYFTPROWS'
+import sqlite3, sys
+path=sys.argv[1]
+try:
+    con=sqlite3.connect(path)
+    cur=con.execute("SELECT username, COALESCE(password_plain,''), COALESCE(access_scope,'all'), COALESCE(access_target,'') FROM ftp_accounts ORDER BY id")
+    for r in cur:
+        print('\t'.join(str(x or '') for x in r))
+except Exception:
+    pass
+PYFTPROWS
+)
+  fi
+  ensure_vsftpd_external_access
+  log "FTP исправлен: FileZilla, passive-порты и папки аккаунтов восстановлены"
 }
 
 cmd_ftp_doctor_json() {
@@ -3252,7 +3374,7 @@ case "${1:-}" in
   disk-doctor-json) shift; cmd_disk_doctor_json "$@" ;;
   disk-expand) shift; cmd_disk_expand "$@" ;;
   disk-guide) shift; cmd_disk_guide "$@" ;;
-  ftp-fix) shift; ensure_vsftpd_external_access; log "FTP external access fixed" ;;
+  ftp-fix) shift; cmd_ftp_fix_all ;;
   ftp-doctor-json) shift; cmd_ftp_doctor_json ;;
   backup-run) shift; cmd_backup_run "$@" ;;
   backup-schedule) shift; cmd_backup_schedule "$@" ;;
