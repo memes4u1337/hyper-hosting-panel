@@ -64,7 +64,7 @@ print(f"Disk:            {hb(j.get('disk_used',0))} / {hb(j.get('disk_total',0))
 print(f"PM2:             {j.get('pm2_version','') or 'not installed'}")
 print('')
 print('Сервисы:')
-for k in ['nginx','mariadb','php_fpm','vsftpd','bind9']:
+for k in ['nginx','mariadb','ftp','php_fpm','bind9']:
     print(f"  {k:<10} {svc.get(k,'unknown')}")
 print('')
 print('Пути:')

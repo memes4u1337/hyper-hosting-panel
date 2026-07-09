@@ -406,8 +406,12 @@ chmod 0755 "$FTP_DIR" "$FTP_USER_CONF_DIR" 2>/dev/null || true
 
 # v44: FTP обслуживает встроенный HYPER-HOST FTP server.
 # Он не использует /etc/passwd, /etc/fstab, PAM, useradd и не зависит от vsftpd.
+# v45: mask, а не только stop/disable — иначе случайный "systemctl restart vsftpd"
+# в чьём-нибудь deploy-скрипте снова поднимет vsftpd на порту 21 и он будет драться
+# за порт с hyper-host-ftp.service.
 systemctl stop vsftpd >/dev/null 2>&1 || true
 systemctl disable vsftpd >/dev/null 2>&1 || true
+systemctl mask vsftpd >/dev/null 2>&1 || true
 
 start_hyper_ftp_runtime_install() {
   pkill -f "hyper_ftp_server.py|hyper-host-ftp-server" >/dev/null 2>&1 || true

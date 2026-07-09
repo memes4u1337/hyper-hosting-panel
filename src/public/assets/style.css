@@ -748,3 +748,36 @@ code{color:#9ee8ff;background:rgba(34,211,238,.09);border-radius:8px;padding:2px
   .flyout{width:calc(100vw - var(--hh-rail-w) - 10px)}
   .sidebar-v2{width:92vw}
 }
+
+/* ---------- v45: единая чёткая типографика для всех инфо-блоков "подпись/значение" ---------- */
+:root{
+  --hh-muted:#a3b3d1;      /* был #8fa0bd — подписи были слишком тусклыми, особенно на телефоне */
+  --hh-label:#8ea3c9;
+}
+/* Подписи (span сверху/слева) — единый стиль во всех карточках: чуть крупнее, с заметным трекингом,
+   без "заборности" мелкого капса. Значения (b) — крупнее, светлее, с нормальным line-height. */
+.hardware-grid span,.db-status-grid span,.db-row-card span,.dash-system-list-v33 span,
+.dns-compact-grid span,.network-check span,.status-grid span,.dns-mini-note span{
+  color:var(--hh-label)!important;font-size:11px!important;font-weight:800;letter-spacing:.05em;
+}
+.hardware-grid b,.db-status-grid b,.db-row-card b,.dash-system-list-v33 b,
+.dns-compact-grid b,.network-check b,.status-grid b,.dns-mini-note b{
+  color:#f3f7ff!important;font-size:14px;font-weight:750;line-height:1.32;margin-top:5px;
+}
+/* Строки "подпись слева — значение справа" (FTP/DNS connection lines, реквизиты, кредлайны):
+   значение всегда прижато вправо, моноширинным акцентом, не обрезается и не наезжает. */
+.cred,.connection-line{gap:14px}
+.cred span,.connection-line span{flex:0 0 auto;color:var(--hh-label);font-weight:800}
+.cred code,.connection-line code{margin-left:auto;text-align:right;max-width:100%}
+.cred b{margin-left:auto;text-align:right}
+/* Бейджи-статусы сервисов — текст крупнее и контрастнее, легче читать статус с телефона */
+.service-chip-v29{font-size:12px;font-weight:750}
+.service-chip-v29.ok{color:#d4f9df}
+.service-chip-v29.bad{color:#ffd9d9}
+/* Крупные счётчики на дашборде (Сайты/Базы/Боты/FTP) — значение всегда явно выделено справа-снизу */
+.dash-counts-v33 b{color:#fff}
+@media(max-width:576px){
+  .hardware-grid,.db-status-grid,.dns-compact-grid{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
+  .cred,.connection-line{flex-direction:column;align-items:flex-start!important}
+  .cred code,.connection-line code,.cred b{margin-left:0;text-align:left}
+}

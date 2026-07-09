@@ -2596,8 +2596,14 @@ ensure_vsftpd_external_access() {
   resolve_hyper_ftp_bin >/dev/null || err "Не найден HYPER-HOST FTP server. Запусти: sudo bash install.sh"
 
   # Освобождаем 21 порт от старого vsftpd, но не считаем его отсутствие ошибкой.
+  # v45 fix: раньше vsftpd только останавливался и disable'ился. Но "disable" не мешает
+  # ручному "systemctl restart vsftpd" (например в старых deploy-скриптах) снова
+  # поднять vsftpd на порту 21 — он начинает драться за порт с hyper-host-ftp.service
+  # (у обоих Restart=always), и FileZilla то коннектится, то нет, то видит не те
+  # аккаунты. "mask" полностью блокирует запуск vsftpd, пока его явно не "unmask".
   systemctl stop vsftpd >/dev/null 2>&1 || true
   systemctl disable vsftpd >/dev/null 2>&1 || true
+  systemctl mask vsftpd >/dev/null 2>&1 || true
 
   open_server_ports
 
@@ -2676,7 +2682,7 @@ PYFTPROWS
 }
 
 cmd_ftp_doctor_json() {
-  local pub listen21 local_banner lan_banner service users_count auth_fail_users ufw_status ftp21_fw pasv_fw issue hint proc
+  local pub listen21 local_banner lan_banner service users_count auth_fail_users ufw_status ftp21_fw pasv_fw issue hint proc port21_owner vsftpd_active
   pub="$(ftp_passive_address)"
   listen21=0; listen_port_tcp 21 && listen21=1
   local_banner="$(timeout 3 bash -c 'head -c 120 < /dev/tcp/127.0.0.1/21' 2>/dev/null | tr -d '\\r' | head -n1 || true)"
@@ -2684,18 +2690,27 @@ cmd_ftp_doctor_json() {
   [[ -n "${SERVER_IP:-}" ]] && lan_banner="$(timeout 3 bash -c "head -c 120 < /dev/tcp/${SERVER_IP}/21" 2>/dev/null | tr -d '\\r' | head -n1 || true)"
   service="$(systemctl is-active hyper-host-ftp.service 2>/dev/null || true)"
   proc="$(pgrep -af 'hyper_ftp_server.py|hyper-host-ftp-server' 2>/dev/null | head -n1 || true)"
+  # v45: кто реально держит порт 21 — если это не наш процесс (например ожил vsftpd
+  # после ручного "systemctl restart vsftpd"), FileZilla будет коннектиться то к
+  # старому серверу, то к новому, и логины/пароли не будут совпадать.
+  port21_owner="$(ss -H -ltnp 'sport = :21' 2>/dev/null | grep -oE 'users:\(\("[^"]+"' | head -n1 | sed -E 's/users:\(\("//;s/"//' || true)"
+  vsftpd_active="$(systemctl is-active vsftpd 2>/dev/null || true)"
   users_count="$(awk 'NF{c++} END{print int(c/2)}' "$FTP_AUTH_TXT" 2>/dev/null || echo 0)"
   auth_fail_users="$(grep -E 'login failed user=' /var/log/hyper-host-ftp.log 2>/dev/null | tail -n 50 | sed -E 's/.*login failed user=([^ ]+).*/\1/' | sort | uniq -c | sort -rn | head -n 6 | awk '{print $2 "(" $1 ")"}' | paste -sd, - || true)"
   ufw_status="$(ufw status 2>/dev/null | head -n1 | sed 's/^Status: //' || true)"
   ftp21_fw="$(ufw status numbered 2>/dev/null | grep -E '(^| )21/tcp' | head -n1 || true)"
   pasv_fw="$(ufw status numbered 2>/dev/null | grep -E '40000:40100|40000-40100' | head -n1 || true)"
   issue=""; hint=""
-  if ! resolve_hyper_ftp_bin >/dev/null; then issue="не найден встроенный FTP-сервер"; hint="sudo bash install.sh"; fi
+  if [[ -n "$port21_owner" && "$port21_owner" != "python3" && "$vsftpd_active" == "active" ]]; then
+    issue="порт 21 занят другим сервисом ($port21_owner), похоже ожил vsftpd и дерётся за порт с hyper-host-ftp"
+    hint="sudo systemctl stop vsftpd; sudo systemctl mask vsftpd; sudo hyper ftp fix"
+  fi
+  if [[ -z "$issue" ]] && ! resolve_hyper_ftp_bin >/dev/null; then issue="не найден встроенный FTP-сервер"; hint="sudo bash install.sh"; fi
   if [[ -z "$issue" && "$listen21" != 1 ]]; then issue="порт 21 не слушается локально"; hint="sudo hyper ftp fix"; fi
   if [[ -z "$issue" && -z "$local_banner" ]]; then issue="локальный FTP banner не отвечает"; hint="sudo tail -n 120 /var/log/hyper-host-ftp.log"; fi
   if [[ -z "$issue" && "${users_count:-0}" == "0" ]]; then issue="FTP работает, но FTP-пользователей нет"; hint="Создай FTP в панели или выполни: sudo hyper ftp user LOGIN PASSWORD all"; fi
   if [[ -z "$issue" ]]; then issue="локально FTP исправен"; hint="FileZilla: FTP, plain, passive, порт 21. Для внешнего интернета пробрось TCP 21 и 40000-40100."; fi
-  SERVER_IP="$SERVER_IP" PUBLIC_IP="$(public_ip)" CONFIGURED_PUBLIC_IP="$(configured_public_ip)" LISTEN21="$listen21" LOCAL_BANNER="$local_banner" LAN_BANNER="$lan_banner" SERVICE="$service" PROC="$proc" USERS_COUNT="$users_count" AUTH_FAIL_USERS="$auth_fail_users" UFW_STATUS="$ufw_status" FTP21_FW="$ftp21_fw" PASV_FW="$pasv_fw" ISSUE="$issue" HINT="$hint" python3 - <<'PYFTP'
+  SERVER_IP="$SERVER_IP" PUBLIC_IP="$(public_ip)" CONFIGURED_PUBLIC_IP="$(configured_public_ip)" LISTEN21="$listen21" LOCAL_BANNER="$local_banner" LAN_BANNER="$lan_banner" SERVICE="$service" PROC="$proc" USERS_COUNT="$users_count" AUTH_FAIL_USERS="$auth_fail_users" UFW_STATUS="$ufw_status" FTP21_FW="$ftp21_fw" PASV_FW="$pasv_fw" ISSUE="$issue" HINT="$hint" PORT21_OWNER="$port21_owner" VSFTPD_ACTIVE="$vsftpd_active" python3 - <<'PYFTP'
 import os,json
 print(json.dumps({
  'server_ip': os.environ.get('SERVER_IP',''),
@@ -2703,6 +2718,8 @@ print(json.dumps({
  'configured_public_ip': os.environ.get('CONFIGURED_PUBLIC_IP',''),
  'ftp_service': os.environ.get('SERVICE',''),
  'ftp_process': os.environ.get('PROC',''),
+ 'port21_owner': os.environ.get('PORT21_OWNER',''),
+ 'vsftpd_active': os.environ.get('VSFTPD_ACTIVE',''),
  'ftp_backend': 'hyper-host-ftp',
  'listen_21': os.environ.get('LISTEN21') == '1',
  'local_banner': os.environ.get('LOCAL_BANNER',''),
