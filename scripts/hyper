@@ -269,7 +269,7 @@ cmd_update() {
   $CTL sync-json >/dev/null 2>&1 || true
   nginx -t
   systemctl reload nginx
-  systemctl restart vsftpd 2>/dev/null || true
+  $CTL ftp-fix >/dev/null 2>&1 || true
   say "Обновление HYPER-HOST из GitHub завершено."
 }
 
@@ -389,7 +389,7 @@ cmd_help() {
   sudo hyper panel domain DOMAIN      привязать домен именно к панели
   sudo hyper panel ssl DOMAIN EMAIL   выпустить SSL для панели
   sudo hyper ftp                     FTP-пользователи
-  sudo hyper ftp doctor              диагностика FTP/vsftpd/passive
+  sudo hyper ftp doctor              диагностика FTP/passive
   sudo hyper php install             установить/проверить PHP 8.1/8.2/8.3/8.4
   sudo hyper db pma-fix              настроить phpMyAdmin pmadb и лимиты
   sudo hyper ftp fix                 починить FTP для FileZilla

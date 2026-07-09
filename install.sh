@@ -404,12 +404,19 @@ mkdir -p "$FTP_DIR" "$BASE_DIR/data" "$BASE_DIR/ftp" "$FTP_USER_CONF_DIR" "$BASE
 chmod 0600 "$FTP_AUTH_TXT" 2>/dev/null || true
 chmod 0755 "$FTP_DIR" "$FTP_USER_CONF_DIR" 2>/dev/null || true
 
-# v43: FTP обслуживает встроенный HYPER-HOST FTP server.
-# Он не использует /etc/passwd, /etc/fstab, PAM и не зависит от vsftpd.
+# v44: FTP обслуживает встроенный HYPER-HOST FTP server.
+# Он не использует /etc/passwd, /etc/fstab, PAM, useradd и не зависит от vsftpd.
 systemctl stop vsftpd >/dev/null 2>&1 || true
 systemctl disable vsftpd >/dev/null 2>&1 || true
 
-cat > /tmp/hyper-host-ftp.service.$$ <<EOSVC
+start_hyper_ftp_runtime_install() {
+  pkill -f "hyper_ftp_server.py|hyper-host-ftp-server" >/dev/null 2>&1 || true
+  nohup "$HYPER_FTP_BIN" --host 0.0.0.0 --port 21 --passive-min 40000 --passive-max 40100 >>/var/log/hyper-host-ftp.log 2>&1 &
+  echo $! > "$BASE_DIR/run/hyper-host-ftp.pid" 2>/dev/null || true
+}
+
+if [[ -d /etc/systemd/system && -w /etc/systemd/system ]]; then
+  cat > /tmp/hyper-host-ftp.service.$$ <<EOSVC
 [Unit]
 Description=HYPER-HOST FTP server
 After=network-online.target
@@ -426,18 +433,22 @@ LimitNOFILE=65535
 [Install]
 WantedBy=multi-user.target
 EOSVC
-if cat /tmp/hyper-host-ftp.service.$$ > /etc/systemd/system/hyper-host-ftp.service 2>/dev/null; then
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  systemctl enable hyper-host-ftp.service >/dev/null 2>&1 || true
-  systemctl restart hyper-host-ftp.service >/dev/null 2>&1 || true
+  if cat /tmp/hyper-host-ftp.service.$$ > /etc/systemd/system/hyper-host-ftp.service 2>/dev/null; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable hyper-host-ftp.service >/dev/null 2>&1 || true
+    systemctl restart hyper-host-ftp.service >/dev/null 2>&1 || true
+  else
+    start_hyper_ftp_runtime_install
+  fi
+  rm -f /tmp/hyper-host-ftp.service.$$ 2>/dev/null || true
 else
-  warn "Не удалось записать systemd service FTP. Запускаю runtime-процесс без записи в /etc."
+  start_hyper_ftp_runtime_install
 fi
-rm -f /tmp/hyper-host-ftp.service.$$ 2>/dev/null || true
+
+sleep 1
 if ! ss -ltn 2>/dev/null | grep -q ':21 '; then
-  pkill -f hyper-host-ftp-server >/dev/null 2>&1 || true
-  nohup "$HYPER_FTP_BIN" --host 0.0.0.0 --port 21 --passive-min 40000 --passive-max 40100 >>/var/log/hyper-host-ftp.log 2>&1 &
-  echo $! > "$BASE_DIR/run/hyper-host-ftp.pid" 2>/dev/null || true
+  start_hyper_ftp_runtime_install
+  sleep 1
 fi
 
 ufw allow 21/tcp >/dev/null 2>&1 || true
