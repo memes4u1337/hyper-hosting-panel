@@ -137,16 +137,18 @@ function handle_post(string $action): void
             }
             case 'create_ftp': {
                 $username=trim((string)($_POST['username']??'')); $password=(string)($_POST['password']??''); if($username===''||!is_valid_name($username)) throw new RuntimeException('Неверный FTP логин'); if(strlen($password)<8) throw new RuntimeException('Пароль FTP минимум 8 символов');
-                $res=run_ctl(['create-ftp',$username,$password,'all-sites'],240); if($res['code']!==0) throw new RuntimeException($res['output']); $final=$username; $home=rtrim((string)app_config('ftp_dir','/var/www/hyper-host-ftp'),'/').'/'.$final; $ftpHostForRow=current_public_ipv4() ?: host_name(); upsert_ftp_row($final,$home,$password,$ftpHostForRow); add_event('ftp','Создан FTP: '.$final); flash("FTP создан. Хост: ".$ftpHostForRow." | FTP-логин: {$final} | Пароль: {$password}",'success'); redirect('/?page=ftp');
+                $scope=ftp_scope_clean((string)($_POST['scope']??'all')); $target=ftp_scope_target_clean($scope,(string)($_POST['scope_target']??''));
+                $args=['create-ftp',$username,$password,$scope]; if($target!=='') $args[]=$target;
+                $res=run_ctl($args,240); if($res['code']!==0) throw new RuntimeException($res['output']); $final=$username; $home=rtrim((string)app_config('ftp_dir','/var/www/hyper-host-ftp'),'/').'/'.$final; $ftpHostForRow=current_public_ipv4() ?: host_name(); upsert_ftp_row($final,$home,$password,$ftpHostForRow,$scope,$target); add_event('ftp','Создан FTP: '.$final.' / '.ftp_scope_label_ui($scope,$target)); flash("FTP создан. Хост: ".$ftpHostForRow." | FTP-логин: {$final} | Пароль: {$password} | Открывает: ".ftp_scope_label_ui($scope,$target),'success'); redirect('/?page=ftp');
             }
             case 'delete_ftp': {
                 $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM ftp_accounts WHERE id=?'); $st->execute([$id]); $f=$st->fetch(); if(!$f) throw new RuntimeException('FTP не найден'); $res=run_ctl(['delete-ftp',$f['username']],120); if($res['code']!==0) throw new RuntimeException($res['output']); db()->prepare('DELETE FROM ftp_accounts WHERE id=?')->execute([$id]); redirect('/?page=ftp');
             }
             case 'reset_ftp_password': {
-                $id=(int)($_POST['id']??0); $pass=(string)($_POST['password']??''); if(strlen($pass)<8) throw new RuntimeException('Пароль минимум 8 символов'); $st=db()->prepare('SELECT * FROM ftp_accounts WHERE id=?'); $st->execute([$id]); $f=$st->fetch(); if(!$f) throw new RuntimeException('FTP не найден'); $res=run_ctl(['ftp-password',$f['username'],$pass],120); if($res['code']!==0) throw new RuntimeException($res['output']); upsert_ftp_row((string)$f['username'],(string)$f['target_path'],$pass,current_public_ipv4() ?: host_name()); flash('FTP-логин восстановлен и пароль обновлён','success'); redirect('/?page=ftp');
+                $id=(int)($_POST['id']??0); $pass=(string)($_POST['password']??''); if(strlen($pass)<8) throw new RuntimeException('Пароль минимум 8 символов'); $st=db()->prepare('SELECT * FROM ftp_accounts WHERE id=?'); $st->execute([$id]); $f=$st->fetch(); if(!$f) throw new RuntimeException('FTP не найден'); $scope=ftp_scope_clean((string)($f['access_scope']??'all')); $target=ftp_scope_target_clean($scope,(string)($f['access_target']??'')); $args=['ftp-password',$f['username'],$pass,$scope]; if($target!=='') $args[]=$target; $res=run_ctl($args,120); if($res['code']!==0) throw new RuntimeException($res['output']); upsert_ftp_row((string)$f['username'],(string)$f['target_path'],$pass,current_public_ipv4() ?: host_name(),$scope,$target); flash('FTP-логин восстановлен и пароль обновлён','success'); redirect('/?page=ftp');
             }
             case 'repair_ftp_account': {
-                $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM ftp_accounts WHERE id=?'); $st->execute([$id]); $f=$st->fetch(); if(!$f) throw new RuntimeException('FTP не найден'); $pass=(string)($f['password_plain']??''); if(strlen($pass)<8) $pass=default_ftp_password(); $res=run_ctl(['ftp-password',$f['username'],$pass],180); if($res['code']!==0) throw new RuntimeException($res['output']); upsert_ftp_row((string)$f['username'],(string)$f['target_path'],$pass,current_public_ipv4() ?: host_name()); flash('FTP-аккаунт восстановлен. Используй логин '.(string)$f['username'],'success'); redirect('/?page=ftp');
+                $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM ftp_accounts WHERE id=?'); $st->execute([$id]); $f=$st->fetch(); if(!$f) throw new RuntimeException('FTP не найден'); $pass=(string)($f['password_plain']??''); if(strlen($pass)<8) $pass=default_ftp_password(); $scope=ftp_scope_clean((string)($f['access_scope']??'all')); $target=ftp_scope_target_clean($scope,(string)($f['access_target']??'')); $args=['ftp-password',$f['username'],$pass,$scope]; if($target!=='') $args[]=$target; $res=run_ctl($args,180); if($res['code']!==0) throw new RuntimeException($res['output']); upsert_ftp_row((string)$f['username'],(string)$f['target_path'],$pass,current_public_ipv4() ?: host_name(),$scope,$target); flash('FTP-аккаунт восстановлен. Открывает: '.ftp_scope_label_ui($scope,$target),'success'); redirect('/?page=ftp');
             }
             case 'create_db': {
                 $db=trim((string)($_POST['db_name']??'')); $du=trim((string)($_POST['db_user']??'')); $pass=(string)($_POST['password']??''); $remote=!empty($_POST['remote_allowed'])?'1':'0'; $hostPattern=$remote==='1'?(trim((string)($_POST['host_pattern']??'%'))):'localhost'; if($hostPattern==='custom') $hostPattern=trim((string)($_POST['custom_host']??'%')); if(!is_valid_db_name($db)||!is_valid_db_name($du)) throw new RuntimeException('Имя базы/пользователя: латиница, цифры, _'); if(strlen($pass)<10) throw new RuntimeException('Пароль базы минимум 10 символов'); $res=run_ctl(['create-db',$db,$du,$pass,$remote,$hostPattern],180); if($res['code']!==0) throw new RuntimeException($res['output']); upsert_db_row($db,$du,(int)$remote,$pass,$remote==='1'?mysql_external_host():mysql_local_host(),'3306'); upsert_mysql_account_row($du,$pass,$hostPattern,$db,'ALL',(int)$remote); flash('База и phpMyAdmin-пользователь созданы','success'); redirect('/?page=databases');
@@ -275,7 +277,7 @@ function sync_resources(): void
     $data=run_ctl_json(['sync-json'],90); if(isset($data['_error'])) throw new RuntimeException((string)$data['_error']);
     foreach(($data['sites']??[]) as $s) upsert_site_row_v5((string)$s['domain'],(string)($s['aliases']??''),(string)$s['root_path'],(int)($s['ssl_enabled']??0),(string)($s['php_version']??''));
     foreach(($data['folders']??[]) as $f) upsert_folder_row((string)$f['name'],(string)$f['path']);
-    foreach(($data['ftp']??[]) as $f) upsert_ftp_row((string)$f['username'],(string)$f['target_path'],'',(string)($f['host']??host_name()));
+    foreach(($data['ftp']??[]) as $f) upsert_ftp_row((string)$f['username'],(string)$f['target_path'],'',(string)($f['host']??host_name()),(string)($f['access_scope']??'all'),(string)($f['access_target']??''));
     foreach(($data['databases']??[]) as $d) upsert_db_row((string)$d['db_name'],(string)$d['db_user'],(int)($d['remote_allowed']??0));
     foreach(($data['bots']??[]) as $b) upsert_bot_row_v5((string)$b['name'],(string)$b['runtime'],(string)$b['path'],(string)$b['start_command'],(int)($b['memory_limit_mb']??0));
 }
@@ -368,7 +370,7 @@ function nav_item(string $id,string $icon,string $label,string $page): string { 
 function render_login(): void
 {
     $flash=flash(); $need2fa=setting_get('security_2fa_enabled','0')==='1'; ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=35" rel="stylesheet"></head><body class="login-body">
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=38" rel="stylesheet"></head><body class="login-body">
 <div class="login-orb login-orb-a"></div><div class="login-orb login-orb-b"></div><div class="login-orb login-orb-c"></div>
 <div class="login-shell-v2">
   <div class="login-side">
@@ -410,7 +412,7 @@ function render_page(string $page, array $user): void
 <link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
-<link href="/assets/style.css?v=35" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell">
+<link href="/assets/style.css?v=38" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell">
 <aside class="sidebar sidebar-v2">
   <div class="rail" data-active-cat="<?= e($activeCat) ?>">
     <a href="/?page=dashboard" class="rail-logo"><i class="fa-solid fa-bolt"></i></a>
@@ -440,7 +442,7 @@ function render_page(string $page, array $user): void
     </div>
   </div>
 </aside>
-<main class="content" style="--cat-accent:<?= e($nav[$activeCat]['accent']??'#4f7dff') ?>"><header class="topbar"><div><div class="topbar-kicker"><i class="fa-solid <?= e($nav[$activeCat]['icon']??'fa-rocket') ?>"></i><?= e($nav[$activeCat]['label']??'') ?></div><h1><?= e($title) ?></h1><div class="small muted">Сервер: <code><?= e(host_name()) ?></code></div></div><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft"><i class="fa-solid fa-rotate me-2"></i>Обновить</button></form></header><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?><?php route_view($page); ?></main></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script><script src="/assets/app.js?v=35" defer></script></body></html><?php
+<main class="content" style="--cat-accent:<?= e($nav[$activeCat]['accent']??'#4f7dff') ?>"><header class="topbar"><div><div class="topbar-kicker"><i class="fa-solid <?= e($nav[$activeCat]['icon']??'fa-rocket') ?>"></i><?= e($nav[$activeCat]['label']??'') ?></div><h1><?= e($title) ?></h1><div class="small muted">Сервер: <code><?= e(host_name()) ?></code></div></div><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft"><i class="fa-solid fa-rotate me-2"></i>Обновить</button></form></header><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?><?php route_view($page); ?></main></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script><script src="/assets/app.js?v=38" defer></script></body></html><?php
 }
 function route_view(string $page): void { match($page){ 'files'=>view_files(), 'sites'=>view_sites(), 'ftp'=>view_ftp(), 'databases'=>view_databases(), 'pma_login'=>view_pma_login(), 'bots'=>view_bots(), 'bot_logs'=>view_bot_logs(), 'backups'=>view_backups(), 'dns'=>view_dns(), 'network'=>view_network(), 'ssl'=>view_ssl(), 'php'=>view_php(), 'cron'=>view_cron(), 'logs'=>view_logs(), 'security'=>view_security(), 'settings'=>view_settings(), 'access'=>view_access(), 'disk'=>view_disk(), default=>view_dashboard(), }; }
 function stat_card(string $icon,string $label,string $value,string $sub=''): void { ?><div class="stat-card"><div class="stat-icon"><i class="fa-solid <?= e($icon) ?>"></i></div><div><span><?= e($label) ?></span><b><?= e($value) ?></b><?php if($sub): ?><em><?= e($sub) ?></em><?php endif; ?></div></div><?php }
@@ -745,8 +747,37 @@ document.querySelectorAll('.db-access-pills input[type="radio"]').forEach(functi
 </script><?php
 }
 
+function ftp_scope_clean(string $scope): string
+{
+    $scope = strtolower(trim($scope));
+    return in_array($scope, ['all','sites','site','bots','backups','files'], true) ? $scope : 'all';
+}
+
+function ftp_scope_target_clean(string $scope, string $target): string
+{
+    $target = trim($target);
+    if ($scope !== 'site') return '';
+    if ($target === '' || !preg_match('/^[a-z0-9][a-z0-9.-]{1,250}[a-z0-9]$/i', $target)) {
+        throw new RuntimeException('Выбери сайт для FTP-доступа');
+    }
+    return strtolower($target);
+}
+
+function ftp_scope_label_ui(string $scope, string $target = ''): string
+{
+    $scope = ftp_scope_clean($scope);
+    return match ($scope) {
+        'sites' => 'все сайты',
+        'site' => 'сайт ' . ($target ?: 'не выбран'),
+        'bots' => 'боты PM2',
+        'backups' => 'backup',
+        'files' => 'личная FTP-папка uploads',
+        default => 'всё: сайты, боты, backup, uploads',
+    };
+}
+
 function view_ftp(): void
-{ $rows=db()->query('SELECT * FROM ftp_accounts ORDER BY id DESC')->fetchAll(); $gen=default_ftp_password(); $doctor=run_ctl_json_cached(['ftp-doctor-json'],8,30); $publicHost=(string)(($doctor['configured_public_ip']??'') ?: ($doctor['public_ip']??'') ?: current_public_ipv4() ?: host_name()); $lanHost=(string)(($doctor['server_ip']??'') ?: app_config('server_ip','')); $ftpHost=$publicHost; $ftpIssue=(string)($doctor['issue']??''); $ftpHint=(string)($doctor['hint']??''); ?>
+{ $rows=db()->query('SELECT * FROM ftp_accounts ORDER BY id DESC')->fetchAll(); $siteOptions=db()->query('SELECT domain FROM sites ORDER BY domain ASC')->fetchAll(); $gen=default_ftp_password(); $doctor=run_ctl_json_cached(['ftp-doctor-json'],8,30); $publicHost=(string)(($doctor['configured_public_ip']??'') ?: ($doctor['public_ip']??'') ?: current_public_ipv4() ?: host_name()); $lanHost=(string)(($doctor['server_ip']??'') ?: app_config('server_ip','')); $ftpHost=$publicHost; $ftpIssue=(string)($doctor['issue']??''); $ftpHint=(string)($doctor['hint']??''); ?>
 <div class="ftp-layout-v34 row g-4">
   <div class="col-lg-4">
     <div class="panel-card ftp-create-card">
@@ -760,8 +791,20 @@ function view_ftp(): void
       </div>
       <?php if($ftpIssue !== ''): ?><div class="ftp-health mt-3"><b><?= e($ftpIssue) ?></b><?php if($ftpHint !== ''): ?><span><?= e($ftpHint) ?></span><?php endif; ?></div><?php endif; ?>
       <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_ftp">
-        <input class="form-control" name="username" placeholder="komplektoffpc" required>
+        <input class="form-control" name="username" placeholder="hhftp_Danz" required>
         <div class="input-group"><input class="form-control" name="password" id="ftpPass" value="<?= e($gen) ?>" minlength="8" required><button class="btn btn-outline-light" type="button" onclick="copyValue('ftpPass')"><i class="fa-regular fa-copy"></i></button></div>
+        <select class="form-select" name="scope" id="ftpScopeSelect">
+          <option value="all">Показывать всё</option>
+          <option value="sites">Только все сайты</option>
+          <option value="site">Только один сайт</option>
+          <option value="bots">Только боты</option>
+          <option value="backups">Только backup</option>
+          <option value="files">Только личную папку uploads</option>
+        </select>
+        <select class="form-select" name="scope_target" id="ftpSiteSelect">
+          <option value="">Выбрать сайт</option>
+          <?php foreach($siteOptions as $s): ?><option value="<?= e($s['domain']) ?>"><?= e($s['domain']) ?></option><?php endforeach; ?>
+        </select>
         <button class="btn btn-primary btn-lg"><i class="fa-solid fa-plus me-2"></i>Создать FTP</button>
       </form>
       <form method="post" class="mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="ftp_fix"><button class="btn btn-soft w-100"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Починить FTP</button></form>
@@ -770,7 +813,7 @@ function view_ftp(): void
   <div class="col-lg-8">
     <div class="panel-card mb-3 ftp-connection-card">
       <div class="connection-line"><span>FileZilla</span><code>FTP <?= e($ftpHost) ?> : 21</code><b>Plain + Passive</b></div>
-      <div class="connection-line"><span>LAN</span><code>FTP <?= e($serverIp ?: '192.168.x.x') ?> : 21</code><b>для локальной сети</b></div>
+      <div class="connection-line"><span>LAN</span><code>FTP <?= e($lanHost ?: '192.168.x.x') ?> : 21</code><b>для локальной сети</b></div>
       <div class="ftp-connect-grid mt-3">
         <div><span>Из интернета</span><code><?= e($publicHost) ?></code></div>
         <div><span>В локальной сети</span><code><?= e($lanHost ?: $publicHost) ?></code></div>
@@ -779,7 +822,7 @@ function view_ftp(): void
       </div>
     </div>
     <div class="row g-3">
-      <?php foreach($rows as $r): $cardHost=$publicHost; ?>
+      <?php foreach($rows as $r): $cardHost=$publicHost; $scope=ftp_scope_clean((string)($r['access_scope']??'all')); $target=(string)($r['access_target']??''); $scopeLabel=ftp_scope_label_ui($scope,$target); ?>
         <div class="col-md-6"><div class="ftp-card ftp-card-v25">
           <h3><i class="fa-solid fa-user-lock me-2"></i><?= e($r['username']) ?></h3>
           <div class="cred"><span>Хост</span><code><?= e($cardHost) ?></code></div>
@@ -787,7 +830,8 @@ function view_ftp(): void
           <div class="cred"><span>Порт</span><code>21</code></div>
           <div class="cred"><span>FTP-логин</span><code><?= e($r['username']) ?></code></div>
           <div class="cred"><span>Пароль</span><code><?= e($r['password_plain']?:'задать новый') ?></code></div>
-          <div class="ftp-tags"><span>Plain FTP</span><span>Passive</span><span>common/sites</span></div>
+          <div class="cred"><span>Открывает</span><code><?= e($scopeLabel) ?></code></div>
+          <div class="ftp-tags"><span>Plain FTP</span><span>Passive</span><span><?= e($scopeLabel) ?></span></div>
           <div class="d-flex gap-2 mt-3 flex-wrap">
             <button class="btn btn-sm btn-light" onclick="copyText('Protocol: FTP\nHost: <?= e($cardHost) ?>\nPort: 21\nEncryption: Only use plain FTP\nTransfer mode: Passive\nLogin: <?= e($r['username']) ?>\nPassword: <?= e($r['password_plain']) ?>')">Копировать</button>
             <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#ftp<?= (int)$r['id'] ?>">Пароль</button>

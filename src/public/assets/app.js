@@ -191,7 +191,22 @@ document.addEventListener('click', function(e){
     tick();
   }
 
+  function initFtpScopeSelect(){
+    const scope = q('#ftpScopeSelect');
+    const site = q('#ftpSiteSelect');
+    if(!scope || !site) return;
+    const sync = () => {
+      const oneSite = scope.value === 'site';
+      site.style.display = oneSite ? '' : 'none';
+      site.disabled = !oneSite;
+      if(!oneSite) site.value = '';
+    };
+    scope.addEventListener('change', sync);
+    sync();
+  }
+
   function startLive(){
+    initFtpScopeSelect();
     scheduler(updateDashboard, 4000, () => !!q('[data-live-stats]'));
     scheduler(updateBots, 4000, () => !!q('[data-live-bots]'));
   }

@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS ftp_accounts (
     username TEXT NOT NULL UNIQUE,
     target_path TEXT NOT NULL,
     password_plain TEXT NOT NULL DEFAULT '',
+    access_scope TEXT NOT NULL DEFAULT 'all',
+    access_target TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
@@ -152,6 +154,8 @@ ensure_column($pdo, 'sites', 'php_version', "TEXT NOT NULL DEFAULT ''");
 ensure_column($pdo, 'sites', 'disk_limit_mb', "INTEGER NOT NULL DEFAULT 0");
 ensure_column($pdo, 'ftp_accounts', 'host', "TEXT NOT NULL DEFAULT ''");
 ensure_column($pdo, 'ftp_accounts', 'password_plain', "TEXT NOT NULL DEFAULT ''");
+ensure_column($pdo, 'ftp_accounts', 'access_scope', "TEXT NOT NULL DEFAULT 'all'");
+ensure_column($pdo, 'ftp_accounts', 'access_target', "TEXT NOT NULL DEFAULT ''");
 ensure_column($pdo, 'databases', 'db_password_plain', "TEXT NOT NULL DEFAULT ''");
 ensure_column($pdo, 'databases', 'db_host', "TEXT NOT NULL DEFAULT '127.0.0.1'");
 ensure_column($pdo, 'databases', 'db_port', "TEXT NOT NULL DEFAULT '3306'");

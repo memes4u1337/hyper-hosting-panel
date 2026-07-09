@@ -227,12 +227,24 @@ PYCFG
 }
 
 cleanup_hyper_host_mounts() {
-  # Безопасно снимает старые/сломанные bind-mount'ы HYPER-HOST, особенно те,
-  # которые попали внутрь public_html и создают циклы common/sites/.../common/bots.
-  local mp pass
+  # v38: чистим только реально сломанные циклические bind-mount'ы.
+  # ВАЖНО: больше не снимаем нормальные FTP bind-mount'ы вида:
+  #   /var/www/hyper-host-ftp/<user>/sites
+  #   /var/www/hyper-host-ftp/<user>/bots
+  #   /var/www/hyper-host-ftp/<user>/backups
+  # Именно из-за старой слишком широкой чистки FileZilla подключалась, но каталог был пустой.
+  local mp pass tmp
   for pass in 1 2 3 4 5; do
     mapfile -t _hh_bad_mounts < <(
-      awk '{print $5}' /proc/self/mountinfo 2>/dev/null         | sed 's/\040/ /g'         | grep -E '^/var/www/hyper-host-(ftp|sites)/'         | grep -E '/(common|sites|bots|site)(/|$)'         | sort -r || true
+      awk '{print $5}' /proc/self/mountinfo 2>/dev/null \
+        | sed 's/\\040/ /g' \
+        | while read -r mp; do
+            case "$mp" in
+              */public_html/common|*/public_html/common/*|*/public_html/sites|*/public_html/sites/*|*/public_html/bots|*/public_html/bots/*|*/public_html/site|*/public_html/site/*|*/common/sites/common|*/common/sites/common/*|*/common/bots/common|*/common/bots/common/*|*/site/common|*/site/common/*)
+                printf '%s\n' "$mp" ;;
+            esac
+          done \
+        | sort -r || true
     )
     [[ ${#_hh_bad_mounts[@]} -eq 0 ]] && break
     for mp in "${_hh_bad_mounts[@]}"; do
@@ -243,7 +255,16 @@ cleanup_hyper_host_mounts() {
     done
   done
   if [[ -f /etc/fstab ]]; then
-    sed -i.bak -E '/hyper-host-ftp|hyper-host-sites\/.*\/(common|sites|bots|site)|public_html\/(common|sites|bots|site)/d' /etc/fstab 2>/dev/null || true
+    tmp="$(mktemp)"
+    awk '
+      /public_html\/(common|sites|bots|site)/ {next}
+      /common\/sites\/common/ {next}
+      /common\/bots\/common/ {next}
+      /site\/common/ {next}
+      {print}
+    ' /etc/fstab > "$tmp" || true
+    cat "$tmp" > /etc/fstab
+    rm -f "$tmp"
   fi
 }
 
@@ -733,18 +754,122 @@ ftp_user_variants() {
     [[ -n "$u" ]] || continue
     [[ "$seen" == *"|$u|"* ]] && continue
     valid_name "$u" || continue
-    printf '%s
-' "$u"
+    printf '%s\n' "$u"
     seen="$seen|$u|"
   done
 }
 
+ftp_scope_normalize() {
+  local mode="${1:-all}"
+  case "$mode" in
+    all|all-sites|common|root|everything) echo all ;;
+    sites|www|web) echo sites ;;
+    site|single-site) echo site ;;
+    bots|pm2) echo bots ;;
+    backups|backup) echo backups ;;
+    files|ftp|uploads|own) echo files ;;
+    *) err "Неверный режим FTP-доступа: $mode" ;;
+  esac
+}
+
+ftp_scope_label() {
+  local mode="${1:-all}" target="${2:-}"
+  mode="$(ftp_scope_normalize "$mode")"
+  case "$mode" in
+    all) echo "всё: sites, bots, backups, uploads" ;;
+    sites) echo "все сайты" ;;
+    site) echo "сайт ${target:-не выбран}" ;;
+    bots) echo "боты" ;;
+    backups) echo "backup" ;;
+    files) echo "личная FTP-папка uploads" ;;
+  esac
+}
+
+ftp_bind_mount() {
+  local src="${1:-}" dst="${2:-}" tmp
+  [[ -n "$src" && -n "$dst" ]] || return 0
+  mkdir -p "$src" "$dst"
+  if ! mountpoint -q "$dst"; then
+    mount --bind "$src" "$dst" 2>/dev/null || true
+  fi
+  if mountpoint -q "$dst" && ! grep -qs " $dst " /etc/fstab 2>/dev/null; then
+    echo "$src $dst none bind 0 0" >> /etc/fstab
+  fi
+}
+
+ftp_umount_scope_mounts() {
+  local home="${1:-}" tmp mp
+  [[ -n "$home" && "$home" == "$FTP_DIR"/* ]] || return 0
+  for mp in "$home/site" "$home/sites" "$home/bots" "$home/backups" "$home/common/sites" "$home/common/bots" "$home/common/backups"; do
+    mountpoint -q "$mp" && umount -lf "$mp" 2>/dev/null || true
+  done
+  if [[ -f /etc/fstab ]]; then
+    tmp="$(mktemp)"
+    grep -vF " $home/site " /etc/fstab \
+      | grep -vF " $home/sites " \
+      | grep -vF " $home/bots " \
+      | grep -vF " $home/backups " \
+      | grep -vF " $home/common/sites " \
+      | grep -vF " $home/common/bots " \
+      | grep -vF " $home/common/backups " > "$tmp" || true
+    cat "$tmp" > /etc/fstab
+    rm -f "$tmp"
+  fi
+}
+
+ftp_prepare_scope() {
+  local username="${1:-}" mode="${2:-all}" target="${3:-}" home="${4:-}" local_root label
+  mode="$(ftp_scope_normalize "$mode")"
+  [[ -n "$username" && -n "$home" ]] || err "FTP scope: empty username/home"
+  [[ "$home" == "$FTP_DIR"/* ]] || err "Unsafe FTP home: $home"
+  mkdir -p "$home"
+  ftp_umount_scope_mounts "$home"
+
+  case "$mode" in
+    all)
+      mkdir -p "$home/sites" "$home/bots" "$home/backups" "$home/uploads"
+      ftp_bind_mount "$SITES_DIR" "$home/sites"
+      ftp_bind_mount "$BOTS_DIR" "$home/bots"
+      ftp_bind_mount "$BACKUP_DIR" "$home/backups"
+      local_root="$home"
+      ;;
+    sites)
+      mkdir -p "$home/sites"
+      ftp_bind_mount "$SITES_DIR" "$home/sites"
+      local_root="$home/sites"
+      ;;
+    site)
+      [[ -n "$target" ]] || err "Для режима site укажи домен сайта"
+      valid_domain "$target" || err "Invalid site domain: $target"
+      mkdir -p "$SITES_DIR/$target/public_html" "$home/site"
+      ftp_bind_mount "$SITES_DIR/$target/public_html" "$home/site"
+      local_root="$home/site"
+      ;;
+    bots)
+      mkdir -p "$home/bots"
+      ftp_bind_mount "$BOTS_DIR" "$home/bots"
+      local_root="$home/bots"
+      ;;
+    backups)
+      mkdir -p "$home/backups"
+      ftp_bind_mount "$BACKUP_DIR" "$home/backups"
+      local_root="$home/backups"
+      ;;
+    files)
+      mkdir -p "$home/uploads"
+      local_root="$home/uploads"
+      ;;
+  esac
+  [[ -n "$local_root" ]] || err "FTP local_root не определён"
+  echo "$local_root"
+}
+
 write_ftp_user_conf() {
-  local username="${1:-}" common="${2:-}"
-  [[ -n "$username" && -n "$common" ]] || return 0
+  local username="${1:-}" local_root="${2:-}"
+  [[ -n "$username" && -n "$local_root" ]] || return 0
   mkdir -p /etc/vsftpd.user_conf
   cat > "/etc/vsftpd.user_conf/$username" <<EOFUSERCONF
-local_root=$common
+local_root=$local_root
 write_enable=YES
 EOFUSERCONF
 }
@@ -759,8 +884,6 @@ ensure_single_ftp_os_user() {
   else
     tmp="$(mktemp)"
     if ! useradd -M -d "$home" -s "$shell" -g www-data "$username" 2>"$tmp"; then
-      # Ubuntu/Debian могут ругаться на заглавные буквы. Для FTP панели это нормально,
-      # поэтому повторяем с --badname, а дополнительно создаём lowercase-алиасы.
       useradd --badname -M -d "$home" -s "$shell" -g www-data "$username" 2>>"$tmp" || { cat "$tmp" >&2; rm -f "$tmp"; return 1; }
     fi
     rm -f "$tmp"
@@ -776,54 +899,56 @@ cmd_create_ftp() {
   ensure_dirs
   ensure_nologin_shell
   cleanup_hyper_host_mounts
-  local username="${1:-}" password="${2:-}" mode="${3:-common}" variants=() u owner="" alias_note=""
+  local username="${1:-}" password="${2:-}" mode="${3:-all}" target="${4:-}" variants=() u owner="" alias_note="" home local_root
   [[ -n "$username" && -n "$password" ]] || err "Username and password required"
   valid_name "$username" || err "Invalid ftp username"
+  mode="$(ftp_scope_normalize "$mode")"
 
-  # v37: FileZilla/Ubuntu-safe. Создаём точный логин + hhftp_алиас + lowercase варианты.
-  # Это чинит кейсы вида hhftp_Danz, когда клиент вводит логин с заглавной буквой,
-  # а Linux/панель раньше могли создать другой вариант имени.
   mapfile -t variants < <(ftp_user_variants "$username")
   [[ ${#variants[@]} -gt 0 ]] || err "Invalid ftp username"
 
-  local home="$FTP_DIR/$username" common="$home/common" sites="$common/sites" bots="$common/bots"
+  home="$FTP_DIR/$username"
+  local_root="$(ftp_prepare_scope "$username" "$mode" "$target" "$home")"
 
-  # Chroot-home не должен быть writable пользователем. Рабочая папка — common/.
-  mkdir -p "$home" "$common" "$sites" "$bots" "$SITES_DIR" "$BOTS_DIR"
+  # Chroot-home не должен быть writable пользователем. Рабочая область зависит от выбранного доступа.
+  chown root:root "$home"
+  chmod 0755 "$home"
+
   for u in "${variants[@]}"; do
     if ensure_single_ftp_os_user "$u" "$password" "$home"; then
       [[ -z "$owner" ]] && owner="$u"
-      write_ftp_user_conf "$u" "$common"
+      write_ftp_user_conf "$u" "$local_root"
     fi
   done
   [[ -n "$owner" ]] || err "Не удалось создать FTP Linux-пользователя"
 
-  chown root:root "$home"
-  chmod 0755 "$home"
-  chown -R "$owner":www-data "$common"
-  chmod -R u+rwX,g+rwX,o+rX "$common"
-  find "$common" -type d -exec chmod 2775 {} + 2>/dev/null || true
-
-  # В FTP пользователь сразу попадает в common/, внутри common/sites и common/bots — реальные папки панели.
-  for pair in "$SITES_DIR:$sites" "$BOTS_DIR:$bots"; do
-    local src dst
-    src="${pair%%:*}"; dst="${pair#*:}"
-    mkdir -p "$src" "$dst"
-    if ! mountpoint -q "$dst"; then mount --bind "$src" "$dst" 2>/dev/null || true; fi
-    if mountpoint -q "$dst" && ! grep -qs " $dst " /etc/fstab; then echo "$src $dst none bind 0 0" >> /etc/fstab; fi
-  done
+  mkdir -p "$home/uploads"
+  chown -R "$owner":www-data "$home/uploads" 2>/dev/null || true
+  chmod -R u+rwX,g+rwX,o+rX "$home/uploads" 2>/dev/null || true
+  find "$home/uploads" -type d -exec chmod 2775 {} + 2>/dev/null || true
 
   for u in "${variants[@]}"; do
     id "$u" >/dev/null 2>&1 || continue
     fix_web_permissions "$SITES_DIR" "$u"
     fix_web_permissions "$BOTS_DIR" "$u"
-    fix_web_permissions "$common" "$u"
+    fix_web_permissions "$BACKUP_DIR" "$u"
+    fix_web_permissions "$home/uploads" "$u"
   done
+
+  # После прав восстанавливаем mount'ы: fix_web_permissions больше их не должен снимать,
+  # но повторная подготовка гарантирует, что FileZilla увидит не пустой каталог.
+  local_root="$(ftp_prepare_scope "$username" "$mode" "$target" "$home")"
+  for u in "${variants[@]}"; do
+    id "$u" >/dev/null 2>&1 || continue
+    write_ftp_user_conf "$u" "$local_root"
+  done
+
   ensure_vsftpd_external_access
   systemctl is-active vsftpd >/dev/null 2>&1 || err "vsftpd не запустился. Проверь: systemctl status vsftpd"
   alias_note="$(printf '%s ' "${variants[@]}" | sed 's/[[:space:]]*$//')"
-  log "FTP user ready: $username -> $common (aliases: $alias_note, 0.0.0.0:21, passive 40000-40100)"
+  log "FTP user ready: $username -> $local_root / scope=$(ftp_scope_label "$mode" "$target") / aliases: $alias_note"
 }
+
 cmd_delete_ftp() {
   local username="${1:-}" tmp variants=() u
   [[ -n "$username" ]] || err "Username required"
@@ -832,12 +957,10 @@ cmd_delete_ftp() {
   local home
   home="$(getent passwd "$username" | cut -d: -f6 || true)"
   [[ -n "$home" && "$home" == "$FTP_DIR"/* ]] || home="$FTP_DIR/$username"
-  for d in "$home/common/sites" "$home/common/bots" "$home/sites" "$home/bots" "$home/site"; do mountpoint -q "$d" && umount -lf "$d" || true; done
-  if [[ -f /etc/fstab ]]; then
-    tmp="$(mktemp)"
-    grep -vF " $home/common/sites " /etc/fstab | grep -vF " $home/common/bots " | grep -vF " $home/sites " | grep -vF " $home/bots " | grep -vF " $home/site " > "$tmp" || true
-    cat "$tmp" > /etc/fstab; rm -f "$tmp"
-  fi
+  ftp_umount_scope_mounts "$home"
+  for d in "$home/common/sites" "$home/common/bots" "$home/common/backups" "$home/sites" "$home/bots" "$home/backups" "$home/site"; do
+    mountpoint -q "$d" && umount -lf "$d" || true
+  done
   for u in "${variants[@]}"; do
     if id "$u" >/dev/null 2>&1; then
       local uh
@@ -850,43 +973,48 @@ cmd_delete_ftp() {
   systemctl restart vsftpd || true
   log "FTP user deleted: $username"
 }
+
 cmd_ftp_password() {
-  local username="${1:-}" password="${2:-}" variants=() u owner="" home="" common=""
+  local username="${1:-}" password="${2:-}" mode="${3:-all}" target="${4:-}" variants=() u owner="" home="" local_root=""
   [[ -n "$username" && -n "$password" ]] || err "Username and password required"
   valid_name "$username" || err "Invalid username"
+  mode="$(ftp_scope_normalize "$mode")"
   mapfile -t variants < <(ftp_user_variants "$username")
   [[ ${#variants[@]} -gt 0 ]] || err "Invalid ftp username"
   home="$(getent passwd "$username" | cut -d: -f6 || true)"
   [[ -n "$home" && "$home" == "$FTP_DIR"/* ]] || home="$FTP_DIR/$username"
-  common="$home/common"
-  mkdir -p "$common" "$common/sites" "$common/bots"
+  mkdir -p "$home"
+  local_root="$(ftp_prepare_scope "$username" "$mode" "$target" "$home")"
+  chown root:root "$home" 2>/dev/null || true
+  chmod 0755 "$home" 2>/dev/null || true
+
   for u in "${variants[@]}"; do
     if ensure_single_ftp_os_user "$u" "$password" "$home"; then
       [[ -z "$owner" ]] && owner="$u"
-      write_ftp_user_conf "$u" "$common"
+      write_ftp_user_conf "$u" "$local_root"
     fi
   done
   [[ -n "$owner" ]] || err "Не удалось восстановить FTP Linux-пользователя"
-  chown root:root "$home" 2>/dev/null || true
-  chmod 0755 "$home" 2>/dev/null || true
-  chown -R "$owner":www-data "$common" 2>/dev/null || true
-  chmod -R u+rwX,g+rwX,o+rX "$common" 2>/dev/null || true
-  find "$common" -type d -exec chmod 2775 {} + 2>/dev/null || true
-  for pair in "$SITES_DIR:$common/sites" "$BOTS_DIR:$common/bots"; do
-    local src dst
-    src="${pair%%:*}"; dst="${pair#*:}"
-    mkdir -p "$src" "$dst"
-    mountpoint -q "$dst" || mount --bind "$src" "$dst" 2>/dev/null || true
-    mountpoint -q "$dst" && grep -qs " $dst " /etc/fstab || echo "$src $dst none bind 0 0" >> /etc/fstab
-  done
+
+  mkdir -p "$home/uploads"
+  chown -R "$owner":www-data "$home/uploads" 2>/dev/null || true
+  chmod -R u+rwX,g+rwX,o+rX "$home/uploads" 2>/dev/null || true
+  find "$home/uploads" -type d -exec chmod 2775 {} + 2>/dev/null || true
+
   for u in "${variants[@]}"; do
     id "$u" >/dev/null 2>&1 || continue
     fix_web_permissions "$SITES_DIR" "$u"
     fix_web_permissions "$BOTS_DIR" "$u"
-    fix_web_permissions "$common" "$u"
+    fix_web_permissions "$BACKUP_DIR" "$u"
+    fix_web_permissions "$home/uploads" "$u"
+  done
+  local_root="$(ftp_prepare_scope "$username" "$mode" "$target" "$home")"
+  for u in "${variants[@]}"; do
+    id "$u" >/dev/null 2>&1 || continue
+    write_ftp_user_conf "$u" "$local_root"
   done
   ensure_vsftpd_external_access
-  log "FTP password/login repaired: $username (aliases: $(printf '%s ' "${variants[@]}" | sed 's/[[:space:]]*$//'))"
+  log "FTP password/login repaired: $username / root=$local_root / scope=$(ftp_scope_label "$mode" "$target") / aliases: $(printf '%s ' "${variants[@]}" | sed 's/[[:space:]]*$//')"
 }
 
 cmd_ftp_test_login() {
@@ -907,7 +1035,7 @@ try:
     print('host:', host)
     print('user:', user)
     print('banner:', banner)
-    print('items:', ', '.join(items[:20]) if items else '(empty)')
+    print('items:', ', '.join(items[:50]) if items else '(empty)')
 except Exception as e:
     print('ERROR:', type(e).__name__, str(e))
     sys.exit(1)
@@ -1891,8 +2019,34 @@ for u in pwd.getpwall():
     cur=by_home.get(home)
     if cur is None or (cur.startswith('hhftp_') and not u.pw_name.startswith('hhftp_')):
         by_home[home]=u.pw_name
+def ftp_scope_from_conf(name, home):
+    scope='all'; target=''
+    conf=f'/etc/vsftpd.user_conf/{name}'
+    local_root=''
+    try:
+        for line in open(conf, encoding='utf-8', errors='ignore'):
+            if line.startswith('local_root='):
+                local_root=line.split('=',1)[1].strip()
+                break
+    except Exception:
+        pass
+    if local_root.endswith('/sites'):
+        scope='sites'
+    elif local_root.endswith('/bots'):
+        scope='bots'
+    elif local_root.endswith('/backups'):
+        scope='backups'
+    elif local_root.endswith('/uploads'):
+        scope='files'
+    elif local_root.endswith('/site'):
+        scope='site'
+        # Не всегда можно надёжно определить домен из bind-mount, поэтому оставляем пустым.
+    else:
+        scope='all'
+    return scope,target
 for home, name in sorted(by_home.items(), key=lambda x: x[1]):
-    ftp.append({'username':name,'target_path':home,'host':host_public,'host_public':host_public,'host_lan':host_lan,'port':21,'passive_range':'40000-40100'})
+    scope,target=ftp_scope_from_conf(name, home)
+    ftp.append({'username':name,'target_path':home,'host':host_public,'host_public':host_public,'host_lan':host_lan,'port':21,'passive_range':'40000-40100','access_scope':scope,'access_target':target})
 bots=[]
 try:
     data=json.loads(subprocess.check_output('pm2 jlist',shell=True,text=True,stderr=subprocess.DEVNULL))
@@ -2745,12 +2899,9 @@ cmd_repair() {
   if [[ -f "$BASE_DIR/data/hyperhost.sqlite" ]]; then chown www-data:www-data "$BASE_DIR/data/hyperhost.sqlite" "$BASE_DIR/data/hyperhost.sqlite"-* 2>/dev/null || true; chmod 0660 "$BASE_DIR/data/hyperhost.sqlite" "$BASE_DIR/data/hyperhost.sqlite"-* 2>/dev/null || true; fi
   fix_web_permissions "$SITES_DIR"; fix_web_permissions "$BOTS_DIR" "$BOT_USER"; chmod 0755 "$FTP_DIR" "$BACKUP_DIR" 2>/dev/null || true
 
-  # Убираем старые сломанные bind-mount'ы, которые могли попасть в public_html или старые FTP homes.
-  mapfile -t bad_mounts < <(awk '{print $5}' /proc/self/mountinfo | sed 's/\\040/ /g' | grep -E '^/var/www/hyper-host-(ftp|sites)/' | grep -E '/(common|sites|bots|site)(/|$)' | sort -r || true)
-  for mp in "${bad_mounts[@]}"; do umount -lf "$mp" 2>/dev/null || true; done
-  if [[ -f /etc/fstab ]]; then
-    sed -i.bak -E '/hyper-host-ftp|hyper-host-sites\/.*\/(common|sites|bots|site)|public_html\/(common|sites|bots|site)/d' /etc/fstab || true
-  fi
+  # Убираем только старые циклические bind-mount'ы. Нормальные FTP mount'ы не трогаем, иначе каталог в FileZilla становится пустым.
+  cleanup_hyper_host_mounts
+
 
   while IFS=: read -r user _ uid gid gecos old_home shell; do
     [[ "$user" == hhftp_* ]] || continue
@@ -2842,7 +2993,7 @@ case "${1:-}" in
   repair) shift; cmd_repair "$@" ;;
   *) cat >&2 <<EOHELP
 Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
-       hyper-host-ctl create-ftp USER PASS [all-sites]
+       hyper-host-ctl create-ftp USER PASS [all|sites|site|bots|backups|files] [DOMAIN]
        hyper-host-ctl ftp-test-login USER PASS [HOST]
        hyper-host-ctl bot-create NAME python|node|php|custom MAIN_FILE [MEM_MB]
        hyper-host-ctl bot-deploy NAME python MAIN_FILE TMP_BOT TMP_ENV TMP_REQ [MEM_MB]

@@ -400,20 +400,24 @@ function upsert_folder_row(string $name, string $path): void
     }
 }
 
-function upsert_ftp_row(string $username, string $target, string $passwordPlain = '', ?string $host = null): void
+function upsert_ftp_row(string $username, string $target, string $passwordPlain = '', ?string $host = null, string $accessScope = 'all', string $accessTarget = ''): void
 {
     $host = $host ?: panel_host_for_connections();
-    $stmt = db()->prepare('SELECT id, password_plain FROM ftp_accounts WHERE username = ?');
+    $accessScope = $accessScope !== '' ? $accessScope : 'all';
+    $stmt = db()->prepare('SELECT id, password_plain, access_scope, access_target FROM ftp_accounts WHERE username = ?');
     $stmt->execute([$username]);
     $row = $stmt->fetch();
     if ($row) {
+        if ($accessScope === 'site' && $accessTarget === '' && !empty($row['access_target'])) {
+            $accessTarget = (string)$row['access_target'];
+        }
         if ($passwordPlain !== '') {
-            db()->prepare('UPDATE ftp_accounts SET host = ?, target_path = ?, password_plain = ? WHERE username = ?')->execute([$host, $target, $passwordPlain, $username]);
+            db()->prepare('UPDATE ftp_accounts SET host = ?, target_path = ?, password_plain = ?, access_scope = ?, access_target = ? WHERE username = ?')->execute([$host, $target, $passwordPlain, $accessScope, $accessTarget, $username]);
         } else {
-            db()->prepare('UPDATE ftp_accounts SET host = ?, target_path = ? WHERE username = ?')->execute([$host, $target, $username]);
+            db()->prepare('UPDATE ftp_accounts SET host = ?, target_path = ?, access_scope = ?, access_target = ? WHERE username = ?')->execute([$host, $target, $accessScope, $accessTarget, $username]);
         }
     } else {
-        db()->prepare('INSERT INTO ftp_accounts(host, username, target_path, password_plain) VALUES(?, ?, ?, ?)')->execute([$host, $username, $target, $passwordPlain]);
+        db()->prepare('INSERT INTO ftp_accounts(host, username, target_path, password_plain, access_scope, access_target) VALUES(?, ?, ?, ?, ?, ?)')->execute([$host, $username, $target, $passwordPlain, $accessScope, $accessTarget]);
     }
 }
 
