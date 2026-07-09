@@ -189,10 +189,10 @@ EOPMASTORE
 
 ensure_nologin_shell() {
   if [[ -x /usr/sbin/nologin ]] && ! grep -qxF /usr/sbin/nologin /etc/shells 2>/dev/null; then
-    echo /usr/sbin/nologin >> /etc/shells
+    echo /usr/sbin/nologin >> /etc/shells 2>/dev/null || true
   fi
   if [[ -x /bin/false ]] && ! grep -qxF /bin/false /etc/shells 2>/dev/null; then
-    echo /bin/false >> /etc/shells
+    echo /bin/false >> /etc/shells 2>/dev/null || true
   fi
 }
 
@@ -203,7 +203,7 @@ apt-get install -y \
   ca-certificates curl git unzip rsync sudo openssl ufw software-properties-common apt-transport-https lsb-release \
   nginx mariadb-server \
   php-fpm php-cli php-sqlite3 php-mysql php-curl php-mbstring php-xml php-zip php-gd \
-  vsftpd openssh-server certbot python3-certbot-nginx python3 python3-venv python3-pip acl cron bind9 dnsutils whois
+  vsftpd openssh-server certbot python3-certbot-nginx python3 python3-venv python3-pip acl cron bind9 dnsutils whois db-util
 
 install_php_versions
 
@@ -394,15 +394,25 @@ systemctl enable nginx >/dev/null 2>&1 || true
 systemctl reload nginx
 
 log "Настройка FTP..."
-ensure_nologin_shell
-mkdir -p /var/run/vsftpd/empty "$FTP_DIR"
-cp /etc/vsftpd.conf "/etc/vsftpd.conf.backup.$(date +%s)" 2>/dev/null || true
-FTP_PASV_ADDR="${PUBLIC_IP:-}"
-if [[ -n "$FTP_PASV_ADDR" && "$FTP_PASV_ADDR" =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.|169\.254\.) ]]; then
-  FTP_PASV_ADDR=""
+FTP_USER_CONF_DIR="$BASE_DIR/ftp/user_conf"
+FTP_AUTH_TXT="$BASE_DIR/data/vsftpd_virtual_users.txt"
+FTP_AUTH_DB_BASE="$BASE_DIR/data/vsftpd_virtual_users"
+FTP_AUTH_DB="$FTP_AUTH_DB_BASE.db"
+FTP_GUEST_USER="www-data"
+mkdir -p /var/run/vsftpd/empty "$FTP_DIR" "$BASE_DIR/data" "$BASE_DIR/ftp" "$FTP_USER_CONF_DIR"
+touch "$FTP_AUTH_TXT"
+chmod 0600 "$FTP_AUTH_TXT" 2>/dev/null || true
+if command -v db_load >/dev/null 2>&1; then
+  : > /tmp/hyper-host-empty-ftp-users
+  db_load -T -t hash -f /tmp/hyper-host-empty-ftp-users "$FTP_AUTH_DB" >/dev/null 2>&1 || true
+  rm -f /tmp/hyper-host-empty-ftp-users
+  chmod 0600 "$FTP_AUTH_DB" 2>/dev/null || true
 fi
-FTP_PASV_LINE=""
-[[ -n "$FTP_PASV_ADDR" ]] && FTP_PASV_LINE="pasv_address=${FTP_PASV_ADDR}"
+cp /etc/vsftpd.conf "/etc/vsftpd.conf.backup.$(date +%s)" 2>/dev/null || true
+cat > /etc/pam.d/vsftpd <<EOPAMFTP
+auth required pam_userdb.so db=$FTP_AUTH_DB_BASE crypt=none
+account required pam_userdb.so db=$FTP_AUTH_DB_BASE
+EOPAMFTP
 cat > /etc/vsftpd.conf <<EOFTP
 listen=YES
 listen_ipv6=NO
@@ -411,9 +421,17 @@ listen_port=21
 background=NO
 anonymous_enable=NO
 local_enable=YES
+guest_enable=YES
+guest_username=$FTP_GUEST_USER
 write_enable=YES
 local_umask=002
 file_open_mode=0664
+dirlist_enable=YES
+download_enable=YES
+anon_world_readable_only=NO
+virtual_use_local_privs=YES
+hide_ids=NO
+use_sendfile=NO
 dirmessage_enable=NO
 use_localtime=YES
 xferlog_enable=YES
@@ -427,6 +445,8 @@ allow_writeable_chroot=YES
 secure_chroot_dir=/var/run/vsftpd/empty
 pam_service_name=vsftpd
 userlist_enable=NO
+user_config_dir=$FTP_USER_CONF_DIR
+check_shell=NO
 tcp_wrappers=NO
 rsa_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
 rsa_private_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
@@ -435,13 +455,12 @@ require_ssl_reuse=NO
 pasv_enable=YES
 pasv_min_port=40000
 pasv_max_port=40100
-${FTP_PASV_LINE}
 pasv_addr_resolve=NO
 pasv_promiscuous=YES
 port_promiscuous=YES
-seccomp_sandbox=NO
 force_dot_files=YES
 utf8_filesystem=YES
+seccomp_sandbox=NO
 max_clients=200
 max_per_ip=20
 idle_session_timeout=600
