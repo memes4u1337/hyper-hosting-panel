@@ -831,6 +831,47 @@ cmd_public_ip() {
   esac
 }
 
+cmd_ip_autofix() {
+  # v47: у многих домашних провайдеров публичный IP не статичный — он периодически
+  # меняется (перезагрузка роутера, переподключение и т.д.). Раньше при смене IP
+  # панель продолжала рекламировать СТАРЫЙ адрес в FTP (PASV) и в DNS-записях, и всё
+  # переставало быть доступно снаружи, хотя на сервере "всё работает". Эта команда
+  # сравнивает реальный внешний IP с тем, что настроен в панели, и если он изменился —
+  # сама обновляет публичный IP, FTP и все существующие DNS-зоны на новый адрес.
+  # Ставится в cron (см. install.sh / cmd_repair) и гоняется каждые несколько минут.
+  local configured outbound quiet="${1:-}"
+  configured="$(extract_ipv4 "$(configured_public_ip)")"
+  outbound="$(extract_ipv4 "$(outbound_public_ip)")"
+  if [[ -z "$outbound" ]]; then
+    [[ "$quiet" == "--quiet" ]] || log "ip-autofix: не удалось определить внешний IP (нет интернета?), пропуск"
+    return 0
+  fi
+  if [[ -n "$configured" && "$outbound" == "$configured" ]]; then
+    [[ "$quiet" == "--quiet" ]] || log "ip-autofix: публичный IP не менялся ($outbound)"
+    return 0
+  fi
+  log "ip-autofix: публичный IP изменился (${configured:-не задан} -> $outbound), обновляю панель/FTP/DNS"
+  cmd_public_ip set "$outbound" >/dev/null 2>&1 || true
+  ensure_vsftpd_external_access >/dev/null 2>&1 || true
+  open_server_ports >/dev/null 2>&1 || true
+  # Перевыпускаем все существующие DNS-зоны: заменяем A-записи со старого IP на новый.
+  local zonefile domain changed=0
+  if [[ -d "$DNS_DIR" ]]; then
+    for zonefile in "$DNS_DIR"/db.*; do
+      [[ -f "$zonefile" ]] || continue
+      domain="$(basename "$zonefile" | sed 's/^db\.//')"
+      valid_domain "$domain" || continue
+      if [[ -n "$configured" ]] && grep -q "IN A ${configured}\$" "$zonefile" 2>/dev/null; then
+        sed -i "s/IN A ${configured//./\\.}\$/IN A ${outbound}/g; s/ip4:${configured//./\\.} /ip4:${outbound} /g" "$zonefile" 2>/dev/null && changed=1
+      fi
+    done
+    if [[ "$changed" == 1 ]]; then
+      systemctl restart bind9 2>/dev/null || systemctl restart named 2>/dev/null || true
+    fi
+  fi
+  log "ip-autofix: готово, новый публичный IP $outbound применён к FTP и DNS-зонам"
+}
+
 cmd_ssl_ip_selfsigned() {
   local ip="${1:-$SERVER_IP}"
   [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || err "Invalid IP: $ip"
@@ -2716,8 +2757,8 @@ cmd_ftp_doctor_json() {
   pasv_fw="$(ufw status numbered 2>/dev/null | grep -E '40000:40100|40000-40100' | head -n1 || true)"
   issue=""; hint=""
   if [[ "$ip_mismatch" == 1 ]]; then
-    issue="настроенный публичный IP ($pub) не совпадает с тем, что реально видно из интернета ($outbound_ip) — похоже сервер за CGNAT (двойной NAT провайдера), и порт 21 снаружи недостижим ни при каком пробросе на роутере"
-    hint="Уточни у провайдера, даёт ли он 'выделенный публичный IP' (часто платная опция). Без него самостоятельно поднять сервер, доступный из интернета, нельзя — только через VPN/туннель или VPS."
+    issue="настроенный публичный IP ($pub) не совпадает с тем, что реально видно из интернета ($outbound_ip)"
+    hint="Чаще всего это просто смена IP у провайдера (динамический IP) — с v47 это чинится само в течение 5 минут (cron hyper-host-ip-watch) либо сразу командой: sudo hyper network ip-fix. Если IP снова быстро откатывается на старый — уточни у провайдера, статический ли у тебя IP, и нет ли CGNAT."
   fi
   if [[ -z "$issue" && -n "$port21_owner" && "$port21_owner" != "python3" && "$vsftpd_active" == "active" ]]; then
     issue="порт 21 занят другим сервисом ($port21_owner), похоже ожил vsftpd и дерётся за порт с hyper-host-ftp"
@@ -3533,6 +3574,17 @@ EOSUDO
   open_server_ports
   ensure_nginx_public_listen
   ensure_vsftpd_external_access; systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+  # v47: гарантируем, что вотчер смены публичного IP стоит в cron даже на уже
+  # развёрнутых панелях, обновлённых через git pull без повторного install.sh.
+  if [[ ! -f /etc/cron.d/hyper-host-ip-watch ]]; then
+    cat > /etc/cron.d/hyper-host-ip-watch <<EOIPWATCH
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/5 * * * * root /usr/local/sbin/hyper-host-ctl ip-autofix --quiet >/var/log/hyper-host-ip-watch.log 2>&1
+EOIPWATCH
+    chmod 0644 /etc/cron.d/hyper-host-ip-watch
+    systemctl reload cron 2>/dev/null || true
+  fi
   log "Repair finished: permissions, ACL, FTP safe homes, PM2 hyperbot and services checked"
 }
 
@@ -3545,6 +3597,7 @@ case "${1:-}" in
   ssl-fix-site) shift; cmd_ssl_fix_site "$@" ;;
   ssl-ip-selfsigned) shift; cmd_ssl_ip_selfsigned "$@" ;;
   public-ip) shift; cmd_public_ip "$@" ;;
+  ip-autofix) shift; cmd_ip_autofix "$@" ;;
   site-php) shift; cmd_site_php "$@" ;;
   create-ftp) shift; cmd_create_ftp "$@" ;;
   delete-ftp) shift; cmd_delete_ftp "$@" ;;

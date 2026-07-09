@@ -529,6 +529,17 @@ systemctl restart "php${PHP_VER}-fpm" 2>/dev/null || systemctl restart php-fpm 2
 systemctl enable cron >/dev/null 2>&1 || true
 systemctl restart cron 2>/dev/null || true
 
+# v47: у многих домашних провайдеров публичный IP не статичный (меняется при
+# переподключении/перезагрузке роутера). Без этого вотчера при смене IP FTP и DNS
+# продолжали бы рекламировать старый, недоступный извне адрес. Проверяем раз в 5 минут.
+cat > /etc/cron.d/hyper-host-ip-watch <<EOIPWATCH
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/5 * * * * root /usr/local/sbin/hyper-host-ctl ip-autofix --quiet >/var/log/hyper-host-ip-watch.log 2>&1
+EOIPWATCH
+chmod 0644 /etc/cron.d/hyper-host-ip-watch
+systemctl reload cron 2>/dev/null || true
+
 log "Настройка firewall..."
 ufw allow OpenSSH >/dev/null 2>&1 || true
 ufw allow 80/tcp >/dev/null 2>&1 || true

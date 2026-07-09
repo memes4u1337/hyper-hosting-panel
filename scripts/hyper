@@ -287,11 +287,14 @@ cmd_network() {
       local act="${1:-get}"; shift || true
       $CTL public-ip "$act" "$@"
       ;;
+    ip-fix|ip-watch)
+      $CTL ip-autofix
+      ;;
     panel-domain)
       local act="${1:-get}"; shift || true
       $CTL panel-domain "$act" "$@"
       ;;
-    *) err "Network команды: sudo hyper network doctor [DOMAIN] | fix DOMAIN PUBLIC_IP | open DOMAIN PUBLIC_IP | public-ip set IP | panel-domain set DOMAIN" ;;
+    *) err "Network команды: sudo hyper network doctor [DOMAIN] | fix DOMAIN PUBLIC_IP | open DOMAIN PUBLIC_IP | public-ip set IP | ip-fix | panel-domain set DOMAIN" ;;
   esac
 }
 
