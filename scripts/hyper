@@ -322,28 +322,30 @@ cmd_dns() {
       cat <<'EODNSGUIDE'
 DNS перенос домена на HYPER-HOST:
 
-1) На сервере:
+Шаг 1 (один раз) — заводим собственные DNS-серверы панели на домене панели:
    sudo hyper network fix hyper-host.pw 90.189.208.25
    sudo hyper dns wizard hyper-host.pw 90.189.208.25 panel
 
-2) У регистратора домена укажи NS:
+У регистратора ДОМЕНА ПАНЕЛИ (hyper-host.pw) укажи NS и Glue:
+   NS:   ns1.hyper-host.pw / ns2.hyper-host.pw
+   Glue: ns1.hyper-host.pw -> 90.189.208.25, ns2.hyper-host.pw -> 90.189.208.25
+(Glue нужен только для домена самой панели, один раз.)
+
+Шаг 2 (для КАЖДОГО следующего домена, который переносишь на панель):
+   sudo hyper dns wizard mydomain.ru 90.189.208.25
+У регистратора ЭТОГО домена просто укажи те же самые NS без всякого Glue:
    ns1.hyper-host.pw
    ns2.hyper-host.pw
 
-3) Если регистратор просит Glue/IP:
-   ns1.hyper-host.pw -> 90.189.208.25
-   ns2.hyper-host.pw -> 90.189.208.25
-
-4) На роутере пробросить:
+На роутере пробросить (один раз, для всех доменов сразу):
    TCP 80  -> 192.168.0.179:80
    TCP 443 -> 192.168.0.179:443
    TCP/UDP 53 -> 192.168.0.179:53
 
-5) Проверка:
-   sudo hyper dns status hyper-host.pw
-   sudo hyper dns inspect hyper-host.pw
-   sudo hyper network doctor hyper-host.pw
-   sudo hyper ssl check hyper-host.pw
+Проверка:
+   sudo hyper dns status ДОМЕН
+   sudo hyper dns inspect ДОМЕН
+   sudo hyper network doctor ДОМЕН
 EODNSGUIDE
       ;;
     *) err "DNS команды: sudo hyper dns wizard DOMAIN [IP] | status DOMAIN | inspect DOMAIN | delete DOMAIN" ;;

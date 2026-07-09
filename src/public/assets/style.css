@@ -781,3 +781,7 @@ code{color:#9ee8ff;background:rgba(34,211,238,.09);border-radius:8px;padding:2px
   .cred,.connection-line{flex-direction:column;align-items:flex-start!important}
   .cred code,.connection-line code,.cred b{margin-left:0;text-align:left}
 }
+
+/* ---------- v46: карточка "Твои DNS-серверы" на странице DNS ---------- */
+.dns-ns-summary-v46{border-color:rgba(34,211,238,.28);background:radial-gradient(circle at 0 0,rgba(34,211,238,.1),transparent 40%),var(--hh-card)}
+.dns-ns-summary-v46 code{font-size:14px;cursor:pointer}

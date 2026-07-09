@@ -2055,22 +2055,24 @@ PY
 }
 
 cmd_dns_apply() {
-  local domain="${1:-}" records_json="${2:-[]}" ns="${3:-}" admin="${4:-}"
+  local domain="${1:-}" records_json="${2:-[]}" ns="${3:-}" admin="${4:-}" ns_host="${5:-}"
   valid_domain "$domain" || err "Invalid domain"
   mkdir -p "$DNS_DIR"
   write_bind_authoritative_defaults
-  [[ -n "$ns" ]] || ns="ns1.$domain."
+  [[ -n "$ns_host" ]] || ns_host="$domain"
+  [[ -n "$ns" ]] || ns="ns1.$ns_host."
   [[ -n "$admin" ]] || admin="admin.$domain."
   [[ "$ns" == *. ]] || ns="$ns."
   [[ "$admin" == *. ]] || admin="$admin."
   local zonefile="$DNS_DIR/db.$domain" serial
   serial="$(date +%Y%m%d%H)"
-  DOMAIN="$domain" RECORDS_JSON="$records_json" NS="$ns" ADMIN="$admin" ZONEFILE="$zonefile" SERIAL="$serial" python3 - <<'PYDNSWRITE'
+  DOMAIN="$domain" RECORDS_JSON="$records_json" NS="$ns" ADMIN="$admin" ZONEFILE="$zonefile" SERIAL="$serial" NS_HOST="$ns_host" python3 - <<'PYDNSWRITE'
 import os, json, re, ipaddress, pathlib, sys
 zone=os.environ['DOMAIN'].strip('.').lower()
 records_json=os.environ.get('RECORDS_JSON','[]')
 ns=os.environ.get('NS') or ('ns1.%s.' % zone)
 admin=os.environ.get('ADMIN') or ('admin.%s.' % zone)
+ns_host=(os.environ.get('NS_HOST') or zone).strip('.').lower()
 path=pathlib.Path(os.environ['ZONEFILE'])
 serial=os.environ.get('SERIAL','1')
 try:
@@ -2147,7 +2149,12 @@ for r in records:
     clean.append((name, ttl, typ, val))
 
 # Обязательные NS для делегации домена на эту панель.
-for name, ttl, typ, val in [('@',3600,'NS','ns1.%s.'%zone),('@',3600,'NS','ns2.%s.'%zone)]:
+# v46 fix: раньше тут всегда стояло 'ns1.%s.'%zone/'ns2.%s.'%zone — то есть КАЖДЫЙ домен
+# получал свою уникальную пару NS-имён, и для каждого нового домена нужно было отдельно
+# заводить glue-записи у ЕГО регистратора. Теперь используется ns_host (по умолчанию —
+# домен панели), и один и тот же ns1./ns2.<домен-панели> можно прописывать у любого
+# количества доменов без отдельного glue на каждый из них.
+for name, ttl, typ, val in [('@',3600,'NS','ns1.%s.'%ns_host),('@',3600,'NS','ns2.%s.'%ns_host)]:
     key=(name,typ,val)
     if key not in seen:
         clean.insert(0,(name,ttl,typ,val)); seen.add(key)
@@ -2682,7 +2689,7 @@ PYFTPROWS
 }
 
 cmd_ftp_doctor_json() {
-  local pub listen21 local_banner lan_banner service users_count auth_fail_users ufw_status ftp21_fw pasv_fw issue hint proc port21_owner vsftpd_active
+  local pub listen21 local_banner lan_banner service users_count auth_fail_users ufw_status ftp21_fw pasv_fw issue hint proc port21_owner vsftpd_active outbound_ip ip_mismatch
   pub="$(ftp_passive_address)"
   listen21=0; listen_port_tcp 21 && listen21=1
   local_banner="$(timeout 3 bash -c 'head -c 120 < /dev/tcp/127.0.0.1/21' 2>/dev/null | tr -d '\\r' | head -n1 || true)"
@@ -2690,6 +2697,13 @@ cmd_ftp_doctor_json() {
   [[ -n "${SERVER_IP:-}" ]] && lan_banner="$(timeout 3 bash -c "head -c 120 < /dev/tcp/${SERVER_IP}/21" 2>/dev/null | tr -d '\\r' | head -n1 || true)"
   service="$(systemctl is-active hyper-host-ftp.service 2>/dev/null || true)"
   proc="$(pgrep -af 'hyper_ftp_server.py|hyper-host-ftp-server' 2>/dev/null | head -n1 || true)"
+  # v46: сравниваем настроенный публичный IP с тем, что реально видно из интернета
+  # (curl ifconfig.me и т.п.). Если они не совпадают — почти наверняка сервер за CGNAT
+  # (двойной NAT у провайдера) и настроенный IP снаружи вообще недостижим ни на каком
+  # порту, сколько бы портов ты ни пробрасывал на своём роутере — этот IP просто не твой.
+  outbound_ip="$(outbound_public_ip)"
+  ip_mismatch=0
+  [[ -n "$outbound_ip" && -n "$pub" && "$outbound_ip" != "$pub" ]] && ip_mismatch=1
   # v45: кто реально держит порт 21 — если это не наш процесс (например ожил vsftpd
   # после ручного "systemctl restart vsftpd"), FileZilla будет коннектиться то к
   # старому серверу, то к новому, и логины/пароли не будут совпадать.
@@ -2701,7 +2715,11 @@ cmd_ftp_doctor_json() {
   ftp21_fw="$(ufw status numbered 2>/dev/null | grep -E '(^| )21/tcp' | head -n1 || true)"
   pasv_fw="$(ufw status numbered 2>/dev/null | grep -E '40000:40100|40000-40100' | head -n1 || true)"
   issue=""; hint=""
-  if [[ -n "$port21_owner" && "$port21_owner" != "python3" && "$vsftpd_active" == "active" ]]; then
+  if [[ "$ip_mismatch" == 1 ]]; then
+    issue="настроенный публичный IP ($pub) не совпадает с тем, что реально видно из интернета ($outbound_ip) — похоже сервер за CGNAT (двойной NAT провайдера), и порт 21 снаружи недостижим ни при каком пробросе на роутере"
+    hint="Уточни у провайдера, даёт ли он 'выделенный публичный IP' (часто платная опция). Без него самостоятельно поднять сервер, доступный из интернета, нельзя — только через VPN/туннель или VPS."
+  fi
+  if [[ -z "$issue" && -n "$port21_owner" && "$port21_owner" != "python3" && "$vsftpd_active" == "active" ]]; then
     issue="порт 21 занят другим сервисом ($port21_owner), похоже ожил vsftpd и дерётся за порт с hyper-host-ftp"
     hint="sudo systemctl stop vsftpd; sudo systemctl mask vsftpd; sudo hyper ftp fix"
   fi
@@ -2710,12 +2728,14 @@ cmd_ftp_doctor_json() {
   if [[ -z "$issue" && -z "$local_banner" ]]; then issue="локальный FTP banner не отвечает"; hint="sudo tail -n 120 /var/log/hyper-host-ftp.log"; fi
   if [[ -z "$issue" && "${users_count:-0}" == "0" ]]; then issue="FTP работает, но FTP-пользователей нет"; hint="Создай FTP в панели или выполни: sudo hyper ftp user LOGIN PASSWORD all"; fi
   if [[ -z "$issue" ]]; then issue="локально FTP исправен"; hint="FileZilla: FTP, plain, passive, порт 21. Для внешнего интернета пробрось TCP 21 и 40000-40100."; fi
-  SERVER_IP="$SERVER_IP" PUBLIC_IP="$(public_ip)" CONFIGURED_PUBLIC_IP="$(configured_public_ip)" LISTEN21="$listen21" LOCAL_BANNER="$local_banner" LAN_BANNER="$lan_banner" SERVICE="$service" PROC="$proc" USERS_COUNT="$users_count" AUTH_FAIL_USERS="$auth_fail_users" UFW_STATUS="$ufw_status" FTP21_FW="$ftp21_fw" PASV_FW="$pasv_fw" ISSUE="$issue" HINT="$hint" PORT21_OWNER="$port21_owner" VSFTPD_ACTIVE="$vsftpd_active" python3 - <<'PYFTP'
+  SERVER_IP="$SERVER_IP" PUBLIC_IP="$(public_ip)" CONFIGURED_PUBLIC_IP="$(configured_public_ip)" LISTEN21="$listen21" LOCAL_BANNER="$local_banner" LAN_BANNER="$lan_banner" SERVICE="$service" PROC="$proc" USERS_COUNT="$users_count" AUTH_FAIL_USERS="$auth_fail_users" UFW_STATUS="$ufw_status" FTP21_FW="$ftp21_fw" PASV_FW="$pasv_fw" ISSUE="$issue" HINT="$hint" PORT21_OWNER="$port21_owner" VSFTPD_ACTIVE="$vsftpd_active" OUTBOUND_IP="$outbound_ip" IP_MISMATCH="$ip_mismatch" python3 - <<'PYFTP'
 import os,json
 print(json.dumps({
  'server_ip': os.environ.get('SERVER_IP',''),
  'public_ip': os.environ.get('PUBLIC_IP',''),
  'configured_public_ip': os.environ.get('CONFIGURED_PUBLIC_IP',''),
+ 'outbound_ip': os.environ.get('OUTBOUND_IP',''),
+ 'ip_mismatch_cgnat_suspected': os.environ.get('IP_MISMATCH') == '1',
  'ftp_service': os.environ.get('SERVICE',''),
  'ftp_process': os.environ.get('PROC',''),
  'port21_owner': os.environ.get('PORT21_OWNER',''),
@@ -3158,8 +3178,41 @@ print(json.dumps({
 }, ensure_ascii=False))
 PYNET
 }
+ensure_panel_ns_zone() {
+  # v46: единая точка входа для "своих" NS-серверов панели. Если у панели настроен
+  # PANEL_DOMAIN (Настройки -> Домен панели), заводим для НЕГО собственную зону с
+  # ns1.<домен-панели> / ns2.<домен-панели> (если такой зоны ещё нет). Это единственный
+  # домен, которому нужен отдельный glue у регистратора — все остальные домены дальше
+  # используют эти же ns1/ns2, без повторной настройки glue на каждый домен.
+  local pub="${1:-}"
+  [[ -n "${PANEL_DOMAIN:-}" && "${PANEL_DOMAIN:-_}" != "_" ]] || return 0
+  valid_domain "$PANEL_DOMAIN" || return 0
+  [[ -n "$pub" ]] || pub="$(extract_ipv4 "$(configured_public_ip)")"
+  [[ -n "$pub" ]] || return 0
+  local zonefile="$DNS_DIR/db.$PANEL_DOMAIN"
+  if [[ -f "$zonefile" ]] && grep -qi '^ns1[[:space:]].*IN[[:space:]]*A' "$zonefile" 2>/dev/null; then
+    return 0
+  fi
+  mkdir -p "$DNS_DIR"
+  write_bind_authoritative_defaults
+  local records
+  records="$(PUB="$pub" python3 - <<'PYREC'
+import json, os
+pub=os.environ['PUB']
+print(json.dumps([
+ {'name':'@','type':'A','value':pub,'ttl':300},
+ {'name':'www','type':'A','value':pub,'ttl':300},
+ {'name':'ns1','type':'A','value':pub,'ttl':300},
+ {'name':'ns2','type':'A','value':pub,'ttl':300},
+], ensure_ascii=False))
+PYREC
+)"
+  cmd_dns_apply "$PANEL_DOMAIN" "$records" "ns1.$PANEL_DOMAIN." "admin.$PANEL_DOMAIN." "$PANEL_DOMAIN"
+  log "Базовая зона панели создана: $PANEL_DOMAIN (ns1/ns2.$PANEL_DOMAIN -> $pub)"
+}
+
 cmd_dns_wizard() {
-  local domain="${1:-}" pub="${2:-}" panel_sub="${3:-panel}"
+  local domain="${1:-}" pub="${2:-}" panel_sub="${3:-panel}" ns_mode="${4:-auto}"
   [[ -n "$domain" ]] || err "Domain required"
   valid_domain "$domain" || err "Invalid domain: $domain"
   [[ -n "$pub" ]] || pub="$(extract_ipv4 "$(configured_public_ip)")"
@@ -3169,7 +3222,18 @@ cmd_dns_wizard() {
   cmd_public_ip set "$pub" >/dev/null 2>&1 || true
   mkdir -p "$DNS_DIR"
   write_bind_authoritative_defaults
-  local ns1="ns1.$domain." admin="admin.$domain." records
+
+  # v46: по умолчанию используем ОБЩИЕ NS панели (ns1/ns2.<домен-панели>) для любого нового
+  # домена — раньше каждый домен получал свою пару ns1.<домен>/ns2.<домен>, что требовало
+  # отдельной настройки glue-записей у регистратора КАЖДОГО домена. ns_mode=own сохраняет
+  # старое поведение (например для самого домена панели).
+  local ns_host="$domain"
+  if [[ "$ns_mode" != "own" && -n "${PANEL_DOMAIN:-}" && "${PANEL_DOMAIN:-_}" != "_" && "$PANEL_DOMAIN" != "$domain" ]]; then
+    ns_host="$PANEL_DOMAIN"
+    ensure_panel_ns_zone "$pub"
+  fi
+
+  local ns1="ns1.$ns_host." admin="admin.$domain." records
   records="$(DOMAIN="$domain" PUB="$pub" PANEL_SUB="$panel_sub" python3 - <<'PYREC'
 import json, os
 pub=os.environ['PUB']; panel=os.environ.get('PANEL_SUB','panel') or 'panel'
@@ -3186,13 +3250,13 @@ records=[
 print(json.dumps(records, ensure_ascii=False))
 PYREC
 )"
-  cmd_dns_apply "$domain" "$records" "$ns1" "$admin"
+  cmd_dns_apply "$domain" "$records" "$ns1" "$admin" "$ns_host"
   open_server_ports
   systemctl restart bind9 2>/dev/null || true
   cat <<EOF
 DNS зона готова: $domain
-NS: ns1.$domain / ns2.$domain
-Glue: ns1.$domain -> $pub, ns2.$domain -> $pub
+NS: ns1.$ns_host / ns2.$ns_host
+Glue: ns1.$ns_host -> $pub, ns2.$ns_host -> $pub
 Проверка: dig @$pub $domain A
 EOF
 }

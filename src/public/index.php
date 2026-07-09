@@ -250,17 +250,21 @@ function handle_post(string $action): void
                 if(!is_valid_domain($domain)) throw new RuntimeException('Неверный домен');
                 if($ip==='' ) $ip=current_public_ipv4();
                 if($ip==='' || !filter_var($ip,FILTER_VALIDATE_IP,FILTER_FLAG_IPV4)) throw new RuntimeException('Укажи публичный IPv4 для DNS');
-                $primary='ns1.'.$domain.'.'; $admin='admin.'.$domain.'.';
+                // v46: используем общие NS-серверы панели (ns1/ns2.<домен панели>) для любого
+                // нового домена, если домен панели настроен и отличается от переносимого домена.
+                // Тогда glue-записи у регистратора нужны только один раз — для домена самой панели.
+                $nsHost=dns_shared_ns_host($domain);
+                $primary='ns1.'.$nsHost.'.'; $admin='admin.'.$domain.'.';
                 db()->beginTransaction();
                 db()->prepare('INSERT INTO dns_zones(domain,primary_ns,admin_email) VALUES(?,?,?) ON CONFLICT(domain) DO UPDATE SET primary_ns=excluded.primary_ns,admin_email=excluded.admin_email')->execute([$domain,$primary,$admin]);
                 $st=db()->prepare('SELECT id FROM dns_zones WHERE domain=?'); $st->execute([$domain]); $zoneId=(int)($st->fetch()['id']??0);
                 replace_dns_records($zoneId, dns_default_records_for_panel($domain,$ip,$panel));
                 db()->commit();
                 setting_set('public_ip_override',$ip);
-                dns_apply_zone($domain);
                 $res=run_ctl(['dns-wizard',$domain,$ip,$panel],180); if($res['code']!==0) throw new RuntimeException($res['output']);
+                dns_apply_zone($domain);
                 hh_clear_cache();
-                flash("DNS-зона готова: $domain. NS: ns1.$domain / ns2.$domain",'success'); redirect('/?page=dns');
+                flash("DNS-зона готова: $domain. NS: ns1.$nsHost / ns2.$nsHost",'success'); redirect('/?page=dns');
             }
             case 'create_dns_zone': { $domain=strtolower(trim((string)($_POST['domain']??''))); if(!is_valid_domain($domain)) throw new RuntimeException('Неверный домен'); db()->prepare('INSERT INTO dns_zones(domain,primary_ns,admin_email) VALUES(?,?,?) ON CONFLICT(domain) DO UPDATE SET primary_ns=excluded.primary_ns,admin_email=excluded.admin_email')->execute([$domain, trim((string)($_POST['primary_ns']??'ns1.local.')), trim((string)($_POST['admin_email']??'admin.local.'))]); dns_apply_zone($domain); redirect('/?page=dns'); }
             case 'add_dns_record': { $zone=(int)($_POST['zone_id']??0); $type=strtoupper(trim((string)($_POST['type']??'A'))); $name=trim((string)($_POST['name']??'@')); $value=trim((string)($_POST['value']??'')); $ttl=(int)($_POST['ttl']??3600); if($value==='') throw new RuntimeException('Значение DNS записи пустое'); db()->prepare('INSERT INTO dns_records(zone_id,type,name,value,ttl) VALUES(?,?,?,?,?)')->execute([$zone,$type,$name,$value,$ttl]); $z=db()->prepare('SELECT domain FROM dns_zones WHERE id=?'); $z->execute([$zone]); $zr=$z->fetch(); if($zr) dns_apply_zone((string)$zr['domain']); redirect('/?page=dns'); }
@@ -292,11 +296,28 @@ function sync_resources(): void
     foreach(($data['bots']??[]) as $b) upsert_bot_row_v5((string)$b['name'],(string)$b['runtime'],(string)$b['path'],(string)$b['start_command'],(int)($b['memory_limit_mb']??0));
 }
 
+function dns_shared_ns_host(string $domain): string
+{
+    // v46: домен-хост для общих NS панели — домен панели, если он настроен и отличается
+    // от переносимого домена; иначе (например для самого домена панели) — сам домен.
+    $panelDomain=strtolower(trim((string)app_config('panel_domain','')));
+    if ($panelDomain !== '' && $panelDomain !== '_' && is_valid_domain($panelDomain) && $panelDomain !== $domain) {
+        return $panelDomain;
+    }
+    return $domain;
+}
+
 function dns_apply_zone(string $domain): void
 {
     $st=db()->prepare('SELECT * FROM dns_zones WHERE domain=?'); $st->execute([$domain]); $z=$st->fetch(); if(!$z) return;
     $rs=db()->prepare('SELECT type,name,value,ttl FROM dns_records WHERE zone_id=? ORDER BY id'); $rs->execute([(int)$z['id']]); $records=$rs->fetchAll();
-    $res=run_ctl(['dns-apply',$domain,json_encode($records, JSON_UNESCAPED_UNICODE),(string)$z['primary_ns'],(string)$z['admin_email']],120); if($res['code']!==0) throw new RuntimeException($res['output']);
+    // ns_host восстанавливаем из уже сохранённого primary_ns (ns1.<ns_host>.), чтобы
+    // повторное применение зоны (добавление/удаление записи) не откатывало общие NS
+    // панели обратно на устаревшую схему "ns1.<сам домен>".
+    $primaryNs=trim((string)($z['primary_ns'] ?? ''), '.');
+    $nsHost=(strpos($primaryNs, 'ns1.') === 0) ? substr($primaryNs, 4) : dns_shared_ns_host($domain);
+    if ($nsHost === '' || !is_valid_domain($nsHost)) $nsHost = $domain;
+    $res=run_ctl(['dns-apply',$domain,json_encode($records, JSON_UNESCAPED_UNICODE),(string)$z['primary_ns'],(string)$z['admin_email'],$nsHost],120); if($res['code']!==0) throw new RuntimeException($res['output']);
 }
 
 function bot_uploaded_tmp(string $field): string
@@ -357,7 +378,7 @@ function fm_delete(): void
 function rrmdir(string $path): void { if(is_dir($path)&&!is_link($path)){ foreach(scandir($path)?:[] as $i){ if($i==='.'||$i==='..') continue; rrmdir($path.'/'.$i);} if(!@rmdir($path)){ run_ctl(['repair'],180); @rmdir($path); } } else { if(!@unlink($path)){ run_ctl(['repair'],180); @unlink($path); } } }
 
 
-function hh_app_version(): string { return '1.2-v45'; }
+function hh_app_version(): string { return '1.3-v46'; }
 
 function hh_nav_config(): array
 {
@@ -380,7 +401,7 @@ function nav_item(string $id,string $icon,string $label,string $page): string { 
 function render_login(): void
 {
     $flash=flash(); $need2fa=setting_get('security_2fa_enabled','0')==='1'; ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=45" rel="stylesheet"></head><body class="login-body">
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=46" rel="stylesheet"></head><body class="login-body">
 <div class="login-orb login-orb-a"></div><div class="login-orb login-orb-b"></div><div class="login-orb login-orb-c"></div>
 <main class="login-clean">
   <section class="login-card card-glass login-clean-card">
@@ -408,7 +429,7 @@ function render_page(string $page, array $user): void
 <link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
-<link href="/assets/style.css?v=45" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
+<link href="/assets/style.css?v=46" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
 <div class="mobile-nav-backdrop" id="mobileNavBackdrop"></div>
 <aside class="sidebar sidebar-v2">
   <div class="rail" data-active-cat="<?= e($activeCat) ?>">
@@ -439,7 +460,7 @@ function render_page(string $page, array $user): void
     </div>
   </div>
 </aside>
-<main class="content" style="--cat-accent:<?= e($nav[$activeCat]['accent']??'#4f7dff') ?>"><header class="topbar"><button type="button" class="mobile-nav-toggle" id="mobileNavToggle" aria-label="Меню" aria-expanded="false"><i class="fa-solid fa-bars"></i></button><div><div class="topbar-kicker"><i class="fa-solid <?= e($nav[$activeCat]['icon']??'fa-rocket') ?>"></i><?= e($nav[$activeCat]['label']??'') ?></div><h1><?= e($title) ?></h1><div class="small muted">Сервер: <code><?= e(host_name()) ?></code></div></div><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft"><i class="fa-solid fa-rotate me-2"></i>Обновить</button></form></header><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?><?php route_view($page); ?></main></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script><script src="/assets/app.js?v=45" defer></script></body></html><?php
+<main class="content" style="--cat-accent:<?= e($nav[$activeCat]['accent']??'#4f7dff') ?>"><header class="topbar"><button type="button" class="mobile-nav-toggle" id="mobileNavToggle" aria-label="Меню" aria-expanded="false"><i class="fa-solid fa-bars"></i></button><div><div class="topbar-kicker"><i class="fa-solid <?= e($nav[$activeCat]['icon']??'fa-rocket') ?>"></i><?= e($nav[$activeCat]['label']??'') ?></div><h1><?= e($title) ?></h1><div class="small muted">Сервер: <code><?= e(host_name()) ?></code></div></div><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft"><i class="fa-solid fa-rotate me-2"></i>Обновить</button></form></header><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?><?php route_view($page); ?></main></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script><script src="/assets/app.js?v=46" defer></script></body></html><?php
 }
 function route_view(string $page): void { match($page){ 'files'=>view_files(), 'sites'=>view_sites(), 'ftp'=>view_ftp(), 'databases'=>view_databases(), 'pma_login'=>view_pma_login(), 'bots'=>view_bots(), 'bot_logs'=>view_bot_logs(), 'backups'=>view_backups(), 'dns'=>view_dns(), 'network'=>view_network(), 'ssl'=>view_ssl(), 'php'=>view_php(), 'cron'=>view_cron(), 'logs'=>view_logs(), 'security'=>view_security(), 'settings'=>view_settings(), 'access'=>view_access(), 'disk'=>view_disk(), default=>view_dashboard(), }; }
 function stat_card(string $icon,string $label,string $value,string $sub=''): void { ?><div class="stat-card"><div class="stat-icon"><i class="fa-solid <?= e($icon) ?>"></i></div><div><span><?= e($label) ?></span><b><?= e($value) ?></b><?php if($sub): ?><em><?= e($sub) ?></em><?php endif; ?></div></div><?php }
@@ -944,8 +965,44 @@ function view_dns(): void {
     $inspectDomain=strtolower(trim((string)($_GET['inspect']??($zones[0]['domain']??''))));
     $inspect=null;
     if($inspectDomain!=='' && is_valid_domain($inspectDomain)) $inspect=run_ctl_json_cached(['dns-inspect-json',$inspectDomain],30,300);
+    $panelDomainRaw=trim((string)app_config('panel_domain',''));
+    $panelDomainSet=($panelDomainRaw!=='' && $panelDomainRaw!=='_' && is_valid_domain($panelDomainRaw));
+    $zoneDomains=array_map(static fn($z)=>(string)$z['domain'],$zones);
+    $sitesNoDns=array_values(array_filter(
+        db()->query('SELECT domain FROM sites ORDER BY domain ASC')->fetchAll(),
+        static fn($s)=>!in_array((string)$s['domain'],$zoneDomains,true)
+    ));
 ?>
 <div class="dns-page-v40">
+  <div class="panel-card mb-4 dns-ns-summary-v46">
+    <div class="card-title-row flex-wrap gap-2">
+      <div><i class="fa-solid fa-server me-2"></i><b>Твои DNS-серверы</b></div>
+      <?php if(!$panelDomainSet): ?><a class="btn btn-sm btn-soft" href="/?page=network">Настроить домен панели</a><?php endif; ?>
+    </div>
+    <?php if($panelDomainSet): ?>
+      <p class="small muted mb-2">Эти два адреса пропиши у регистратора ЛЮБОГО домена, который переносишь на панель — не нужно каждый раз заводить отдельные NS/glue.</p>
+      <div class="dns-compact-grid">
+        <div><span>NS1</span><code data-copy="ns1.<?= e($panelDomainRaw) ?>">ns1.<?= e($panelDomainRaw) ?></code></div>
+        <div><span>NS2</span><code data-copy="ns2.<?= e($panelDomainRaw) ?>">ns2.<?= e($panelDomainRaw) ?></code></div>
+        <div><span>Glue / IP (только для <?= e($panelDomainRaw) ?>)</span><code data-copy="<?= e($pub) ?>"><?= e($pub) ?></code></div>
+      </div>
+    <?php else: ?>
+      <p class="small muted mb-0">Сначала укажи домен панели в Настройках сети — тогда у тебя появятся свои постоянные NS вида <code>ns1.твой-домен-панели</code>, которые можно прописывать у любых доменов без повторной настройки glue.</p>
+    <?php endif; ?>
+  </div>
+
+  <?php if($sitesNoDns): ?>
+  <div class="panel-card mb-4">
+    <div class="card-title-row"><h2><i class="fa-solid fa-list-check me-2"></i>Домены без DNS-зоны</h2></div>
+    <p class="small muted mb-2">Это домены твоих сайтов в панели, для которых ещё не создана DNS-зона. Жми, чтобы сразу выпустить зону с общими NS панели.</p>
+    <div class="d-flex flex-wrap gap-2">
+      <?php foreach($sitesNoDns as $s): ?>
+        <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="dns_wizard"><input type="hidden" name="domain" value="<?= e($s['domain']) ?>"><input type="hidden" name="public_ip" value="<?= e($pub) ?>"><input type="hidden" name="panel_subdomain" value="panel"><button class="btn btn-sm btn-soft"><i class="fa-solid fa-plus me-1"></i><?= e($s['domain']) ?></button></form>
+      <?php endforeach; ?>
+    </div>
+  </div>
+  <?php endif; ?>
+
   <div class="dns-hero panel-card mb-4">
     <div>
       <div class="kicker"><i class="fa-solid fa-diagram-project me-2"></i>DNS</div>
