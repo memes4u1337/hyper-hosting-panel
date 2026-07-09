@@ -117,6 +117,7 @@ FLUSH PRIVILEGES;
 EOSQL
   create_sql="/usr/share/phpmyadmin/sql/create_tables.sql"
   [[ -f "$create_sql" ]] && mysql --protocol=socket -uroot phpmyadmin < "$create_sql" >/dev/null 2>&1 || true
+  {
   cat > /etc/phpmyadmin/conf.d/hyper-host-storage.php <<EOPMASTORE
 <?php
 \$cfg['TempDir'] = '/var/lib/phpmyadmin/tmp';
@@ -150,7 +151,8 @@ if (isset(\$i) && isset(\$cfg['Servers'][\$i])) {
     \$cfg['Servers'][\$i]['export_templates'] = 'pma__export_templates';
 }
 EOPMASTORE
-  chmod 0644 /etc/phpmyadmin/conf.d/hyper-host-storage.php || true
+  } 2>/dev/null || warn "Не удалось записать /etc/phpmyadmin/conf.d/hyper-host-storage.php (read-only /etc?) — phpMyAdmin storage relations могут быть недоступны, панель это не остановит."
+  chmod 0644 /etc/phpmyadmin/conf.d/hyper-host-storage.php 2>/dev/null || true
 }
 
 cmd_phpmyadmin_status_json() {
@@ -284,6 +286,7 @@ write_panel_nginx_conf() {
   mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled "$PANEL_DIR/public/.well-known/acme-challenge"
   chown -R www-data:www-data "$PANEL_DIR/public/.well-known" 2>/dev/null || true
   chmod -R a+rX "$PANEL_DIR/public/.well-known" 2>/dev/null || true
+  {
   cat > /etc/nginx/sites-available/hyper-host-panel.conf <<EOPANELNGINX
 server {
     listen 80;
@@ -363,9 +366,10 @@ server {
     location ~ \.php$ { include snippets/fastcgi-php.conf; fastcgi_pass unix:${PHP_FPM_SOCK}; }
 }
 EOPANELNGINX
+  } 2>/dev/null || warn "Не удалось записать /etc/nginx/sites-available/hyper-host-panel.conf (read-only /etc?) — конфиг nginx для домена панели не обновлён."
   # Load panel config first. If panel.hyper-host.pw was accidentally created as a site,
   # this plus duplicate cleanup makes the exact domain open the panel, not site stub.
-  ln -sf /etc/nginx/sites-available/hyper-host-panel.conf /etc/nginx/sites-enabled/00-hyper-host-panel.conf
+  ln -sf /etc/nginx/sites-available/hyper-host-panel.conf /etc/nginx/sites-enabled/00-hyper-host-panel.conf 2>/dev/null || true
   rm -f /etc/nginx/sites-enabled/hyper-host-panel.conf 2>/dev/null || true
 }
 
@@ -582,6 +586,7 @@ cmd_add_site() {
     IFS=',' read -ra arr <<< "$aliases"
     for a in "${arr[@]}"; do a="$(echo "$a" | xargs)"; [[ -z "$a" ]] && continue; valid_domain "$a" || err "Invalid alias: $a"; server_names="$server_names $a"; done
   fi
+  {
   cat > "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" <<EONGINX
 server {
     listen 80;
@@ -604,6 +609,7 @@ server {
     location ~ /\. { deny all; }
 }
 EONGINX
+  } 2>/dev/null || err "Не удалось записать конфиг nginx для $domain (read-only /etc/nginx?) — сайт не создан."
   ln -sf "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" "$NGINX_ENABLED/hyper-host-site-$domain.conf"
   nginx_reload
   log "Site created: $domain -> $root"
@@ -816,9 +822,9 @@ cmd_public_ip() {
     set)
       [[ -n "$ip" ]] || err "Public IP required"
       [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || err "Invalid IPv4: $ip"
-      echo "$ip" > /etc/hyper-host/public_ip
+      echo "$ip" > /etc/hyper-host/public_ip 2>/dev/null || warn "Не удалось записать /etc/hyper-host/public_ip (read-only?) — публичный IP используется только на время этого запуска."
       if [[ -f "$CONF" ]]; then
-        if grep -q '^PUBLIC_IP=' "$CONF"; then sed -i "s#^PUBLIC_IP=.*#PUBLIC_IP=\"$ip\"#" "$CONF"; else echo "PUBLIC_IP=\"$ip\"" >> "$CONF"; fi
+        if grep -q '^PUBLIC_IP=' "$CONF"; then sed -i "s#^PUBLIC_IP=.*#PUBLIC_IP=\"$ip\"#" "$CONF" 2>/dev/null || true; else echo "PUBLIC_IP=\"$ip\"" >> "$CONF" 2>/dev/null || true; fi
       fi
       log "Public IP saved: $ip"
       ;;
@@ -1625,6 +1631,7 @@ configure_phpmyadmin_label() {
   mkdir -p /etc/phpmyadmin/conf.d
   local pma_host="${PANEL_DOMAIN:-}"
   [[ -z "$pma_host" || "$pma_host" == "_" ]] && pma_host="${PUBLIC_IP:-${SERVER_IP:-127.0.0.1}}"
+  {
   cat > /etc/phpmyadmin/conf.d/hyper-host-server.php <<EOPMA
 <?php
 // HYPER-HOST: показываем понятный SQL host в phpMyAdmin.
@@ -1634,7 +1641,8 @@ if (isset(\$i)) {
     \$cfg['Servers'][\$i]['port'] = '3306';
 }
 EOPMA
-  chmod 0644 /etc/phpmyadmin/conf.d/hyper-host-server.php || true
+  } 2>/dev/null || warn "Не удалось записать /etc/phpmyadmin/conf.d/hyper-host-server.php (read-only /etc?)"
+  chmod 0644 /etc/phpmyadmin/conf.d/hyper-host-server.php 2>/dev/null || true
 }
 
 cmd_phpmyadmin_fix() {
@@ -1693,6 +1701,17 @@ run_as_bot() {
 install_hyperbot_pm2_service() {
   # HYPER-HOST v13: боты должны жить 24/7 независимо от открытой консоли/панели.
   # Поэтому PM2 запускается как systemd-сервис от пользователя hyperbot и поднимает сохранённый dump.pm2 после reboot.
+  #
+  # v49 fix: раньше тут стоял голый `cat > /etc/systemd/system/hyperbot-pm2.service <<EOSVC`.
+  # На системах с read-only /etc/systemd/system (контейнер/урезанные права) эта запись
+  # падала с "Read-only file system", а так как весь скрипт запущен с `set -Eeo pipefail`,
+  # ЭТО ПАДЕНИЕ УБИВАЛО ВЕСЬ ЗАПУЩЕННЫЙ КОМАНДОЙ ПРОЦЕСС ЦЕЛИКОМ — включая создание бота,
+  # которое вызывает ensure_pm2 первым делом, ДО того как бот вообще создаётся и стартует.
+  # Отсюда "не могу создать новых ботов": падало на PM2-автозапуске, а не на самом боте.
+  # Теперь пишем во временный файл и переносим в /etc/systemd/system только если это
+  # реально получилось; если нет — просто пропускаем systemd-автозапуск (сам PM2-процесс
+  # это не затрагивает, боты всё равно стартуют и работают, просто без автоподъёма после
+  # полной перезагрузки сервера) и пробуем более лёгкий fallback через cron @reboot.
   ensure_bot_user
   local pm2_bin
   pm2_bin="$(command -v pm2 || true)"
@@ -1700,7 +1719,9 @@ install_hyperbot_pm2_service() {
   mkdir -p "$PM2_HOME_DIR"
   chown "$BOT_USER":www-data "$BOTS_DIR" "$PM2_HOME_DIR" 2>/dev/null || true
   chmod 2775 "$BOTS_DIR" "$PM2_HOME_DIR" 2>/dev/null || true
-  cat > /etc/systemd/system/hyperbot-pm2.service <<EOSVC
+
+  local tmp_unit="/tmp/hyperbot-pm2.service.$$"
+  cat > "$tmp_unit" <<EOSVC
 [Unit]
 Description=HYPER-HOST PM2 24/7 bots runtime
 Documentation=https://github.com/memes4u1337/hyper-hosting-panel
@@ -1730,9 +1751,28 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOSVC
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  systemctl enable hyperbot-pm2.service >/dev/null 2>&1 || true
-  systemctl start hyperbot-pm2.service >/dev/null 2>&1 || true
+
+  if cat "$tmp_unit" > /etc/systemd/system/hyperbot-pm2.service 2>/dev/null; then
+    rm -f "$tmp_unit" 2>/dev/null || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable hyperbot-pm2.service >/dev/null 2>&1 || true
+    systemctl start hyperbot-pm2.service >/dev/null 2>&1 || true
+  else
+    rm -f "$tmp_unit" 2>/dev/null || true
+    log "PM2 systemd-автозапуск недоступен (read-only /etc/systemd/system) — боты продолжают работать через сам PM2-процесс, но не переживут полную перезагрузку сервера без cron-фолбэка ниже."
+    # Лёгкий fallback: поднять сохранённый dump.pm2 через cron @reboot, если /etc/cron.d доступен на запись.
+    local cron_tmp="/tmp/hyperbot-pm2-reboot.$$"
+    cat > "$cron_tmp" <<EOCRON
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+@reboot ${BOT_USER} HOME=${BOTS_DIR} PM2_HOME=${PM2_HOME_DIR} ${pm2_bin} resurrect >>/var/log/hyper-host-pm2-reboot.log 2>&1
+EOCRON
+    if cat "$cron_tmp" > "$CRON_DIR/hyper-host-pm2-reboot" 2>/dev/null; then
+      chmod 0644 "$CRON_DIR/hyper-host-pm2-reboot" 2>/dev/null || true
+      systemctl reload cron 2>/dev/null || true
+    fi
+    rm -f "$cron_tmp" 2>/dev/null || true
+  fi
 }
 
 pm2_persist() {
@@ -2490,7 +2530,8 @@ PY
 # HYPER-HOST v15: network + DNS
 # -----------------------------
 write_bind_authoritative_defaults() {
-  mkdir -p /etc/bind/hyper-host-zones /var/cache/bind
+  mkdir -p /etc/bind/hyper-host-zones /var/cache/bind 2>/dev/null || true
+  {
   cat > /etc/bind/named.conf.options <<'EOBINDOPT'
 options {
     directory "/var/cache/bind";
@@ -2504,7 +2545,8 @@ options {
     minimal-responses yes;
 };
 EOBINDOPT
-  touch /etc/bind/named.conf.local
+  } 2>/dev/null || warn "Не удалось записать /etc/bind/named.conf.options (read-only /etc?) — DNS-зоны могут не примениться."
+  touch /etc/bind/named.conf.local 2>/dev/null || true
 }
 
 
@@ -3567,22 +3609,28 @@ cmd_repair() {
     pm2_persist
   fi
 
+  {
   cat > /etc/sudoers.d/hyper-host <<EOSUDO
 www-data ALL=(root) NOPASSWD: /usr/local/sbin/hyper-host-ctl *
 EOSUDO
-  chmod 0440 /etc/sudoers.d/hyper-host; visudo -cf /etc/sudoers.d/hyper-host >/dev/null
+  } 2>/dev/null || warn "Не удалось записать /etc/sudoers.d/hyper-host (read-only /etc?) — панели может не хватать прав на sudo-команды."
+  if [[ -f /etc/sudoers.d/hyper-host ]]; then
+    chmod 0440 /etc/sudoers.d/hyper-host 2>/dev/null || true
+    visudo -cf /etc/sudoers.d/hyper-host >/dev/null 2>&1 || warn "visudo не смог проверить /etc/sudoers.d/hyper-host"
+  fi
   open_server_ports
   ensure_nginx_public_listen
   ensure_vsftpd_external_access; systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
   # v47: гарантируем, что вотчер смены публичного IP стоит в cron даже на уже
   # развёрнутых панелях, обновлённых через git pull без повторного install.sh.
   if [[ ! -f /etc/cron.d/hyper-host-ip-watch ]]; then
-    cat > /etc/cron.d/hyper-host-ip-watch <<EOIPWATCH
+    { cat > /etc/cron.d/hyper-host-ip-watch <<EOIPWATCH
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 */5 * * * * root /usr/local/sbin/hyper-host-ctl ip-autofix --quiet >/var/log/hyper-host-ip-watch.log 2>&1
 EOIPWATCH
-    chmod 0644 /etc/cron.d/hyper-host-ip-watch
+    } 2>/dev/null || warn "Не удалось записать /etc/cron.d/hyper-host-ip-watch (read-only /etc?) — автообновление IP при смене адреса не встанет, почини IP вручную: sudo hyper network ip-fix"
+    chmod 0644 /etc/cron.d/hyper-host-ip-watch 2>/dev/null || true
     systemctl reload cron 2>/dev/null || true
   fi
   log "Repair finished: permissions, ACL, FTP safe homes, PM2 hyperbot and services checked"

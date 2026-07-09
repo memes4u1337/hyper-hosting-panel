@@ -26,6 +26,21 @@ log() { echo -e "\033[1;36m[HYPER-HOST]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[HYPER-HOST WARNING]\033[0m $*"; }
 fail() { echo -e "\033[1;31m[HYPER-HOST ERROR]\033[0m $*"; exit 1; }
 
+# v49: раньше при занятой dpkg-блокировке (unattended-upgrades или другой apt-get,
+# который ещё не закончился) установка сразу падала с "Не удалось получить блокировку
+# файла /var/lib/dpkg/lock-frontend" и всё останавливалось. Теперь ждём освобождения
+# блокировки до 3 минут вместо мгновенного отказа — обычно unattended-upgrades
+# отрабатывает за 10-60 секунд.
+wait_for_dpkg_lock() {
+  local waited=0 max=180
+  while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
+    if [[ "$waited" -eq 0 ]]; then log "apt/dpkg сейчас занят другим процессом (например автообновления системы) — жду освобождения..."; fi
+    sleep 5; waited=$((waited+5))
+    if [[ "$waited" -ge "$max" ]]; then warn "dpkg всё ещё занят через ${max}с, пробую продолжить как есть"; break; fi
+  done
+}
+wait_for_dpkg_lock
+
 get_server_ip() {
   local ip=""
   ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}' || true)"
@@ -151,6 +166,7 @@ EOSQL
   if [[ -f "$create_sql" ]]; then
     mysql --protocol=socket -uroot phpmyadmin < "$create_sql" >/dev/null 2>&1 || true
   fi
+  {
   cat > /etc/phpmyadmin/conf.d/hyper-host-storage.php <<EOPMASTORE
 <?php
 // HYPER-HOST: phpMyAdmin advanced configuration storage + large import/export.
@@ -185,7 +201,8 @@ if (isset(\$i) && isset(\$cfg['Servers'][\$i])) {
     \$cfg['Servers'][\$i]['export_templates'] = 'pma__export_templates';
 }
 EOPMASTORE
-  chmod 0644 /etc/phpmyadmin/conf.d/hyper-host-storage.php || true
+  } 2>/dev/null || warn "Не удалось записать /etc/phpmyadmin/conf.d/hyper-host-storage.php (read-only /etc?) — продолжаю установку."
+  chmod 0644 /etc/phpmyadmin/conf.d/hyper-host-storage.php 2>/dev/null || true
 }
 
 ensure_nologin_shell() {
@@ -199,7 +216,9 @@ ensure_nologin_shell() {
 
 
 log "Установка системных пакетов..."
+wait_for_dpkg_lock
 apt-get update -y
+wait_for_dpkg_lock
 apt-get install -y \
   ca-certificates curl git unzip rsync sudo openssl ufw software-properties-common apt-transport-https lsb-release \
   nginx mariadb-server \
@@ -293,6 +312,7 @@ PMA_VERBOSE_HOST="${PANEL_DOMAIN}"
 if [[ -z "$PMA_VERBOSE_HOST" || "$PMA_VERBOSE_HOST" == "_" ]]; then
   PMA_VERBOSE_HOST="${PUBLIC_IP:-${SERVER_IP}}"
 fi
+{
 cat > /etc/phpmyadmin/conf.d/hyper-host-server.php <<EOPMA
 <?php
 // HYPER-HOST: phpMyAdmin показывает понятное имя сервера вместо localhost:3306.
@@ -302,7 +322,8 @@ if (isset(\$i)) {
     \$cfg['Servers'][\$i]['port'] = '3306';
 }
 EOPMA
-chmod 0644 /etc/phpmyadmin/conf.d/hyper-host-server.php || true
+} 2>/dev/null || warn "Не удалось записать /etc/phpmyadmin/conf.d/hyper-host-server.php (read-only /etc?) — продолжаю установку."
+chmod 0644 /etc/phpmyadmin/conf.d/hyper-host-server.php 2>/dev/null || true
 configure_php_limits
 configure_phpmyadmin_storage
 
@@ -331,14 +352,17 @@ chown www-data:www-data "$BASE_DIR/data/hyperhost.sqlite"-* 2>/dev/null || true
 chmod 0660 "$BASE_DIR/data/hyperhost.sqlite"-* 2>/dev/null || true
 
 log "Настройка sudo для панели..."
+{
 cat > /etc/sudoers.d/hyper-host <<EOSUDO
 www-data ALL=(root) NOPASSWD: ${CONTROL_BIN} *
 www-data ALL=(root) NOPASSWD: ${HYPER_BIN} *
 EOSUDO
+} 2>/dev/null || fail "Не удалось записать /etc/sudoers.d/hyper-host (read-only /etc/sudoers.d?) — без этого панель не сможет выполнять команды. Проверь, что корневая ФС доступна на запись: mount | grep ' / '"
 chmod 0440 /etc/sudoers.d/hyper-host
 visudo -cf /etc/sudoers.d/hyper-host >/dev/null || fail "Ошибка sudoers-конфига"
 
 log "Настройка Nginx для панели..."
+{
 cat > /etc/nginx/sites-available/hyper-host-panel.conf <<EONGINX
 server {
     listen 80 default_server;
@@ -388,6 +412,7 @@ server {
     }
 }
 EONGINX
+} 2>/dev/null || fail "Не удалось записать /etc/nginx/sites-available/hyper-host-panel.conf (read-only /etc/nginx?) — без этого панель не будет доступна. Проверь: mount | grep ' / '"
 
 rm -f /etc/nginx/sites-enabled/default
 ln -sf /etc/nginx/sites-available/hyper-host-panel.conf /etc/nginx/sites-enabled/hyper-host-panel.conf
@@ -504,6 +529,7 @@ if command -v pm2 >/dev/null 2>&1; then
 fi
 
 log "Настройка DNS сервиса bind9..."
+{
 cat > /etc/bind/named.conf.options <<'EOBINDOPT'
 options {
     directory "/var/cache/bind";
@@ -517,7 +543,8 @@ options {
     minimal-responses yes;
 };
 EOBINDOPT
-touch /etc/bind/named.conf.local
+} 2>/dev/null || warn "Не удалось записать /etc/bind/named.conf.options (read-only /etc?) — DNS-зоны настраивай позже вручную: sudo hyper dns wizard."
+touch /etc/bind/named.conf.local 2>/dev/null || true
 systemctl enable bind9 >/dev/null 2>&1 || true
 systemctl restart bind9 2>/dev/null || true
 
@@ -532,12 +559,14 @@ systemctl restart cron 2>/dev/null || true
 # v47: у многих домашних провайдеров публичный IP не статичный (меняется при
 # переподключении/перезагрузке роутера). Без этого вотчера при смене IP FTP и DNS
 # продолжали бы рекламировать старый, недоступный извне адрес. Проверяем раз в 5 минут.
+{
 cat > /etc/cron.d/hyper-host-ip-watch <<EOIPWATCH
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 */5 * * * * root /usr/local/sbin/hyper-host-ctl ip-autofix --quiet >/var/log/hyper-host-ip-watch.log 2>&1
 EOIPWATCH
-chmod 0644 /etc/cron.d/hyper-host-ip-watch
+} 2>/dev/null || warn "Не удалось поставить cron для автообновления IP (read-only /etc/cron.d?) — при смене IP чини вручную: sudo hyper network ip-fix"
+chmod 0644 /etc/cron.d/hyper-host-ip-watch 2>/dev/null || true
 systemctl reload cron 2>/dev/null || true
 
 log "Настройка firewall..."
