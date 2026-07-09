@@ -17,6 +17,29 @@ document.addEventListener('click', function(e){
   if(modal.parentElement !== document.body) document.body.appendChild(modal);
 }, true);
 
+// HYPER-HOST v50: явный визуальный фидбек на долгих формах (например создание бота),
+// чтобы не было ощущения "зависло, не пойму сработало или нет". Кнопка блокируется
+// сразу по клику и меняет текст на data-loading-text, плюс показывается подсказка
+// рядом с формой (data-async-hint), если она есть.
+(function(){
+  function init(){
+    document.querySelectorAll('form[data-async-submit]').forEach(function(form){
+      form.addEventListener('submit', function(){
+        const btn = form.querySelector('button[type="submit"], button:not([type])');
+        if(btn && !btn.disabled){
+          btn.dataset.originalHtml = btn.innerHTML;
+          const loadingText = btn.getAttribute('data-loading-text') || 'Выполняется...';
+          btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>' + loadingText;
+          btn.disabled = true;
+        }
+        const hint = form.parentElement ? form.parentElement.querySelector('[data-async-hint]') : null;
+        if(hint) hint.style.display = '';
+      });
+    });
+  }
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+})();
+
 // HYPER-HOST v45: мобильное меню — бургер открывает/закрывает sidebar как off-canvas drawer.
 (function(){
   function init(){

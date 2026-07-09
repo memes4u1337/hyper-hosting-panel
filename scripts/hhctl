@@ -1664,11 +1664,19 @@ ensure_bot_user() {
 }
 node_major() { node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 | grep -E '^[0-9]+$' || echo 0; }
 ensure_node_runtime() {
+  # v50 fix: раньше apt-get update -y (по ВСЕМ репозиториям: ubuntu x4, nodesource,
+  # ondrej/php PPA) запускался БЕЗУСЛОВНО при каждом создании/деплое бота — даже
+  # когда Node.js уже стоит нужной версии. На домашнем интернете это легко давало
+  # 10-60+ секунд ожидания на пустом месте при КАЖДОМ боте. Теперь если Node.js уже
+  # нужной версии и npm есть — вообще ничего не трогаем и выходим сразу.
+  local major; major="$(node_major)"
+  if [[ "$major" -ge "$NODE_MAJOR_MIN" ]] && command -v npm >/dev/null 2>&1; then
+    return 0
+  fi
   apt-get update -y >/dev/null 2>&1 || true
   apt-get install -y curl ca-certificates gnupg >/dev/null 2>&1 || true
   dpkg --configure -a >/tmp/hyper-host-dpkg-configure.log 2>&1 || true
   apt-get -f install -y >/tmp/hyper-host-apt-fix.log 2>&1 || true
-  local major; major="$(node_major)"
   if [[ "$major" -lt "$NODE_MAJOR_MIN" ]]; then
     log "Node.js слишком старый или сломан: $(node -v 2>/dev/null || echo none). Чищу старые node/npm/libnode-dev и ставлю Node.js 20.x."
     apt-get remove -y npm nodejs libnode-dev node-gyp nodejs-doc >/tmp/hyper-host-node-remove.log 2>&1 || true
@@ -1713,6 +1721,12 @@ install_hyperbot_pm2_service() {
   # это не затрагивает, боты всё равно стартуют и работают, просто без автоподъёма после
   # полной перезагрузки сервера) и пробуем более лёгкий fallback через cron @reboot.
   ensure_bot_user
+  # v50 fix: раньше systemd-юнит перезаписывался и перезапускался (daemon-reload +
+  # enable + start) на КАЖДОЕ создание бота — лишние секунды на пустом месте, когда
+  # сервис и так уже активен и корректно настроен. Теперь если он уже active — выходим.
+  if systemctl is-active hyperbot-pm2.service >/dev/null 2>&1; then
+    return 0
+  fi
   local pm2_bin
   pm2_bin="$(command -v pm2 || true)"
   [[ -n "$pm2_bin" ]] || return 0
@@ -2045,7 +2059,16 @@ cmd_bot_action() {
   esac
 }
 cmd_bot_list_json() {
-  ensure_pm2
+  # v50 fix: эта команда дёргается панелью КАЖДЫЕ 4 СЕКУНДЫ для live-обновления
+  # статистики ботов (RAM/CPU/uptime без перезагрузки страницы). Раньше она вызывала
+  # полновесный ensure_pm2() на каждый опрос — это python3/pip3/venv/node проверки,
+  # sudo su к hyperbot, "pm2 ping", "pm2 save" (запись dump-файла на диск!) и проверку
+  # systemd-юнита. При таком расходе на один просто-статус-запрос реальный интервал
+  # обновления мог растягиваться до многих секунд, а при таймауте (8с в PHP) —
+  # обновление вообще пропускало такт. Теперь для простого чтения списка достаточно
+  # проверить, что pm2 бинарь вообще есть, и сразу спросить jlist — это не пишет
+  # ничего на диск и не трогает python/node/systemd.
+  if ! command -v pm2 >/dev/null 2>&1; then echo '[]'; return 0; fi
   pm2_as_bot jlist 2>/dev/null | python3 -c 'import sys,json,os,time
 try:
     data=json.load(sys.stdin)
