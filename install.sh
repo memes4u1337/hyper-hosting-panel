@@ -275,36 +275,52 @@ systemctl enable nginx >/dev/null 2>&1 || true
 systemctl reload nginx
 
 log "Настройка FTP..."
+ensure_nologin_shell
+mkdir -p /var/run/vsftpd/empty "$FTP_DIR"
 cp /etc/vsftpd.conf "/etc/vsftpd.conf.backup.$(date +%s)" 2>/dev/null || true
+FTP_PASV_ADDR="${PUBLIC_IP:-}"
+if [[ -n "$FTP_PASV_ADDR" && "$FTP_PASV_ADDR" =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.|169\.254\.) ]]; then
+  FTP_PASV_ADDR=""
+fi
+FTP_PASV_LINE=""
+[[ -n "$FTP_PASV_ADDR" ]] && FTP_PASV_LINE="pasv_address=${FTP_PASV_ADDR}"
 cat > /etc/vsftpd.conf <<EOFTP
 listen=YES
 listen_ipv6=NO
+listen_address=0.0.0.0
 anonymous_enable=NO
 local_enable=YES
 write_enable=YES
-local_umask=022
-dirmessage_enable=YES
+local_umask=002
+file_open_mode=0664
+dirmessage_enable=NO
 use_localtime=YES
 xferlog_enable=YES
+dual_log_enable=YES
+vsftpd_log_file=/var/log/vsftpd.log
 connect_from_port_20=YES
 chroot_local_user=YES
 allow_writeable_chroot=YES
 secure_chroot_dir=/var/run/vsftpd/empty
 pam_service_name=vsftpd
+userlist_enable=NO
+tcp_wrappers=NO
 rsa_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
 rsa_private_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
 ssl_enable=NO
 pasv_enable=YES
 pasv_min_port=40000
 pasv_max_port=40100
-pasv_address=${PUBLIC_IP:-$SERVER_IP}
+${FTP_PASV_LINE}
 pasv_addr_resolve=NO
+pasv_promiscuous=YES
+port_promiscuous=YES
 seccomp_sandbox=NO
 force_dot_files=YES
 utf8_filesystem=YES
 EOFTP
 systemctl enable vsftpd >/dev/null 2>&1 || true
-systemctl restart vsftpd
+systemctl restart vsftpd || true
 systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1 || true
 systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1 || true
 
@@ -354,9 +370,11 @@ options {
     listen-on { any; };
     listen-on-v6 { any; };
     allow-query { any; };
+    allow-recursion { none; };
     recursion no;
     dnssec-validation auto;
     auth-nxdomain no;
+    minimal-responses yes;
 };
 EOBINDOPT
 touch /etc/bind/named.conf.local

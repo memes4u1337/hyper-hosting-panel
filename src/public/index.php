@@ -59,6 +59,40 @@ function csrf_field(): string { return '<input type="hidden" name="_csrf" value=
 function host_name(): string { return panel_host_for_connections(); }
 function default_ftp_password(): string { return 'Hh-' . bin2hex(random_bytes(5)) . '!'; }
 function default_db_password(): string { return 'Db-' . bin2hex(random_bytes(6)) . '!'; }
+function current_public_ipv4(): string
+{
+    $ip = trim(setting_get('public_ip_override', (string)app_config('public_ip', '')));
+    if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) return $ip;
+    $host = host_name();
+    return filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) ? $host : '';
+}
+function dns_panel_label(string $value): string
+{
+    $value = strtolower(trim($value));
+    return preg_match('/^[a-z0-9][a-z0-9-]{0,61}$/', $value) ? $value : 'panel';
+}
+function dns_default_records_for_panel(string $domain, string $ip, string $panelSub = 'panel'): array
+{
+    $panelSub = dns_panel_label($panelSub);
+    return [
+        ['name' => '@', 'type' => 'A', 'value' => $ip, 'ttl' => 300],
+        ['name' => 'www', 'type' => 'A', 'value' => $ip, 'ttl' => 300],
+        ['name' => $panelSub, 'type' => 'A', 'value' => $ip, 'ttl' => 300],
+        ['name' => 'ns1', 'type' => 'A', 'value' => $ip, 'ttl' => 300],
+        ['name' => 'ns2', 'type' => 'A', 'value' => $ip, 'ttl' => 300],
+        ['name' => 'mail', 'type' => 'A', 'value' => $ip, 'ttl' => 3600],
+        ['name' => '@', 'type' => 'MX', 'value' => '10 mail.'.$domain.'.', 'ttl' => 3600],
+        ['name' => '@', 'type' => 'TXT', 'value' => 'v=spf1 a mx ip4:'.$ip.' ~all', 'ttl' => 3600],
+    ];
+}
+function replace_dns_records(int $zoneId, array $records): void
+{
+    db()->prepare('DELETE FROM dns_records WHERE zone_id=?')->execute([$zoneId]);
+    $ins = db()->prepare('INSERT INTO dns_records(zone_id,type,name,value,ttl) VALUES(?,?,?,?,?)');
+    foreach ($records as $r) {
+        $ins->execute([$zoneId, strtoupper((string)$r['type']), (string)$r['name'], (string)$r['value'], (int)$r['ttl']]);
+    }
+}
 function back_to_current(): never { redirect($_SERVER['HTTP_REFERER'] ?? '/'); }
 
 function handle_post(string $action): void
@@ -95,6 +129,11 @@ function handle_post(string $action): void
             }
             case 'delete_folder': {
                 $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM folders WHERE id=?'); $st->execute([$id]); $f=$st->fetch(); if(!$f) throw new RuntimeException('Папка не найдена'); $res=run_ctl(['delete-folder',$f['name']],120); if($res['code']!==0) throw new RuntimeException($res['output']); db()->prepare('DELETE FROM folders WHERE id=?')->execute([$id]); redirect('/?page=sites');
+            }
+            case 'ftp_fix': {
+                hh_clear_cache();
+                $res=run_ctl(['ftp-fix'],120); if($res['code']!==0) throw new RuntimeException($res['output']);
+                flash('FTP доступ исправлен: порт 21 и passive 40000-40100 подготовлены','success'); redirect('/?page=ftp');
             }
             case 'create_ftp': {
                 $username=trim((string)($_POST['username']??'')); $password=(string)($_POST['password']??''); if($username===''||!is_valid_name($username)) throw new RuntimeException('Неверный FTP логин'); if(strlen($password)<8) throw new RuntimeException('Пароль FTP минимум 8 символов');
@@ -189,7 +228,25 @@ function handle_post(string $action): void
             case 'access_fix': { hh_clear_cache(); $res=run_ctl(['access-fix'],180); if($res['code']!==0) throw new RuntimeException($res['output']); flash('Доступ с других ПК включён на Ubuntu. Роутер всё равно нужно пробросить вручную.','success'); redirect('/?page=access'); }
             case 'disk_expand': { hh_clear_cache(); $res=run_ctl(['disk-expand'],600); if($res['code']!==0) throw new RuntimeException($res['output']); flash('Диск расширен. Проверь новый размер root-раздела.','success'); redirect('/?page=disk'); }
                         case 'save_panel_domain': { $domain=strtolower(trim((string)($_POST['panel_domain']??''))); if(!is_valid_domain($domain)) throw new RuntimeException('Неверный домен панели'); $res=run_ctl(['panel-domain','set',$domain],120); if($res['code']!==0) throw new RuntimeException($res['output']); setting_set('panel_domain_override',$domain); hh_clear_cache(); flash('Домен панели сохранён: '.$domain,'success'); redirect('/?page=network'); }
-            case 'dns_wizard': { $domain=strtolower(trim((string)($_POST['domain']??''))); $ip=trim((string)($_POST['public_ip']??'')); $panel=trim((string)($_POST['panel_subdomain']??'panel')); if(!is_valid_domain($domain)) throw new RuntimeException('Неверный домен'); if($ip!=='' && !filter_var($ip,FILTER_VALIDATE_IP,FILTER_FLAG_IPV4)) throw new RuntimeException('Неверный IP'); $primary='ns1.'.$domain.'.'; $admin='admin.'.$domain.'.'; db()->prepare('INSERT INTO dns_zones(domain,primary_ns,admin_email) VALUES(?,?,?) ON CONFLICT(domain) DO UPDATE SET primary_ns=excluded.primary_ns,admin_email=excluded.admin_email')->execute([$domain,$primary,$admin]); $res=run_ctl(['dns-wizard',$domain,$ip,$panel],180); if($res['code']!==0) throw new RuntimeException($res['output']); flash("DNS-зона создана: $domain",'success'); redirect('/?page=dns'); }
+            case 'dns_wizard': {
+                $domain=strtolower(trim((string)($_POST['domain']??'')));
+                $ip=trim((string)($_POST['public_ip']??''));
+                $panel=dns_panel_label((string)($_POST['panel_subdomain']??'panel'));
+                if(!is_valid_domain($domain)) throw new RuntimeException('Неверный домен');
+                if($ip==='' ) $ip=current_public_ipv4();
+                if($ip==='' || !filter_var($ip,FILTER_VALIDATE_IP,FILTER_FLAG_IPV4)) throw new RuntimeException('Укажи публичный IPv4 для DNS');
+                $primary='ns1.'.$domain.'.'; $admin='admin.'.$domain.'.';
+                db()->beginTransaction();
+                db()->prepare('INSERT INTO dns_zones(domain,primary_ns,admin_email) VALUES(?,?,?) ON CONFLICT(domain) DO UPDATE SET primary_ns=excluded.primary_ns,admin_email=excluded.admin_email')->execute([$domain,$primary,$admin]);
+                $st=db()->prepare('SELECT id FROM dns_zones WHERE domain=?'); $st->execute([$domain]); $zoneId=(int)($st->fetch()['id']??0);
+                replace_dns_records($zoneId, dns_default_records_for_panel($domain,$ip,$panel));
+                db()->commit();
+                setting_set('public_ip_override',$ip);
+                dns_apply_zone($domain);
+                $res=run_ctl(['dns-wizard',$domain,$ip,$panel],180); if($res['code']!==0) throw new RuntimeException($res['output']);
+                hh_clear_cache();
+                flash("DNS-зона готова: $domain. NS: ns1.$domain / ns2.$domain",'success'); redirect('/?page=dns');
+            }
             case 'create_dns_zone': { $domain=strtolower(trim((string)($_POST['domain']??''))); if(!is_valid_domain($domain)) throw new RuntimeException('Неверный домен'); db()->prepare('INSERT INTO dns_zones(domain,primary_ns,admin_email) VALUES(?,?,?) ON CONFLICT(domain) DO UPDATE SET primary_ns=excluded.primary_ns,admin_email=excluded.admin_email')->execute([$domain, trim((string)($_POST['primary_ns']??'ns1.local.')), trim((string)($_POST['admin_email']??'admin.local.'))]); dns_apply_zone($domain); redirect('/?page=dns'); }
             case 'add_dns_record': { $zone=(int)($_POST['zone_id']??0); $type=strtoupper(trim((string)($_POST['type']??'A'))); $name=trim((string)($_POST['name']??'@')); $value=trim((string)($_POST['value']??'')); $ttl=(int)($_POST['ttl']??3600); if($value==='') throw new RuntimeException('Значение DNS записи пустое'); db()->prepare('INSERT INTO dns_records(zone_id,type,name,value,ttl) VALUES(?,?,?,?,?)')->execute([$zone,$type,$name,$value,$ttl]); $z=db()->prepare('SELECT domain FROM dns_zones WHERE id=?'); $z->execute([$zone]); $zr=$z->fetch(); if($zr) dns_apply_zone((string)$zr['domain']); redirect('/?page=dns'); }
             case 'delete_dns_record': { $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT z.domain FROM dns_records r JOIN dns_zones z ON z.id=r.zone_id WHERE r.id=?'); $st->execute([$id]); $z=$st->fetch(); db()->prepare('DELETE FROM dns_records WHERE id=?')->execute([$id]); if($z) dns_apply_zone((string)$z['domain']); redirect('/?page=dns'); }
@@ -308,7 +365,7 @@ function nav_item(string $id,string $icon,string $label,string $page): string { 
 function render_login(): void
 {
     $flash=flash(); $need2fa=setting_get('security_2fa_enabled','0')==='1'; ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=33" rel="stylesheet"></head><body class="login-body">
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=34" rel="stylesheet"></head><body class="login-body">
 <div class="login-orb login-orb-a"></div><div class="login-orb login-orb-b"></div><div class="login-orb login-orb-c"></div>
 <div class="login-shell-v2">
   <div class="login-side">
@@ -350,7 +407,7 @@ function render_page(string $page, array $user): void
 <link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
-<link href="/assets/style.css?v=33" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell">
+<link href="/assets/style.css?v=34" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell">
 <aside class="sidebar sidebar-v2">
   <div class="rail" data-active-cat="<?= e($activeCat) ?>">
     <a href="/?page=dashboard" class="rail-logo"><i class="fa-solid fa-bolt"></i></a>
@@ -380,7 +437,7 @@ function render_page(string $page, array $user): void
     </div>
   </div>
 </aside>
-<main class="content" style="--cat-accent:<?= e($nav[$activeCat]['accent']??'#4f7dff') ?>"><header class="topbar"><div><div class="topbar-kicker"><i class="fa-solid <?= e($nav[$activeCat]['icon']??'fa-rocket') ?>"></i><?= e($nav[$activeCat]['label']??'') ?></div><h1><?= e($title) ?></h1><div class="small muted">Сервер: <code><?= e(host_name()) ?></code></div></div><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft"><i class="fa-solid fa-rotate me-2"></i>Обновить</button></form></header><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?><?php route_view($page); ?></main></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script><script src="/assets/app.js?v=33" defer></script></body></html><?php
+<main class="content" style="--cat-accent:<?= e($nav[$activeCat]['accent']??'#4f7dff') ?>"><header class="topbar"><div><div class="topbar-kicker"><i class="fa-solid <?= e($nav[$activeCat]['icon']??'fa-rocket') ?>"></i><?= e($nav[$activeCat]['label']??'') ?></div><h1><?= e($title) ?></h1><div class="small muted">Сервер: <code><?= e(host_name()) ?></code></div></div><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft"><i class="fa-solid fa-rotate me-2"></i>Обновить</button></form></header><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?><?php route_view($page); ?></main></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script><script src="/assets/app.js?v=34" defer></script></body></html><?php
 }
 function route_view(string $page): void { match($page){ 'files'=>view_files(), 'sites'=>view_sites(), 'ftp'=>view_ftp(), 'databases'=>view_databases(), 'pma_login'=>view_pma_login(), 'bots'=>view_bots(), 'bot_logs'=>view_bot_logs(), 'backups'=>view_backups(), 'dns'=>view_dns(), 'network'=>view_network(), 'ssl'=>view_ssl(), 'php'=>view_php(), 'cron'=>view_cron(), 'logs'=>view_logs(), 'security'=>view_security(), 'settings'=>view_settings(), 'access'=>view_access(), 'disk'=>view_disk(), default=>view_dashboard(), }; }
 function stat_card(string $icon,string $label,string $value,string $sub=''): void { ?><div class="stat-card"><div class="stat-icon"><i class="fa-solid <?= e($icon) ?>"></i></div><div><span><?= e($label) ?></span><b><?= e($value) ?></b><?php if($sub): ?><em><?= e($sub) ?></em><?php endif; ?></div></div><?php }
@@ -686,32 +743,41 @@ document.querySelectorAll('.db-access-pills input[type="radio"]').forEach(functi
 }
 
 function view_ftp(): void
-{ $rows=db()->query('SELECT * FROM ftp_accounts ORDER BY id DESC')->fetchAll(); $gen=default_ftp_password(); ?>
-<div class="ftp-layout-v33 row g-4">
+{ $rows=db()->query('SELECT * FROM ftp_accounts ORDER BY id DESC')->fetchAll(); $gen=default_ftp_password(); $doctor=run_ctl_json_cached(['ftp-doctor-json'],8,30); $ftpHost=setting_get('public_ip_override', host_name()); ?>
+<div class="ftp-layout-v34 row g-4">
   <div class="col-lg-4">
     <div class="panel-card ftp-create-card">
       <div class="kicker"><i class="fa-solid fa-folder-tree me-2"></i>FTP</div>
-      <h2>Создать аккаунт</h2>
+      <h2>Аккаунты доступа</h2>
+      <div class="status-grid compact-status mt-3">
+        <div><span>vsftpd</span><b class="<?= (($doctor['vsftpd']??'')==='active')?'text-success':'text-danger' ?>"><?= e((string)($doctor['vsftpd']??'unknown')) ?></b></div>
+        <div><span>порт</span><b class="<?= !empty($doctor['listen_21'])?'text-success':'text-danger' ?>"><?= !empty($doctor['listen_21'])?'21 открыт':'21 закрыт' ?></b></div>
+        <div><span>passive</span><b>40000-40100</b></div>
+        <div><span>PASV IP</span><b><?= e((string)(($doctor['pasv_address'] ?? '') ?: 'auto')) ?></b></div>
+      </div>
       <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_ftp">
         <input class="form-control" name="username" placeholder="hyperhost" required>
         <div class="input-group"><input class="form-control" name="password" id="ftpPass" value="<?= e($gen) ?>" minlength="8" required><button class="btn btn-outline-light" type="button" onclick="copyValue('ftpPass')"><i class="fa-regular fa-copy"></i></button></div>
         <button class="btn btn-primary btn-lg"><i class="fa-solid fa-plus me-2"></i>Создать FTP</button>
       </form>
-      <form method="post" class="mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="repair_panel"><button class="btn btn-soft w-100"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Починить доступ</button></form>
+      <form method="post" class="mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="ftp_fix"><button class="btn btn-soft w-100"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Починить FTP</button></form>
     </div>
   </div>
   <div class="col-lg-8">
+    <div class="panel-card mb-3 ftp-connection-card">
+      <div class="connection-line"><span>Подключение</span><code>FTP <?= e($ftpHost) ?> : 21</code><b>Passive</b></div>
+    </div>
     <div class="row g-3">
-      <?php foreach($rows as $r): ?>
+      <?php foreach($rows as $r): $cardHost=setting_get('public_ip_override', $r['host']?:host_name()); ?>
         <div class="col-md-6"><div class="ftp-card ftp-card-v25">
           <h3><i class="fa-solid fa-user-lock me-2"></i><?= e($r['username']) ?></h3>
-          <div class="cred"><span>Хост</span><code><?= e(setting_get('public_ip_override', $r['host']?:host_name())) ?></code></div>
-          <div class="cred"><span>Локальный</span><code><?= e(host_name()) ?></code></div>
+          <div class="cred"><span>Хост</span><code><?= e($cardHost) ?></code></div>
+          <div class="cred"><span>Порт</span><code>21</code></div>
           <div class="cred"><span>Логин</span><code><?= e($r['username']) ?></code></div>
           <div class="cred"><span>Пароль</span><code><?= e($r['password_plain']?:'задать новый') ?></code></div>
-          <div class="ftp-tags"><span>21</span><span>40000-40100</span><span>common/sites</span></div>
+          <div class="ftp-tags"><span>FTP</span><span>Passive</span><span>common/sites</span></div>
           <div class="d-flex gap-2 mt-3 flex-wrap">
-            <button class="btn btn-sm btn-light" onclick="copyText('Host: <?= e(setting_get('public_ip_override', $r['host']?:host_name())) ?>\nLogin: <?= e($r['username']) ?>\nPassword: <?= e($r['password_plain']) ?>\nPort: 21\nPassive: 40000-40100')">Копировать</button>
+            <button class="btn btn-sm btn-light" onclick="copyText('Protocol: FTP\nHost: <?= e($cardHost) ?>\nPort: 21\nMode: Passive\nLogin: <?= e($r['username']) ?>\nPassword: <?= e($r['password_plain']) ?>')">Копировать</button>
             <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#ftp<?= (int)$r['id'] ?>">Пароль</button>
             <form method="post" onsubmit="return confirm('Удалить FTP?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_ftp"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-danger">Удалить</button></form>
           </div>
@@ -721,6 +787,7 @@ function view_ftp(): void
     </div>
   </div>
 </div><?php }
+
 
 function pm2_status_map(): array { $d=run_ctl_json_live(['bot-list-json'],8); $m=[]; if(!isset($d['_error'])) foreach($d as $p) $m[(string)$p['name']]=$p; return $m; }
 function view_bots(): void
@@ -813,35 +880,40 @@ function view_backups(): void { $jobs=db()->query('SELECT * FROM backup_jobs ORD
 <div class="row g-4"><div class="col-lg-4"><div class="panel-card"><h2>Создать backup сейчас</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="backup_run"><select class="form-select" name="target"><option value="all">Всё</option><option value="sites">Сайты</option><option value="bots">Боты</option><option value="db">Базы MySQL</option><option value="panel">Панель</option></select><button class="btn btn-primary">Создать backup</button></form></div><div class="panel-card mt-4"><h2>Расписание</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="backup_job"><input class="form-control" name="name" placeholder="daily_all" required><input class="form-control" name="schedule" value="0 3 * * *" required><select class="form-select" name="target"><option value="all">Всё</option><option value="sites">Сайты</option><option value="bots">Боты</option><option value="db">Базы</option></select><button class="btn btn-primary">Сохранить расписание</button></form></div></div><div class="col-lg-8"><div class="panel-card"><h2>Backup задачи</h2><table class="table table-dark-soft"><?php foreach($jobs as $j): ?><tr><td><b><?= e($j['name']) ?></b></td><td><code><?= e($j['schedule']) ?></code></td><td><?= e($j['target']) ?></td><td><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="delete_backup_job"><input type="hidden" name="id" value="<?= (int)$j['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form></td></tr><?php endforeach; if(!$jobs): ?><tr><td class="empty">Задач пока нет</td></tr><?php endif; ?></table><h2 class="mt-4">Архивы</h2><table class="table table-dark-soft"><?php foreach(($files['_error']??null)?[]:$files as $f): ?><tr><td><code><?= e($f['name']) ?></code></td><td><?= e(human_bytes((float)$f['size'])) ?></td><td><?= e(date('d.m.Y H:i',(int)$f['mtime'])) ?></td></tr><?php endforeach; ?></table></div></div></div><?php }
 
 function view_dns(): void { $zones=db()->query('SELECT * FROM dns_zones ORDER BY id DESC')->fetchAll(); $pub=setting_get('public_ip_override',(string)app_config('public_ip','90.189.208.25')); ?>
-<div class="row g-4">
+<div class="row g-4 dns-page-v34">
   <div class="col-xl-4">
     <div class="panel-card hero-mini">
       <div class="kicker"><i class="fa-solid fa-diagram-project me-2"></i>DNS</div>
-      <h2>DNS-зона</h2>
+      <h2>Перенос домена</h2>
       <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="dns_wizard">
         <input class="form-control" name="domain" placeholder="hyper-host.pw" required>
         <input class="form-control" name="public_ip" value="<?= e($pub) ?>" placeholder="90.189.208.25">
         <input class="form-control" name="panel_subdomain" value="panel" placeholder="panel">
-        <button class="btn btn-primary btn-lg"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Создать DNS</button>
+        <button class="btn btn-primary btn-lg"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Создать зону</button>
       </form>
     </div>
   </div>
   <div class="col-xl-8">
-    <?php foreach($zones as $z): $rs=db()->prepare('SELECT * FROM dns_records WHERE zone_id=? ORDER BY id'); $rs->execute([(int)$z['id']]); $recs=$rs->fetchAll(); $status=run_ctl_json_cached(['dns-status-json',$z['domain']],8,180); ?>
-      <div class="panel-card mb-4">
-        <div class="card-title-row align-items-start"><div><h2><?= e($z['domain']) ?></h2><div class="small muted">NS: <code>ns1.<?= e($z['domain']) ?></code> / <code>ns2.<?= e($z['domain']) ?></code></div></div><form method="post" onsubmit="return confirm('Удалить DNS зону?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_dns_zone"><input type="hidden" name="id" value="<?= (int)$z['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form></div>
+    <?php foreach($zones as $z): $rs=db()->prepare('SELECT * FROM dns_records WHERE zone_id=? ORDER BY id'); $rs->execute([(int)$z['id']]); $recs=$rs->fetchAll(); $status=run_ctl_json_cached(['dns-status-json',$z['domain']],8,60); ?>
+      <div class="panel-card mb-4 dns-zone-card">
+        <div class="card-title-row align-items-start"><div><h2><?= e($z['domain']) ?></h2><div class="small muted"><code>ns1.<?= e($z['domain']) ?></code> / <code>ns2.<?= e($z['domain']) ?></code> → <code><?= e((string)($status['public_ip'] ?? $pub)) ?></code></div></div><form method="post" onsubmit="return confirm('Удалить DNS зону?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_dns_zone"><input type="hidden" name="id" value="<?= (int)$z['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form></div>
         <div class="status-grid mb-3">
-          <div><span>Bind9</span><b class="<?= !empty($status['bind9_ok'])?'text-success':'text-danger' ?>"><?= !empty($status['bind9_ok'])?'работает':'ошибка' ?></b></div>
+          <div><span>Bind9</span><b class="<?= !empty($status['bind9_ok'])?'text-success':'text-danger' ?>"><?= !empty($status['bind9_ok'])?'active':'error' ?></b></div>
           <div><span>Zone</span><b class="<?= !empty($status['zone_ok'])?'text-success':'text-danger' ?>"><?= !empty($status['zone_ok'])?'ok':'bad' ?></b></div>
-          <div><span>53 UDP</span><b class="<?= !empty($status['listen_53_udp'])?'text-success':'text-warning' ?>"><?= !empty($status['listen_53_udp'])?'слушает':'нет' ?></b></div>
-          <div><span>Public A</span><b><?= e(implode(', ', $status['public_a'] ?? [])) ?: 'ещё не делегирован' ?></b></div>
+          <div><span>53 UDP/TCP</span><b class="<?= (!empty($status['listen_53_udp'])&&!empty($status['listen_53_tcp']))?'text-success':'text-warning' ?>"><?= (!empty($status['listen_53_udp'])&&!empty($status['listen_53_tcp']))?'open':'closed' ?></b></div>
+          <div><span>Public A</span><b><?= e(implode(', ', $status['public_a'] ?? [])) ?: 'не делегирован' ?></b></div>
         </div>
-        <form method="post" class="row g-2 mb-3"><?= csrf_field() ?><input type="hidden" name="action" value="add_dns_record"><input type="hidden" name="zone_id" value="<?= (int)$z['id'] ?>"><div class="col-md-2"><select class="form-select" name="type"><option>A</option><option>AAAA</option><option>CNAME</option><option>MX</option><option>TXT</option><option>NS</option></select></div><div class="col-md-2"><input class="form-control" name="name" value="@"></div><div class="col-md-5"><input class="form-control" name="value" placeholder="IP / value"></div><div class="col-md-2"><input class="form-control" name="ttl" value="300"></div><div class="col-md-1"><button class="btn btn-primary w-100">+</button></div></form>
+        <div class="dns-transfer-box mb-3">
+          <div><span>NS у регистратора</span><code>ns1.<?= e($z['domain']) ?></code><code>ns2.<?= e($z['domain']) ?></code></div>
+          <div><span>Glue IP</span><code><?= e((string)($status['public_ip'] ?? $pub)) ?></code></div>
+        </div>
+        <form method="post" class="row g-2 mb-3"><?= csrf_field() ?><input type="hidden" name="action" value="add_dns_record"><input type="hidden" name="zone_id" value="<?= (int)$z['id'] ?>"><div class="col-md-2"><select class="form-select" name="type"><option>A</option><option>AAAA</option><option>CNAME</option><option>MX</option><option>TXT</option><option>NS</option><option>CAA</option></select></div><div class="col-md-2"><input class="form-control" name="name" value="@"></div><div class="col-md-5"><input class="form-control" name="value" placeholder="IP / value"></div><div class="col-md-2"><input class="form-control" name="ttl" value="300"></div><div class="col-md-1"><button class="btn btn-primary w-100">+</button></div></form>
         <div class="table-responsive"><table class="table table-dark-soft align-middle"><thead><tr><th>Тип</th><th>Имя</th><th>Значение</th><th>TTL</th><th></th></tr></thead><tbody><?php foreach($recs as $r): ?><tr><td><span class="badge text-bg-secondary"><?= e($r['type']) ?></span></td><td><?= e($r['name']) ?></td><td><code><?= e($r['value']) ?></code></td><td><?= (int)$r['ttl'] ?></td><td class="text-end"><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="delete_dns_record"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-outline-danger">x</button></form></td></tr><?php endforeach; ?></tbody></table></div>
       </div>
     <?php endforeach; if(!$zones): ?><div class="panel-card empty">DNS зон пока нет</div><?php endif; ?>
   </div>
 </div><?php }
+
 
 function view_network(): void { $sites=db()->query('SELECT * FROM sites ORDER BY domain')->fetchAll(); $domain=(string)($_GET['domain']??($sites[0]['domain']??'hyper-host.pw')); $pub=setting_get('public_ip_override',(string)app_config('public_ip','90.189.208.25')); $doctor=run_ctl_json_cached(['network-doctor-json',$domain],8,180); ?>
 <div class="row g-4">

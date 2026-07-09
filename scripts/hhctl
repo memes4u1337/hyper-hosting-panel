@@ -711,46 +711,90 @@ cmd_site_php() {
   nginx_reload; log "PHP version for $domain -> $version"
 }
 
+ftp_shell_path() {
+  if [[ -x /usr/sbin/nologin ]]; then echo /usr/sbin/nologin; else echo /bin/false; fi
+}
+
 cmd_create_ftp() {
-  ensure_dirs; ensure_nologin_shell; cleanup_hyper_host_mounts
+  ensure_dirs
+  ensure_nologin_shell
+  cleanup_hyper_host_mounts
   local username="${1:-}" password="${2:-}" mode="${3:-common}"
-  [[ -n "$username" && -n "$password" ]] || err "Username and password required"; valid_name "$username" || err "Invalid ftp username"
+  [[ -n "$username" && -n "$password" ]] || err "Username and password required"
+  valid_name "$username" || err "Invalid ftp username"
   [[ "$username" == hhftp_* ]] || username="hhftp_${username}"
-  local home="$FTP_DIR/$username" common="$home/common" sites="$common/sites" bots="$common/bots"
-  mkdir -p "$common" "$sites" "$bots" "$SITES_DIR" "$BOTS_DIR"
+
+  local home="$FTP_DIR/$username" common="$home/common" sites="$common/sites" bots="$common/bots" shell
+  shell="$(ftp_shell_path)"
+
+  # Важно: home для chroot должен принадлежать root и не быть writable пользователем.
+  # Заполняем структуру до useradd без -m, чтобы не ловить ошибки из-за уже существующей папки.
+  mkdir -p "$home" "$common" "$sites" "$bots" "$SITES_DIR" "$BOTS_DIR"
   if id "$username" >/dev/null 2>&1; then
-    usermod -d "$home" -s /usr/sbin/nologin "$username" || true
-    echo "$username:$password" | chpasswd
+    usermod -d "$home" -s "$shell" "$username" || true
   else
-    useradd -m -d "$home" -s /usr/sbin/nologin "$username"
-    echo "$username:$password" | chpasswd
+    useradd -d "$home" -s "$shell" -g www-data "$username"
   fi
   usermod -aG www-data "$username" 2>/dev/null || true
-  chown root:root "$home"; chmod 0755 "$home"
-  chown -R "$username":www-data "$common"; chmod -R u+rwX,g+rwX,o+rX "$common"
-  find "$common" -type d -exec chmod g+s {} + 2>/dev/null || true
-  # В FTP пользователь видит одну общую папку common/, а внутри common/sites и common/bots.
+  echo "$username:$password" | chpasswd
+  chage -E -1 "$username" 2>/dev/null || true
+  passwd -u "$username" >/dev/null 2>&1 || true
+
+  chown root:root "$home"
+  chmod 0755 "$home"
+  chown -R "$username":www-data "$common"
+  chmod -R u+rwX,g+rwX,o+rX "$common"
+  find "$common" -type d -exec chmod 2775 {} + 2>/dev/null || true
+
+  # В FTP пользователь видит common/, внутри common/sites и common/bots — реальные папки панели.
   for pair in "$SITES_DIR:$sites" "$BOTS_DIR:$bots"; do
+    local src dst
     src="${pair%%:*}"; dst="${pair#*:}"
     mkdir -p "$src" "$dst"
     if ! mountpoint -q "$dst"; then mount --bind "$src" "$dst" 2>/dev/null || true; fi
     if mountpoint -q "$dst" && ! grep -qs " $dst " /etc/fstab; then echo "$src $dst none bind 0 0" >> /etc/fstab; fi
   done
+
   fix_web_permissions "$SITES_DIR" "$username"
   fix_web_permissions "$BOTS_DIR" "$username"
   fix_web_permissions "$common" "$username"
   ensure_vsftpd_external_access
-  log "FTP user ready: $username -> $home/common (sites/bots inside common)"
+  systemctl is-active vsftpd >/dev/null 2>&1 || err "vsftpd не запустился. Проверь: systemctl status vsftpd"
+  log "FTP user ready: $username -> $home/common (host 0.0.0.0:21, passive 40000-40100)"
 }
 cmd_delete_ftp() {
-  local username="${1:-}"; [[ -n "$username" ]] || err "Username required"; valid_name "$username" || err "Invalid username"; [[ "$username" == hhftp_* ]] || username="hhftp_${username}"
+  local username="${1:-}" tmp
+  [[ -n "$username" ]] || err "Username required"
+  valid_name "$username" || err "Invalid username"
+  [[ "$username" == hhftp_* ]] || username="hhftp_${username}"
   local home="$FTP_DIR/$username"
   for d in "$home/common/sites" "$home/common/bots" "$home/sites" "$home/bots" "$home/site"; do mountpoint -q "$d" && umount -lf "$d" || true; done
-  if [[ -f /etc/fstab ]]; then tmp="$(mktemp)"; grep -vF " $home/common/sites " /etc/fstab | grep -vF " $home/common/bots " | grep -vF " $home/sites " | grep -vF " $home/bots " | grep -vF " $home/site " > "$tmp" || true; cat "$tmp" > /etc/fstab; rm -f "$tmp"; fi
+  if [[ -f /etc/fstab ]]; then
+    tmp="$(mktemp)"
+    grep -vF " $home/common/sites " /etc/fstab | grep -vF " $home/common/bots " | grep -vF " $home/sites " | grep -vF " $home/bots " | grep -vF " $home/site " > "$tmp" || true
+    cat "$tmp" > /etc/fstab; rm -f "$tmp"
+  fi
   id "$username" >/dev/null 2>&1 && userdel "$username" || true
-  rm -rf "$home"; systemctl restart vsftpd || true; log "FTP user deleted: $username"
+  rm -rf "$home"
+  systemctl restart vsftpd || true
+  log "FTP user deleted: $username"
 }
-cmd_ftp_password() { local username="${1:-}" password="${2:-}"; [[ -n "$username" && -n "$password" ]] || err "Username and password required"; valid_name "$username" || err "Invalid username"; [[ "$username" == hhftp_* ]] || username="hhftp_${username}"; id "$username" >/dev/null 2>&1 || err "FTP user not found"; echo "$username:$password" | chpasswd; fix_web_permissions "$SITES_DIR" "$username"; log "FTP password updated: $username"; }
+cmd_ftp_password() {
+  local username="${1:-}" password="${2:-}" shell
+  [[ -n "$username" && -n "$password" ]] || err "Username and password required"
+  valid_name "$username" || err "Invalid username"
+  [[ "$username" == hhftp_* ]] || username="hhftp_${username}"
+  id "$username" >/dev/null 2>&1 || err "FTP user not found"
+  shell="$(ftp_shell_path)"
+  usermod -s "$shell" "$username" 2>/dev/null || true
+  echo "$username:$password" | chpasswd
+  chage -E -1 "$username" 2>/dev/null || true
+  passwd -u "$username" >/dev/null 2>&1 || true
+  fix_web_permissions "$SITES_DIR" "$username"
+  fix_web_permissions "$BOTS_DIR" "$username"
+  ensure_vsftpd_external_access
+  log "FTP password updated: $username"
+}
 
 cmd_create_db() {
   local db="${1:-}" user="${2:-}" pass="${3:-}" remote="${4:-0}" host_pattern="${5:-}"
@@ -1434,35 +1478,149 @@ PY
 }
 
 cmd_dns_apply() {
-  local domain="${1:-}" records_json="${2:-[]}" ns="${3:-ns1.local.}" admin="${4:-admin.local.}"
-  valid_domain "$domain" || err "Invalid domain"; mkdir -p "$DNS_DIR"
-  local zonefile="$DNS_DIR/db.$domain" serial; serial="$(date +%Y%m%d%H)"
-  python3 - "$domain" "$records_json" "$ns" "$admin" "$zonefile" "$serial" <<'PY'
-import sys,json
-zone,records_json,ns,admin,path,serial=sys.argv[1:]
-try: records=json.loads(records_json)
-except Exception: records=[]
-with open(path,'w',encoding='utf-8') as f:
-    f.write(f"$TTL 3600\n@ IN SOA {ns} {admin} ({serial} 3600 1800 1209600 3600)\n")
-    f.write(f"@ IN NS {ns}\n")
-    for r in records:
-        name=r.get('name','@') or '@'; typ=r.get('type','A').upper(); value=r.get('value',''); ttl=int(r.get('ttl',3600) or 3600)
-        if not value: continue
-        f.write(f"{name} {ttl} IN {typ} {value}\n")
-PY
-  if [[ -d /etc/bind ]]; then
-    touch /etc/bind/named.conf.local
-    if ! grep -q "zone \"$domain\"" /etc/bind/named.conf.local; then
-      cat >> /etc/bind/named.conf.local <<EOBIND
-zone "$domain" { type master; file "$zonefile"; };
-EOBIND
-    fi
-    named-checkzone "$domain" "$zonefile" >/dev/null 2>&1 || true
-    systemctl restart bind9 2>/dev/null || true
-  fi
+  local domain="${1:-}" records_json="${2:-[]}" ns="${3:-}" admin="${4:-}"
+  valid_domain "$domain" || err "Invalid domain"
+  mkdir -p "$DNS_DIR"
+  write_bind_authoritative_defaults
+  [[ -n "$ns" ]] || ns="ns1.$domain."
+  [[ -n "$admin" ]] || admin="admin.$domain."
+  [[ "$ns" == *. ]] || ns="$ns."
+  [[ "$admin" == *. ]] || admin="$admin."
+  local zonefile="$DNS_DIR/db.$domain" serial
+  serial="$(date +%Y%m%d%H)"
+  DOMAIN="$domain" RECORDS_JSON="$records_json" NS="$ns" ADMIN="$admin" ZONEFILE="$zonefile" SERIAL="$serial" python3 - <<'PYDNSWRITE'
+import os, json, re, ipaddress, pathlib, sys
+zone=os.environ['DOMAIN'].strip('.').lower()
+records_json=os.environ.get('RECORDS_JSON','[]')
+ns=os.environ.get('NS') or ('ns1.%s.' % zone)
+admin=os.environ.get('ADMIN') or ('admin.%s.' % zone)
+path=pathlib.Path(os.environ['ZONEFILE'])
+serial=os.environ.get('SERIAL','1')
+try:
+    records=json.loads(records_json)
+except Exception:
+    records=[]
+if not isinstance(records, list):
+    records=[]
+
+def fqdn(v):
+    v=str(v or '').strip()
+    if not v: return ''
+    return v if v.endswith('.') else v+'.'
+
+def qtxt(v):
+    v=str(v or '').strip()
+    if not v: return ''
+    if v.startswith('"') and v.endswith('"'): return v
+    return '"'+v.replace('"','\\"')+'"'
+
+def rr_name(v):
+    v=str(v or '@').strip()
+    if not v or v == zone or v == zone+'.': return '@'
+    if v.endswith('.'+zone) or v.endswith('.'+zone+'.'):
+        v=v.replace('.'+zone+'.','').replace('.'+zone,'')
+    if v.endswith('.'):
+        return fqdn(v)
+    if not re.match(r'^(\*\.)?[A-Za-z0-9_@.-]+$', v):
+        raise SystemExit('bad DNS record name: '+v)
+    return v
+
+def rr_value(typ, value):
+    value=str(value or '').strip()
+    if not value: return ''
+    typ=typ.upper()
+    if typ == 'A':
+        ipaddress.IPv4Address(value); return value
+    if typ == 'AAAA':
+        ipaddress.IPv6Address(value); return value
+    if typ in ('CNAME','NS','PTR'):
+        return fqdn(value)
+    if typ == 'MX':
+        parts=value.split()
+        if len(parts) == 1:
+            return '10 '+fqdn(parts[0])
+        return parts[0]+' '+fqdn(parts[1])
+    if typ == 'TXT':
+        return qtxt(value)
+    if typ == 'CAA':
+        return value
+    return value
+
+clean=[]
+seen=set()
+for r in records:
+    if not isinstance(r, dict):
+        continue
+    typ=str(r.get('type','A') or 'A').upper().strip()
+    if typ not in {'A','AAAA','CNAME','MX','TXT','NS','CAA','SRV'}:
+        continue
+    name=rr_name(r.get('name','@'))
+    try:
+        ttl=int(r.get('ttl',3600) or 3600)
+    except Exception:
+        ttl=3600
+    ttl=max(60, min(ttl, 86400))
+    val=rr_value(typ, r.get('value',''))
+    if not val:
+        continue
+    key=(name,typ,val)
+    if key in seen:
+        continue
+    seen.add(key)
+    clean.append((name, ttl, typ, val))
+
+# Обязательные NS для делегации домена на эту панель.
+for name, ttl, typ, val in [('@',3600,'NS','ns1.%s.'%zone),('@',3600,'NS','ns2.%s.'%zone)]:
+    key=(name,typ,val)
+    if key not in seen:
+        clean.insert(0,(name,ttl,typ,val)); seen.add(key)
+
+with path.open('w', encoding='utf-8') as f:
+    f.write('$TTL 300\n')
+    f.write('@ IN SOA %s %s (%s 300 180 1209600 300)\n' % (fqdn(ns), fqdn(admin), serial))
+    for name, ttl, typ, val in clean:
+        f.write('%s %s IN %s %s\n' % (name, ttl, typ, val))
+PYDNSWRITE
+  named-checkzone "$domain" "$zonefile" >/tmp/hyper-host-named-checkzone.log 2>&1 || { cat /tmp/hyper-host-named-checkzone.log >&2; err "DNS zone is invalid: $domain"; }
+  touch /etc/bind/named.conf.local
+  python3 - "$domain" "$zonefile" <<'PYBINDLOCAL'
+import sys,re,pathlib
+zone,zonefile=sys.argv[1:]
+p=pathlib.Path('/etc/bind/named.conf.local')
+text=p.read_text(encoding='utf-8', errors='ignore') if p.exists() else ''
+block='zone "%s" { type master; file "%s"; allow-transfer { none; }; };' % (zone, zonefile)
+pat=re.compile(r'zone\s+"%s"\s*\{[^}]*\};\s*' % re.escape(zone), re.S)
+if pat.search(text):
+    text=pat.sub(block+'\n', text)
+else:
+    text=text.rstrip()+'\n'+block+'\n'
+p.write_text(text, encoding='utf-8')
+PYBINDLOCAL
+  open_server_ports
+  systemctl enable bind9 >/dev/null 2>&1 || true
+  systemctl restart bind9 2>/dev/null || systemctl restart named 2>/dev/null || true
+  systemctl is-active bind9 >/dev/null 2>&1 || err "bind9 не запустился после применения DNS-зоны"
   log "DNS zone applied: $domain -> $zonefile"
 }
-cmd_dns_delete() { local domain="${1:-}"; valid_domain "$domain" || err "Invalid domain"; rm -f "$DNS_DIR/db.$domain"; log "DNS zone file deleted: $domain"; }
+
+cmd_dns_delete() {
+  local domain="${1:-}"
+  valid_domain "$domain" || err "Invalid domain"
+  rm -f "$DNS_DIR/db.$domain"
+  if [[ -f /etc/bind/named.conf.local ]]; then
+    python3 - "$domain" <<'PYBINDDEL'
+import sys,re,pathlib
+zone=sys.argv[1]
+p=pathlib.Path('/etc/bind/named.conf.local')
+text=p.read_text(encoding='utf-8', errors='ignore') if p.exists() else ''
+text=re.sub(r'zone\s+"%s"\s*\{[^}]*\};\s*' % re.escape(zone), '', text, flags=re.S)
+p.write_text(text, encoding='utf-8')
+PYBINDDEL
+    systemctl restart bind9 2>/dev/null || true
+  fi
+  log "DNS zone deleted: $domain"
+}
+
 
 cmd_cron_set() { local name="${1:-}" schedule="${2:-}" command="${3:-}"; [[ -n "$name" && -n "$schedule" && -n "$command" ]] || err "Name schedule command required"; valid_name "$name" || err "Invalid name"; cat > "$CRON_DIR/hyper-host-task-$name" <<EOCRON
 SHELL=/bin/bash
@@ -1634,16 +1792,18 @@ PY
 # HYPER-HOST v15: network + DNS
 # -----------------------------
 write_bind_authoritative_defaults() {
-  mkdir -p /etc/bind/hyper-host-zones
+  mkdir -p /etc/bind/hyper-host-zones /var/cache/bind
   cat > /etc/bind/named.conf.options <<'EOBINDOPT'
 options {
     directory "/var/cache/bind";
     listen-on { any; };
     listen-on-v6 { any; };
     allow-query { any; };
+    allow-recursion { none; };
     recursion no;
     dnssec-validation auto;
     auth-nxdomain no;
+    minimal-responses yes;
 };
 EOBINDOPT
   touch /etc/bind/named.conf.local
@@ -1684,44 +1844,106 @@ open_server_ports() {
   fi
 }
 
+is_private_ipv4_simple() {
+  local ip="${1:-}"
+  [[ "$ip" =~ ^10\. ]] && return 0
+  [[ "$ip" =~ ^192\.168\. ]] && return 0
+  [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] && return 0
+  [[ "$ip" =~ ^127\. ]] && return 0
+  [[ "$ip" =~ ^169\.254\. ]] && return 0
+  return 1
+}
+
+ftp_passive_address() {
+  local ip
+  ip="$(extract_ipv4 "$(configured_public_ip)")"
+  [[ -z "$ip" ]] && ip="$(extract_ipv4 "$(public_ip)")"
+  [[ -z "$ip" ]] && ip="$(extract_ipv4 "${PUBLIC_IP:-}")"
+  if [[ -n "$ip" ]] && ! is_private_ipv4_simple "$ip"; then
+    echo "$ip"
+  fi
+}
+
 ensure_vsftpd_external_access() {
-  # Полностью чинит FTP для подключения с другого ПК/FileZilla.
-  # Passive address должен быть публичным IP, иначе удалённый клиент получает 192.168.x.x и не заходит.
-  local pasv pub
-  pub="$(extract_ipv4 "$(configured_public_ip)")"
-  [[ -z "$pub" ]] && pub="$(extract_ipv4 "$(public_ip)")"
-  [[ -z "$pub" ]] && pub="$SERVER_IP"
-  mkdir -p /var/run/vsftpd/empty "$FTP_DIR"
+  # Полная настройка FTP: вход с любого IP на Ubuntu + passive FTP для FileZilla.
+  # Если указан публичный IP — отдаём его в PASV. Если публичного IP нет — PASV без pasv_address,
+  # чтобы локальная сеть не ломалась из-за 192.168.x.x/публичного NAT-адреса.
+  local pub pasv_line=""
+  pub="$(ftp_passive_address)"
+  [[ -n "$pub" ]] && pasv_line="pasv_address=${pub}"
+  ensure_nologin_shell
+  mkdir -p /var/run/vsftpd/empty "$FTP_DIR" /etc/vsftpd.user_conf
+  chmod 0755 /var/run/vsftpd/empty "$FTP_DIR" 2>/dev/null || true
+  cp /etc/vsftpd.conf "/etc/vsftpd.conf.backup.$(date +%s)" 2>/dev/null || true
   cat > /etc/vsftpd.conf <<EOFTP
 listen=YES
 listen_ipv6=NO
+listen_address=0.0.0.0
 anonymous_enable=NO
 local_enable=YES
 write_enable=YES
-local_umask=022
-dirmessage_enable=YES
+local_umask=002
+file_open_mode=0664
+dirmessage_enable=NO
 use_localtime=YES
 xferlog_enable=YES
+dual_log_enable=YES
+vsftpd_log_file=/var/log/vsftpd.log
 connect_from_port_20=YES
 chroot_local_user=YES
 allow_writeable_chroot=YES
 secure_chroot_dir=/var/run/vsftpd/empty
 pam_service_name=vsftpd
+userlist_enable=NO
+tcp_wrappers=NO
 rsa_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
 rsa_private_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
 ssl_enable=NO
 pasv_enable=YES
 pasv_min_port=40000
 pasv_max_port=40100
-pasv_address=${pub}
+${pasv_line}
 pasv_addr_resolve=NO
+pasv_promiscuous=YES
+port_promiscuous=YES
 force_dot_files=YES
 utf8_filesystem=YES
 seccomp_sandbox=NO
+cmds_allowed=ABOR,CWD,DELE,LIST,MDTM,MKD,NLST,NOOP,OPTS,PASS,PASV,PORT,PWD,QUIT,RETR,RMD,RNFR,RNTO,SITE,SIZE,STOR,TYPE,USER,FEAT,SYST,EPSV,EPRT,APPE
 EOFTP
+  # На части Debian/Ubuntu pam_shells включён в /etc/pam.d/vsftpd — nologin должен быть разрешён как FTP-shell.
+  if [[ -x /usr/sbin/nologin ]] && ! grep -qxF /usr/sbin/nologin /etc/shells 2>/dev/null; then echo /usr/sbin/nologin >> /etc/shells; fi
+  if [[ -x /bin/false ]] && ! grep -qxF /bin/false /etc/shells 2>/dev/null; then echo /bin/false >> /etc/shells; fi
   open_server_ports
   systemctl enable vsftpd >/dev/null 2>&1 || true
-  systemctl restart vsftpd 2>/dev/null || true
+  systemctl restart vsftpd 2>/dev/null || systemctl start vsftpd 2>/dev/null || true
+}
+
+cmd_ftp_doctor_json() {
+  local pub pasv listen21 listen_pasv service conf users_count
+  pub="$(ftp_passive_address)"
+  pasv="$(grep -E '^pasv_address=' /etc/vsftpd.conf 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+  listen21=0; listen_port_tcp 21 && listen21=1
+  listen_pasv=0; ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq ':(40000|40001|40002|40003|40004|40005|40006|40007|40008|40009|40010)$' && listen_pasv=1 || true
+  service="$(systemctl is-active vsftpd 2>/dev/null || true)"
+  conf="$(test -s /etc/vsftpd.conf && echo ok || echo missing)"
+  users_count="$(getent passwd | awk -F: '$1 ~ /^hhftp_/ {c++} END{print c+0}')"
+  SERVER_IP="$SERVER_IP" PUBLIC_IP="$(public_ip)" CONFIGURED_PUBLIC_IP="$(configured_public_ip)" FTP_PASV="$pasv" FTP_PASV_EXPECTED="$pub" LISTEN21="$listen21" LISTENPASV="$listen_pasv" SERVICE="$service" CONF_TEST="$conf" USERS_COUNT="$users_count" python3 - <<'PYFTP'
+import os,json
+print(json.dumps({
+ 'server_ip': os.environ.get('SERVER_IP',''),
+ 'public_ip': os.environ.get('PUBLIC_IP',''),
+ 'configured_public_ip': os.environ.get('CONFIGURED_PUBLIC_IP',''),
+ 'vsftpd': os.environ.get('SERVICE',''),
+ 'listen_21': os.environ.get('LISTEN21') == '1',
+ 'passive_range': '40000-40100',
+ 'pasv_address': os.environ.get('FTP_PASV',''),
+ 'pasv_expected': os.environ.get('FTP_PASV_EXPECTED',''),
+ 'ftp_users': int(os.environ.get('USERS_COUNT','0') or 0),
+ 'config_test': os.environ.get('CONF_TEST',''),
+ 'client': {'protocol':'FTP', 'port':21, 'encryption':'Plain FTP', 'mode':'Passive'},
+}, ensure_ascii=False))
+PYFTP
 }
 
 cmd_access_fix() {
@@ -2148,77 +2370,91 @@ cmd_dns_wizard() {
   local domain="${1:-}" pub="${2:-}" panel_sub="${3:-panel}"
   [[ -n "$domain" ]] || err "Domain required"
   valid_domain "$domain" || err "Invalid domain: $domain"
-  [[ -n "$pub" ]] || pub="$(public_ip)"
+  [[ -n "$pub" ]] || pub="$(extract_ipv4 "$(configured_public_ip)")"
+  [[ -n "$pub" ]] || pub="$(extract_ipv4 "$(public_ip)")"
   [[ "$pub" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || err "Invalid public IPv4: $pub"
+  [[ "$panel_sub" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,61}$ ]] || panel_sub="panel"
+  cmd_public_ip set "$pub" >/dev/null 2>&1 || true
   mkdir -p "$DNS_DIR"
   write_bind_authoritative_defaults
-  local ns1="ns1.$domain." ns2="ns2.$domain." admin="admin.$domain." records
-  records="$(python3 - <<PYREC
-import json
-pub='$pub'; panel='$panel_sub'
+  local ns1="ns1.$domain." admin="admin.$domain." records
+  records="$(DOMAIN="$domain" PUB="$pub" PANEL_SUB="$panel_sub" python3 - <<'PYREC'
+import json, os
+pub=os.environ['PUB']; panel=os.environ.get('PANEL_SUB','panel') or 'panel'
 records=[
  {'name':'@','type':'A','value':pub,'ttl':300},
  {'name':'www','type':'A','value':pub,'ttl':300},
  {'name':panel,'type':'A','value':pub,'ttl':300},
  {'name':'ns1','type':'A','value':pub,'ttl':300},
  {'name':'ns2','type':'A','value':pub,'ttl':300},
- {'name':'@','type':'MX','value':'10 mail','ttl':3600},
  {'name':'mail','type':'A','value':pub,'ttl':3600},
- {'name':'@','type':'TXT','value':'"v=spf1 a mx ip4:%s ~all"'%pub,'ttl':3600},
+ {'name':'@','type':'MX','value':'10 mail.%s.' % os.environ['DOMAIN'], 'ttl':3600},
+ {'name':'@','type':'TXT','value':'v=spf1 a mx ip4:%s ~all' % pub,'ttl':3600},
 ]
 print(json.dumps(records, ensure_ascii=False))
 PYREC
 )"
   cmd_dns_apply "$domain" "$records" "$ns1" "$admin"
-  ufw allow 53/tcp >/dev/null 2>&1 || true
-  ufw allow 53/udp >/dev/null 2>&1 || true
+  open_server_ports
   systemctl restart bind9 2>/dev/null || true
   cat <<EOF
 DNS зона готова: $domain
-
-У регистратора домена поставь NS:
-  ns1.$domain
-  ns2.$domain
-
-Если регистратор просит glue/IP для NS:
-  ns1.$domain -> $pub
-  ns2.$domain -> $pub
-
-Потом проверка:
-  dig @$pub $domain A
-  dig @$pub www.$domain A
-  sudo hyper dns status $domain
+NS: ns1.$domain / ns2.$domain
+Glue: ns1.$domain -> $pub, ns2.$domain -> $pub
+Проверка: dig @$pub $domain A
 EOF
 }
 
+
 cmd_dns_status_json() {
-  local domain="${1:-}" pub zonefile nscheck a_local a_public bind_ok named_ok open53
+  local domain="${1:-}" pub zonefile a_local a_public bind_ok named_ok udp53 tcp53 ns_local serial problem
   [[ -n "$domain" ]] || err "Domain required"
   valid_domain "$domain" || err "Invalid domain"
-  pub="$(public_ip)"; zonefile="$DNS_DIR/db.$domain"
+  pub="$(extract_ipv4 "$(configured_public_ip)")"
+  [[ -z "$pub" ]] && pub="$(extract_ipv4 "$(public_ip)")"
+  zonefile="$DNS_DIR/db.$domain"
   bind_ok=0; systemctl is-active bind9 >/dev/null 2>&1 && bind_ok=1
   named_ok=0; [[ -f "$zonefile" ]] && named-checkzone "$domain" "$zonefile" >/dev/null 2>&1 && named_ok=1
-  open53=0; ss -lun 2>/dev/null | awk '{print $5}' | grep -Eq '(:53$|0\.0\.0\.0:53|\[::\]:53)' && open53=1
+  udp53=0; listen_port_udp 53 && udp53=1
+  tcp53=0; listen_port_tcp 53 && tcp53=1
   a_local="$(dig +short @127.0.0.1 "$domain" A 2>/dev/null | sed '/^$/d' | sort -u || true)"
+  ns_local="$(dig +short @127.0.0.1 "$domain" NS 2>/dev/null | sed '/^$/d' | sort -u || true)"
   a_public="$(resolve_domain_a_public "$domain")"
-  DOMAIN="$domain" PUBLIC_IP="$pub" ZONEFILE="$zonefile" BIND_OK="$bind_ok" NAMED_OK="$named_ok" OPEN53="$open53" A_LOCAL="$a_local" A_PUBLIC="$a_public" python3 - <<'PYDNS'
+  serial="$(awk '/SOA/ {getline; print $1; exit}' "$zonefile" 2>/dev/null || true)"
+  problem=""
+  [[ "$bind_ok" == 1 ]] || problem="bind9 не запущен"
+  [[ "$named_ok" == 1 ]] || problem="zone-файл не прошёл named-checkzone"
+  [[ "$udp53" == 1 && "$tcp53" == 1 ]] || problem="порт 53 TCP/UDP не слушает"
+  DOMAIN="$domain" PUBLIC_IP="$pub" ZONEFILE="$zonefile" BIND_OK="$bind_ok" NAMED_OK="$named_ok" UDP53="$udp53" TCP53="$tcp53" A_LOCAL="$a_local" A_PUBLIC="$a_public" NS_LOCAL="$ns_local" SERIAL="$serial" PROBLEM="$problem" python3 - <<'PYDNS'
 import os,json
 lines=lambda x:[i for i in x.splitlines() if i.strip()]
+domain=os.environ['DOMAIN']
+public_ip=os.environ.get('PUBLIC_IP','')
+local_a=lines(os.environ.get('A_LOCAL',''))
+public_a=lines(os.environ.get('A_PUBLIC',''))
+ns_local=lines(os.environ.get('NS_LOCAL',''))
 print(json.dumps({
- 'domain': os.environ['DOMAIN'],
- 'public_ip': os.environ.get('PUBLIC_IP',''),
+ 'domain': domain,
+ 'public_ip': public_ip,
  'zonefile': os.environ.get('ZONEFILE',''),
  'zone_exists': os.path.exists(os.environ.get('ZONEFILE','')),
  'bind9_ok': os.environ.get('BIND_OK')=='1',
  'zone_ok': os.environ.get('NAMED_OK')=='1',
- 'listen_53_udp': os.environ.get('OPEN53')=='1',
- 'local_a': lines(os.environ.get('A_LOCAL','')),
- 'public_a': lines(os.environ.get('A_PUBLIC','')),
- 'registrar_ns_required': ['ns1.'+os.environ['DOMAIN'], 'ns2.'+os.environ['DOMAIN']],
- 'glue_required': {'ns1.'+os.environ['DOMAIN']: os.environ.get('PUBLIC_IP',''), 'ns2.'+os.environ['DOMAIN']: os.environ.get('PUBLIC_IP','')},
+ 'listen_53_udp': os.environ.get('UDP53')=='1',
+ 'listen_53_tcp': os.environ.get('TCP53')=='1',
+ 'local_a': local_a,
+ 'local_ns': ns_local,
+ 'public_a': public_a,
+ 'serial': os.environ.get('SERIAL',''),
+ 'registrar_ns_required': ['ns1.'+domain, 'ns2.'+domain],
+ 'glue_required': {'ns1.'+domain: public_ip, 'ns2.'+domain: public_ip},
+ 'ready_on_server': os.environ.get('BIND_OK')=='1' and os.environ.get('NAMED_OK')=='1' and os.environ.get('UDP53')=='1' and os.environ.get('TCP53')=='1',
+ 'delegated_publicly': bool(public_ip and public_ip in public_a),
+ 'problem': os.environ.get('PROBLEM',''),
 }, ensure_ascii=False))
 PYDNS
 }
+
 
 cmd_panel_domain() {
   local action="${1:-get}" domain="${2:-}"
@@ -2385,6 +2621,7 @@ case "${1:-}" in
   disk-expand) shift; cmd_disk_expand "$@" ;;
   disk-guide) shift; cmd_disk_guide "$@" ;;
   ftp-fix) shift; ensure_vsftpd_external_access; log "FTP external access fixed" ;;
+  ftp-doctor-json) shift; cmd_ftp_doctor_json ;;
   backup-run) shift; cmd_backup_run "$@" ;;
   backup-schedule) shift; cmd_backup_schedule "$@" ;;
   backup-delete-schedule) shift; cmd_backup_delete_schedule "$@" ;;
