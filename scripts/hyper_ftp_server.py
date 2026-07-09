@@ -1,0 +1,555 @@
+#!/usr/bin/env python3
+# HYPER-HOST built-in FTP server for FileZilla.
+# v43: virtual users without /etc/passwd, /etc/fstab, PAM or vsftpd.
+from __future__ import annotations
+
+import argparse
+import os
+import posixpath
+import signal
+import socket
+import stat
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+BASE_DIR = Path(os.environ.get("BASE_DIR", "/opt/hyper-host"))
+CONF = Path(os.environ.get("HYPER_HOST_CONF", "/etc/hyper-host/hyper-host.conf"))
+
+
+def load_shell_conf(path: Path) -> None:
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip().strip('"').strip("'")
+        if k and k.replace("_", "").isalnum() and k not in os.environ:
+            os.environ[k] = v
+
+
+load_shell_conf(CONF)
+BASE_DIR = Path(os.environ.get("BASE_DIR", "/opt/hyper-host"))
+FTP_DIR = Path(os.environ.get("FTP_DIR", "/var/www/hyper-host-ftp"))
+AUTH_TXT = Path(os.environ.get("FTP_AUTH_TXT", str(BASE_DIR / "data" / "vsftpd_virtual_users.txt")))
+USER_CONF_DIR = Path(os.environ.get("FTP_USER_CONF_DIR", str(BASE_DIR / "ftp" / "user_conf")))
+LOG_FILE = Path(os.environ.get("HYPER_FTP_LOG", "/var/log/hyper-host-ftp.log"))
+
+
+def log(msg: str) -> None:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}\n"
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+    try:
+        sys.stderr.write(line)
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+class UserStore:
+    def __init__(self, auth_txt: Path, conf_dir: Path):
+        self.auth_txt = auth_txt
+        self.conf_dir = conf_dir
+        self._mtime = 0.0
+        self._users: Dict[str, str] = {}
+        self._lock = threading.Lock()
+
+    def _reload(self) -> None:
+        try:
+            mtime = self.auth_txt.stat().st_mtime
+        except FileNotFoundError:
+            mtime = 0.0
+        if mtime == self._mtime:
+            return
+        users: Dict[str, str] = {}
+        try:
+            lines = self.auth_txt.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except FileNotFoundError:
+            lines = []
+        i = 0
+        while i < len(lines):
+            u = lines[i].strip()
+            p = lines[i + 1] if i + 1 < len(lines) else ""
+            if u:
+                users[u] = p
+            i += 2
+        with self._lock:
+            self._users = users
+            self._mtime = mtime
+
+    def check(self, username: str, password: str) -> bool:
+        self._reload()
+        with self._lock:
+            return self._users.get(username) == password
+
+    def local_root(self, username: str) -> Path:
+        cfg = self.conf_dir / username
+        root = ""
+        if cfg.exists():
+            for line in cfg.read_text(encoding="utf-8", errors="ignore").splitlines():
+                if line.strip().startswith("local_root="):
+                    root = line.split("=", 1)[1].strip()
+                    break
+        if not root:
+            root = str(FTP_DIR / username)
+        return Path(root)
+
+
+class PassiveListener:
+    def __init__(self, host: str, min_port: int, max_port: int):
+        self.host = host
+        self.min_port = min_port
+        self.max_port = max_port
+        self.sock: Optional[socket.socket] = None
+        self.port: Optional[int] = None
+
+    def open(self) -> int:
+        self.close()
+        last_err: Optional[Exception] = None
+        for port in range(self.min_port, self.max_port + 1):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind((self.host, port))
+                s.listen(1)
+                s.settimeout(20)
+                self.sock = s
+                self.port = port
+                return port
+            except Exception as e:
+                last_err = e
+                try:
+                    s.close()
+                except Exception:
+                    pass
+        raise OSError(f"No free passive FTP ports {self.min_port}-{self.max_port}: {last_err}")
+
+    def accept(self) -> socket.socket:
+        if not self.sock:
+            raise OSError("Passive connection is not opened")
+        try:
+            conn, _ = self.sock.accept()
+            conn.settimeout(60)
+            return conn
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        if self.sock:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+        self.sock = None
+        self.port = None
+
+
+class FTPSession(threading.Thread):
+    def __init__(self, ctrl: socket.socket, addr: Tuple[str, int], store: UserStore, passive_min: int, passive_max: int):
+        super().__init__(daemon=True)
+        self.ctrl = ctrl
+        self.addr = addr
+        self.store = store
+        self.passive_min = passive_min
+        self.passive_max = passive_max
+        self.user: Optional[str] = None
+        self.authed = False
+        self.root: Optional[Path] = None
+        self.cwd = "/"
+        self.rename_from: Optional[Path] = None
+        self.pasv: Optional[PassiveListener] = None
+        self.ctrl_file = self.ctrl.makefile("rwb", buffering=0)
+
+    def send(self, code: int, text: str) -> None:
+        line = f"{code} {text}\r\n".encode("utf-8", errors="replace")
+        self.ctrl_file.write(line)
+
+    def send_raw(self, text: str) -> None:
+        self.ctrl_file.write(text.encode("utf-8", errors="replace"))
+
+    def run(self) -> None:
+        try:
+            self.ctrl.settimeout(900)
+            self.send(220, "HYPER-HOST FTP ready")
+            while True:
+                raw = self.ctrl_file.readline(8192)
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="ignore").rstrip("\r\n")
+                if not line:
+                    continue
+                if " " in line:
+                    cmd, arg = line.split(" ", 1)
+                    arg = arg.strip()
+                else:
+                    cmd, arg = line, ""
+                cmd = cmd.upper()
+                try:
+                    if not self.handle(cmd, arg):
+                        break
+                except Exception as e:
+                    log(f"{self.addr[0]} {self.user or '-'} {cmd} error: {e}")
+                    self.send(550, f"Operation failed: {e}")
+        except Exception as e:
+            log(f"session error {self.addr}: {e}")
+        finally:
+            try:
+                if self.pasv:
+                    self.pasv.close()
+                self.ctrl_file.close()
+                self.ctrl.close()
+            except Exception:
+                pass
+
+    def need_auth(self) -> bool:
+        if not self.authed:
+            self.send(530, "Login with USER and PASS")
+            return False
+        return True
+
+    def handle(self, cmd: str, arg: str) -> bool:
+        if cmd == "USER":
+            self.user = arg
+            self.send(331, "Password required")
+            return True
+        if cmd == "PASS":
+            if not self.user:
+                self.send(503, "Login with USER first")
+                return True
+            if self.store.check(self.user, arg):
+                self.authed = True
+                self.root = self.store.local_root(self.user)
+                self.root.mkdir(parents=True, exist_ok=True)
+                self.cwd = "/"
+                log(f"login ok user={self.user} host={self.addr[0]} root={self.root}")
+                self.send(230, "Login successful")
+            else:
+                log(f"login failed user={self.user} host={self.addr[0]}")
+                self.send(530, "Login incorrect")
+            return True
+        if cmd in {"QUIT", "BYE"}:
+            self.send(221, "Bye")
+            return False
+        if cmd == "AUTH":
+            self.send(502, "TLS is disabled. Use plain FTP")
+            return True
+        if cmd == "FEAT":
+            self.send_raw("211-Features:\r\n UTF8\r\n EPSV\r\n PASV\r\n MLST type*;size*;modify*;\r\n MLSD\r\n REST STREAM\r\n211 End\r\n")
+            return True
+        if cmd == "OPTS":
+            self.send(200, "OK")
+            return True
+        if cmd == "SYST":
+            self.send(215, "UNIX Type: L8")
+            return True
+        if cmd in {"NOOP", "ALLO"}:
+            self.send(200, "OK")
+            return True
+        if cmd in {"TYPE", "MODE", "STRU"}:
+            self.send(200, "OK")
+            return True
+        if not self.need_auth():
+            return True
+        if cmd == "PWD" or cmd == "XPWD":
+            self.send(257, f'"{self.cwd}" is current directory')
+        elif cmd == "CWD":
+            p = self.vpath(arg or "/")
+            rp = self.real(p)
+            if rp.is_dir():
+                self.cwd = p
+                self.send(250, "Directory changed")
+            else:
+                self.send(550, "Not a directory")
+        elif cmd == "CDUP":
+            self.cwd = self.vpath("..")
+            self.send(250, "Directory changed")
+        elif cmd == "PASV":
+            self.open_pasv(False)
+        elif cmd == "EPSV":
+            self.open_pasv(True)
+        elif cmd in {"LIST", "NLST", "MLSD"}:
+            self.listing(cmd, arg)
+        elif cmd == "SIZE":
+            rp = self.real(self.vpath(arg))
+            if rp.is_file():
+                self.send(213, str(rp.stat().st_size))
+            else:
+                self.send(550, "File not found")
+        elif cmd == "MDTM":
+            rp = self.real(self.vpath(arg))
+            if rp.exists():
+                self.send(213, time.strftime("%Y%m%d%H%M%S", time.gmtime(rp.stat().st_mtime)))
+            else:
+                self.send(550, "File not found")
+        elif cmd == "RETR":
+            self.retr(arg)
+        elif cmd in {"STOR", "APPE"}:
+            self.stor(arg, append=(cmd == "APPE"))
+        elif cmd == "DELE":
+            rp = self.real(self.vpath(arg))
+            if rp.is_file():
+                rp.unlink()
+                self.send(250, "Deleted")
+            else:
+                self.send(550, "File not found")
+        elif cmd in {"MKD", "XMKD"}:
+            rp = self.real_for_create(self.vpath(arg))
+            rp.mkdir(parents=True, exist_ok=True)
+            self.send(257, f'"{arg}" created')
+        elif cmd in {"RMD", "XRMD"}:
+            rp = self.real(self.vpath(arg))
+            rp.rmdir()
+            self.send(250, "Removed")
+        elif cmd == "RNFR":
+            rp = self.real(self.vpath(arg))
+            if rp.exists():
+                self.rename_from = rp
+                self.send(350, "Ready for RNTO")
+            else:
+                self.send(550, "File not found")
+        elif cmd == "RNTO":
+            if not self.rename_from:
+                self.send(503, "Use RNFR first")
+            else:
+                dst = self.real_for_create(self.vpath(arg))
+                self.rename_from.rename(dst)
+                self.rename_from = None
+                self.send(250, "Renamed")
+        elif cmd == "REST":
+            self.send(350, "Restart not implemented, send RETR/STOR")
+        else:
+            self.send(502, "Command not implemented")
+        return True
+
+    def open_pasv(self, epsv: bool) -> None:
+        local_ip = self.ctrl.getsockname()[0]
+        bind_host = "0.0.0.0"
+        self.pasv = PassiveListener(bind_host, self.passive_min, self.passive_max)
+        port = self.pasv.open()
+        if epsv:
+            self.send(229, f"Entering Extended Passive Mode (|||{port}|)")
+        else:
+            if local_ip in ("0.0.0.0", "::"):
+                local_ip = "127.0.0.1"
+            nums = local_ip.split(".")
+            if len(nums) != 4:
+                nums = ["127", "0", "0", "1"]
+            p1, p2 = port // 256, port % 256
+            self.send(227, "Entering Passive Mode (%s,%s,%s)" % (",".join(nums), p1, p2))
+
+    def data_conn(self) -> socket.socket:
+        if not self.pasv:
+            raise OSError("Use PASV/EPSV first")
+        self.send(150, "Opening data connection")
+        return self.pasv.accept()
+
+    def vpath(self, arg: str) -> str:
+        arg = (arg or "").strip()
+        if not arg:
+            arg = self.cwd
+        if arg.startswith("/"):
+            base = arg
+        else:
+            base = posixpath.join(self.cwd, arg)
+        norm = posixpath.normpath(base)
+        if norm == ".":
+            norm = "/"
+        if not norm.startswith("/"):
+            norm = "/" + norm
+        return norm
+
+    def allowed_roots(self) -> List[Path]:
+        assert self.root is not None
+        roots: List[Path] = []
+        try:
+            roots.append(self.root.resolve())
+        except Exception:
+            roots.append(self.root.absolute())
+        try:
+            for child in self.root.iterdir():
+                if child.is_symlink():
+                    try:
+                        roots.append(child.resolve())
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return roots
+
+    def _is_allowed(self, path: Path) -> bool:
+        try:
+            rp = path.resolve(strict=False)
+        except Exception:
+            rp = path.absolute()
+        for root in self.allowed_roots():
+            try:
+                rp.relative_to(root)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def real(self, vpath: str) -> Path:
+        assert self.root is not None
+        p = self.root / vpath.lstrip("/")
+        if not self._is_allowed(p):
+            raise PermissionError("Path is outside FTP access")
+        return p.resolve(strict=False)
+
+    def real_for_create(self, vpath: str) -> Path:
+        assert self.root is not None
+        parent_v = posixpath.dirname(vpath) or "/"
+        name = posixpath.basename(vpath)
+        parent = self.real(parent_v)
+        p = parent / name
+        if not self._is_allowed(p):
+            raise PermissionError("Path is outside FTP access")
+        return p
+
+    def format_list(self, p: Path, name: str) -> str:
+        try:
+            st = p.stat()
+            is_dir = stat.S_ISDIR(st.st_mode)
+            mode = "d" if is_dir else "-"
+            perms = "rwxrwxr-x" if is_dir else "rw-rw-r--"
+            dt = time.strftime("%b %d %H:%M", time.localtime(st.st_mtime))
+            size = st.st_size
+        except Exception:
+            mode, perms, dt, size = "d", "rwxrwxr-x", time.strftime("%b %d %H:%M"), 0
+        return f"{mode}{perms} 1 owner group {size:>12} {dt} {name}\r\n"
+
+    def format_mlsd(self, p: Path, name: str) -> str:
+        try:
+            st = p.stat()
+            typ = "dir" if p.is_dir() else "file"
+            mod = time.strftime("%Y%m%d%H%M%S", time.gmtime(st.st_mtime))
+            size = st.st_size
+        except Exception:
+            typ, mod, size = "dir", time.strftime("%Y%m%d%H%M%S", time.gmtime()), 0
+        return f"type={typ};size={size};modify={mod}; {name}\r\n"
+
+    def listing(self, cmd: str, arg: str) -> None:
+        p = self.real(self.vpath(arg or self.cwd))
+        if p.is_file():
+            entries = [(p, p.name)]
+        else:
+            entries = []
+            for child in sorted(p.iterdir(), key=lambda x: x.name.lower()):
+                entries.append((child, child.name))
+        conn = self.data_conn()
+        with conn:
+            if cmd == "NLST":
+                data = "".join(name + "\r\n" for _, name in entries)
+            elif cmd == "MLSD":
+                data = "".join(self.format_mlsd(ep, name) for ep, name in entries)
+            else:
+                data = "".join(self.format_list(ep, name) for ep, name in entries)
+            conn.sendall(data.encode("utf-8", errors="replace"))
+        self.send(226, "Transfer complete")
+
+    def retr(self, arg: str) -> None:
+        rp = self.real(self.vpath(arg))
+        if not rp.is_file():
+            self.send(550, "File not found")
+            return
+        conn = self.data_conn()
+        with conn, rp.open("rb") as f:
+            while True:
+                chunk = f.read(1024 * 128)
+                if not chunk:
+                    break
+                conn.sendall(chunk)
+        self.send(226, "Transfer complete")
+
+    def stor(self, arg: str, append: bool = False) -> None:
+        rp = self.real_for_create(self.vpath(arg))
+        rp.parent.mkdir(parents=True, exist_ok=True)
+        conn = self.data_conn()
+        mode = "ab" if append else "wb"
+        with conn, rp.open(mode) as f:
+            while True:
+                data = conn.recv(1024 * 128)
+                if not data:
+                    break
+                f.write(data)
+        try:
+            os.chmod(rp, 0o664)
+        except Exception:
+            pass
+        self.send(226, "Transfer complete")
+
+
+class FTPServer:
+    def __init__(self, host: str, port: int, passive_min: int, passive_max: int):
+        self.host = host
+        self.port = port
+        self.passive_min = passive_min
+        self.passive_max = passive_max
+        self.store = UserStore(AUTH_TXT, USER_CONF_DIR)
+        self.stop_event = threading.Event()
+        self.sock: Optional[socket.socket] = None
+
+    def serve(self) -> None:
+        AUTH_TXT.parent.mkdir(parents=True, exist_ok=True)
+        USER_CONF_DIR.mkdir(parents=True, exist_ok=True)
+        FTP_DIR.mkdir(parents=True, exist_ok=True)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((self.host, self.port))
+        s.listen(100)
+        s.settimeout(1)
+        self.sock = s
+        log(f"HYPER-HOST FTP listening on {self.host}:{self.port}, passive {self.passive_min}-{self.passive_max}")
+        while not self.stop_event.is_set():
+            try:
+                conn, addr = s.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            FTPSession(conn, addr, self.store, self.passive_min, self.passive_max).start()
+        try:
+            s.close()
+        except Exception:
+            pass
+
+    def stop(self, *_args) -> None:
+        self.stop_event.set()
+        try:
+            if self.sock:
+                self.sock.close()
+        except Exception:
+            pass
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--port", type=int, default=21)
+    ap.add_argument("--passive-min", type=int, default=40000)
+    ap.add_argument("--passive-max", type=int, default=40100)
+    args = ap.parse_args()
+    server = FTPServer(args.host, args.port, args.passive_min, args.passive_max)
+    signal.signal(signal.SIGTERM, server.stop)
+    signal.signal(signal.SIGINT, server.stop)
+    try:
+        server.serve()
+        return 0
+    except Exception as e:
+        log(f"fatal: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

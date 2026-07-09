@@ -14,6 +14,7 @@ DNS_DIR="/etc/bind/hyper-host-zones"
 CONF_DIR="/etc/hyper-host"
 CONTROL_BIN="/usr/local/sbin/hyper-host-ctl"
 HYPER_BIN="/usr/local/bin/hyper"
+HYPER_FTP_BIN="/usr/local/sbin/hyper-host-ftp-server"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -235,11 +236,12 @@ rsync -a --delete "$PROJECT_DIR/src/" "$PANEL_DIR/"
 rsync -a --delete "$PROJECT_DIR/templates/" "$BASE_DIR/templates/"
 install -m 0755 "$PROJECT_DIR/scripts/hhctl" "$CONTROL_BIN"
 install -m 0755 "$PROJECT_DIR/scripts/hyper" "$HYPER_BIN"
+install -m 0755 "$PROJECT_DIR/scripts/hyper_ftp_server.py" "$HYPER_FTP_BIN"
 # v23: делаем CLI доступным для панели, PM2-ботов и обычной shell-среды.
 # Некоторые окружения/боты ищут hyper в /usr/local/bin или /usr/bin.
 ln -sf "$HYPER_BIN" /usr/bin/hyper 2>/dev/null || true
 ln -sf "$CONTROL_BIN" /usr/bin/hyper-host-ctl 2>/dev/null || true
-chmod 0755 "$CONTROL_BIN" "$HYPER_BIN" /usr/bin/hyper /usr/bin/hyper-host-ctl 2>/dev/null || true
+chmod 0755 "$CONTROL_BIN" "$HYPER_BIN" "$HYPER_FTP_BIN" /usr/bin/hyper /usr/bin/hyper-host-ctl 2>/dev/null || true
 
 log "Создание конфигурации HYPER-HOST..."
 cat > "$CONF_DIR/hyper-host.conf" <<EOCONF
@@ -396,80 +398,56 @@ systemctl reload nginx
 log "Настройка FTP..."
 FTP_USER_CONF_DIR="$BASE_DIR/ftp/user_conf"
 FTP_AUTH_TXT="$BASE_DIR/data/vsftpd_virtual_users.txt"
-FTP_AUTH_DB_BASE="$BASE_DIR/data/vsftpd_virtual_users"
-FTP_AUTH_DB="$FTP_AUTH_DB_BASE.db"
 FTP_GUEST_USER="www-data"
-mkdir -p /var/run/vsftpd/empty "$FTP_DIR" "$BASE_DIR/data" "$BASE_DIR/ftp" "$FTP_USER_CONF_DIR"
-touch "$FTP_AUTH_TXT"
+mkdir -p "$FTP_DIR" "$BASE_DIR/data" "$BASE_DIR/ftp" "$FTP_USER_CONF_DIR" "$BASE_DIR/run" /var/log
+[[ -f "$FTP_AUTH_TXT" ]] || touch "$FTP_AUTH_TXT"
 chmod 0600 "$FTP_AUTH_TXT" 2>/dev/null || true
-if command -v db_load >/dev/null 2>&1; then
-  : > /tmp/hyper-host-empty-ftp-users
-  db_load -T -t hash -f /tmp/hyper-host-empty-ftp-users "$FTP_AUTH_DB" >/dev/null 2>&1 || true
-  rm -f /tmp/hyper-host-empty-ftp-users
-  chmod 0600 "$FTP_AUTH_DB" 2>/dev/null || true
+chmod 0755 "$FTP_DIR" "$FTP_USER_CONF_DIR" 2>/dev/null || true
+
+# v43: FTP обслуживает встроенный HYPER-HOST FTP server.
+# Он не использует /etc/passwd, /etc/fstab, PAM и не зависит от vsftpd.
+systemctl stop vsftpd >/dev/null 2>&1 || true
+systemctl disable vsftpd >/dev/null 2>&1 || true
+
+cat > /tmp/hyper-host-ftp.service.$$ <<EOSVC
+[Unit]
+Description=HYPER-HOST FTP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=HYPER_HOST_CONF=$CONF_DIR/hyper-host.conf
+ExecStart=$HYPER_FTP_BIN --host 0.0.0.0 --port 21 --passive-min 40000 --passive-max 40100
+Restart=always
+RestartSec=2
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOSVC
+if cat /tmp/hyper-host-ftp.service.$$ > /etc/systemd/system/hyper-host-ftp.service 2>/dev/null; then
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl enable hyper-host-ftp.service >/dev/null 2>&1 || true
+  systemctl restart hyper-host-ftp.service >/dev/null 2>&1 || true
+else
+  warn "Не удалось записать systemd service FTP. Запускаю runtime-процесс без записи в /etc."
 fi
-cp /etc/vsftpd.conf "/etc/vsftpd.conf.backup.$(date +%s)" 2>/dev/null || true
-cat > /etc/pam.d/vsftpd <<EOPAMFTP
-auth required pam_userdb.so db=$FTP_AUTH_DB_BASE crypt=none
-account required pam_userdb.so db=$FTP_AUTH_DB_BASE
-EOPAMFTP
-cat > /etc/vsftpd.conf <<EOFTP
-listen=YES
-listen_ipv6=NO
-listen_address=0.0.0.0
-listen_port=21
-background=NO
-anonymous_enable=NO
-local_enable=YES
-guest_enable=YES
-guest_username=$FTP_GUEST_USER
-write_enable=YES
-local_umask=002
-file_open_mode=0664
-dirlist_enable=YES
-download_enable=YES
-anon_world_readable_only=NO
-virtual_use_local_privs=YES
-hide_ids=NO
-use_sendfile=NO
-dirmessage_enable=NO
-use_localtime=YES
-xferlog_enable=YES
-dual_log_enable=YES
-vsftpd_log_file=/var/log/vsftpd.log
-xferlog_file=/var/log/xferlog
-connect_from_port_20=YES
-ftp_data_port=20
-chroot_local_user=YES
-allow_writeable_chroot=YES
-secure_chroot_dir=/var/run/vsftpd/empty
-pam_service_name=vsftpd
-userlist_enable=NO
-user_config_dir=$FTP_USER_CONF_DIR
-check_shell=NO
-tcp_wrappers=NO
-rsa_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
-rsa_private_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
-ssl_enable=NO
-require_ssl_reuse=NO
-pasv_enable=YES
-pasv_min_port=40000
-pasv_max_port=40100
-pasv_addr_resolve=NO
-pasv_promiscuous=YES
-port_promiscuous=YES
-force_dot_files=YES
-utf8_filesystem=YES
-seccomp_sandbox=NO
-max_clients=200
-max_per_ip=20
-idle_session_timeout=600
-data_connection_timeout=300
-EOFTP
-systemctl enable vsftpd >/dev/null 2>&1 || true
-systemctl restart vsftpd || true
+rm -f /tmp/hyper-host-ftp.service.$$ 2>/dev/null || true
+if ! ss -ltn 2>/dev/null | grep -q ':21 '; then
+  pkill -f hyper-host-ftp-server >/dev/null 2>&1 || true
+  nohup "$HYPER_FTP_BIN" --host 0.0.0.0 --port 21 --passive-min 40000 --passive-max 40100 >>/var/log/hyper-host-ftp.log 2>&1 &
+  echo $! > "$BASE_DIR/run/hyper-host-ftp.pid" 2>/dev/null || true
+fi
+
+ufw allow 21/tcp >/dev/null 2>&1 || true
+ufw allow 40000:40100/tcp >/dev/null 2>&1 || true
+iptables -C INPUT -p tcp --dport 21 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 21 -j ACCEPT 2>/dev/null || true
+iptables -C INPUT -p tcp --match multiport --dports 40000:40100 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --match multiport --dports 40000:40100 -j ACCEPT 2>/dev/null || true
+
 systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1 || true
 systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1 || true
+
 
 log "Настройка Node.js + PM2 для ботов 24/7..."
 node_major() { node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 | grep -E '^[0-9]+$' || echo 0; }

@@ -785,10 +785,10 @@ function view_ftp(): void
       <div class="kicker"><i class="fa-solid fa-folder-tree me-2"></i>FTP</div>
       <h2>Аккаунты доступа</h2>
       <div class="status-grid compact-status mt-3">
-        <div><span>vsftpd</span><b class="<?= (($doctor['vsftpd']??'')==='active')?'text-success':'text-danger' ?>"><?= e((string)($doctor['vsftpd']??'unknown')) ?></b></div>
+        <div><span>FTP-сервер</span><b class="<?= (($doctor['ftp_service']??'')==='active' || !empty($doctor['listen_21']))?'text-success':'text-danger' ?>"><?= e((string)(($doctor['ftp_service']??'') ?: 'runtime')) ?></b></div>
         <div><span>порт 21</span><b class="<?= !empty($doctor['listen_21'])?'text-success':'text-danger' ?>"><?= !empty($doctor['listen_21'])?'слушает':'закрыт' ?></b></div>
         <div><span>passive</span><b>40000-40100</b></div>
-        <div><span>PASV IP</span><b><?= e((string)(($doctor['pasv_address'] ?? '') ?: 'auto')) ?></b></div>
+        <div><span>движок</span><b>Hyper FTP</b></div>
       </div>
       <?php if($ftpIssue !== ''): ?><div class="ftp-health mt-3"><b><?= e($ftpIssue) ?></b><?php if($ftpHint !== ''): ?><span><?= e($ftpHint) ?></span><?php endif; ?></div><?php endif; ?>
       <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_ftp">
