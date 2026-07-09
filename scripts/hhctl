@@ -724,51 +724,87 @@ ftp_alias_for() {
   fi
 }
 
+ftp_user_variants() {
+  local username="${1:-}" alias_user lower lower_alias seen="" u
+  alias_user="$(ftp_alias_for "$username")"
+  lower="$(printf '%s' "$username" | tr '[:upper:]' '[:lower:]')"
+  lower_alias="$(ftp_alias_for "$lower")"
+  for u in "$username" "$alias_user" "$lower" "$lower_alias"; do
+    [[ -n "$u" ]] || continue
+    [[ "$seen" == *"|$u|"* ]] && continue
+    valid_name "$u" || continue
+    printf '%s
+' "$u"
+    seen="$seen|$u|"
+  done
+}
+
+write_ftp_user_conf() {
+  local username="${1:-}" common="${2:-}"
+  [[ -n "$username" && -n "$common" ]] || return 0
+  mkdir -p /etc/vsftpd.user_conf
+  cat > "/etc/vsftpd.user_conf/$username" <<EOFUSERCONF
+local_root=$common
+write_enable=YES
+EOFUSERCONF
+}
+
 ensure_single_ftp_os_user() {
-  local username="${1:-}" password="${2:-}" home="${3:-}" shell
-  [[ -n "$username" && -n "$password" && -n "$home" ]] || err "FTP user/password/home required"
-  valid_name "$username" || err "Invalid ftp username: $username"
+  local username="${1:-}" password="${2:-}" home="${3:-}" shell tmp
+  [[ -n "$username" && -n "$password" && -n "$home" ]] || return 1
+  valid_name "$username" || return 1
   shell="$(ftp_shell_path)"
   if id "$username" >/dev/null 2>&1; then
     usermod -d "$home" -s "$shell" "$username" 2>/dev/null || true
   else
-    useradd -M -d "$home" -s "$shell" -g www-data "$username"
+    tmp="$(mktemp)"
+    if ! useradd -M -d "$home" -s "$shell" -g www-data "$username" 2>"$tmp"; then
+      # Ubuntu/Debian могут ругаться на заглавные буквы. Для FTP панели это нормально,
+      # поэтому повторяем с --badname, а дополнительно создаём lowercase-алиасы.
+      useradd --badname -M -d "$home" -s "$shell" -g www-data "$username" 2>>"$tmp" || { cat "$tmp" >&2; rm -f "$tmp"; return 1; }
+    fi
+    rm -f "$tmp"
   fi
   usermod -aG www-data "$username" 2>/dev/null || true
-  echo "$username:$password" | chpasswd
+  echo "$username:$password" | chpasswd || return 1
   chage -E -1 "$username" 2>/dev/null || true
   passwd -u "$username" >/dev/null 2>&1 || true
+  return 0
 }
 
 cmd_create_ftp() {
   ensure_dirs
   ensure_nologin_shell
   cleanup_hyper_host_mounts
-  local username="${1:-}" password="${2:-}" mode="${3:-common}" alias_user=""
+  local username="${1:-}" password="${2:-}" mode="${3:-common}" variants=() u owner="" alias_note=""
   [[ -n "$username" && -n "$password" ]] || err "Username and password required"
   valid_name "$username" || err "Invalid ftp username"
 
-  # v36: больше не меняем логин молча. Что ввёл в панели, то и является FTP-логином.
-  # Для совместимости создаём второй алиас: user <-> hhftp_user. Поэтому в FileZilla сработают оба варианта.
-  alias_user="$(ftp_alias_for "$username")"
-  [[ "$alias_user" == "$username" ]] && alias_user=""
+  # v37: FileZilla/Ubuntu-safe. Создаём точный логин + hhftp_алиас + lowercase варианты.
+  # Это чинит кейсы вида hhftp_Danz, когда клиент вводит логин с заглавной буквой,
+  # а Linux/панель раньше могли создать другой вариант имени.
+  mapfile -t variants < <(ftp_user_variants "$username")
+  [[ ${#variants[@]} -gt 0 ]] || err "Invalid ftp username"
 
   local home="$FTP_DIR/$username" common="$home/common" sites="$common/sites" bots="$common/bots"
 
-  # Важно: home для chroot должен принадлежать root и не быть writable пользователем.
+  # Chroot-home не должен быть writable пользователем. Рабочая папка — common/.
   mkdir -p "$home" "$common" "$sites" "$bots" "$SITES_DIR" "$BOTS_DIR"
-  ensure_single_ftp_os_user "$username" "$password" "$home"
-  if [[ -n "$alias_user" ]] && valid_name "$alias_user"; then
-    ensure_single_ftp_os_user "$alias_user" "$password" "$home"
-  fi
+  for u in "${variants[@]}"; do
+    if ensure_single_ftp_os_user "$u" "$password" "$home"; then
+      [[ -z "$owner" ]] && owner="$u"
+      write_ftp_user_conf "$u" "$common"
+    fi
+  done
+  [[ -n "$owner" ]] || err "Не удалось создать FTP Linux-пользователя"
 
   chown root:root "$home"
   chmod 0755 "$home"
-  chown -R "$username":www-data "$common"
+  chown -R "$owner":www-data "$common"
   chmod -R u+rwX,g+rwX,o+rX "$common"
   find "$common" -type d -exec chmod 2775 {} + 2>/dev/null || true
 
-  # В FTP пользователь видит common/, внутри common/sites и common/bots — реальные папки панели.
+  # В FTP пользователь сразу попадает в common/, внутри common/sites и common/bots — реальные папки панели.
   for pair in "$SITES_DIR:$sites" "$BOTS_DIR:$bots"; do
     local src dst
     src="${pair%%:*}"; dst="${pair#*:}"
@@ -777,28 +813,24 @@ cmd_create_ftp() {
     if mountpoint -q "$dst" && ! grep -qs " $dst " /etc/fstab; then echo "$src $dst none bind 0 0" >> /etc/fstab; fi
   done
 
-  fix_web_permissions "$SITES_DIR" "$username"
-  fix_web_permissions "$BOTS_DIR" "$username"
-  fix_web_permissions "$common" "$username"
-  if [[ -n "$alias_user" ]] && id "$alias_user" >/dev/null 2>&1; then
-    fix_web_permissions "$common" "$alias_user"
-  fi
+  for u in "${variants[@]}"; do
+    id "$u" >/dev/null 2>&1 || continue
+    fix_web_permissions "$SITES_DIR" "$u"
+    fix_web_permissions "$BOTS_DIR" "$u"
+    fix_web_permissions "$common" "$u"
+  done
   ensure_vsftpd_external_access
   systemctl is-active vsftpd >/dev/null 2>&1 || err "vsftpd не запустился. Проверь: systemctl status vsftpd"
-  if [[ -n "$alias_user" ]]; then
-    log "FTP user ready: $username + alias $alias_user -> $home/common (0.0.0.0:21, passive 40000-40100)"
-  else
-    log "FTP user ready: $username -> $home/common (0.0.0.0:21, passive 40000-40100)"
-  fi
+  alias_note="$(printf '%s ' "${variants[@]}" | sed 's/[[:space:]]*$//')"
+  log "FTP user ready: $username -> $common (aliases: $alias_note, 0.0.0.0:21, passive 40000-40100)"
 }
 cmd_delete_ftp() {
-  local username="${1:-}" tmp alias_user=""
+  local username="${1:-}" tmp variants=() u
   [[ -n "$username" ]] || err "Username required"
   valid_name "$username" || err "Invalid username"
-  alias_user="$(ftp_alias_for "$username")"
-  [[ "$alias_user" == "$username" ]] && alias_user=""
+  mapfile -t variants < <(ftp_user_variants "$username")
   local home
-  home="$(getent passwd "$username" | cut -d: -f6)"
+  home="$(getent passwd "$username" | cut -d: -f6 || true)"
   [[ -n "$home" && "$home" == "$FTP_DIR"/* ]] || home="$FTP_DIR/$username"
   for d in "$home/common/sites" "$home/common/bots" "$home/sites" "$home/bots" "$home/site"; do mountpoint -q "$d" && umount -lf "$d" || true; done
   if [[ -f /etc/fstab ]]; then
@@ -806,41 +838,80 @@ cmd_delete_ftp() {
     grep -vF " $home/common/sites " /etc/fstab | grep -vF " $home/common/bots " | grep -vF " $home/sites " | grep -vF " $home/bots " | grep -vF " $home/site " > "$tmp" || true
     cat "$tmp" > /etc/fstab; rm -f "$tmp"
   fi
-  id "$username" >/dev/null 2>&1 && userdel "$username" || true
-  if [[ -n "$alias_user" ]] && id "$alias_user" >/dev/null 2>&1; then
-    local ahome
-    ahome="$(getent passwd "$alias_user" | cut -d: -f6)"
-    [[ "$ahome" == "$home" ]] && userdel "$alias_user" || true
-  fi
+  for u in "${variants[@]}"; do
+    if id "$u" >/dev/null 2>&1; then
+      local uh
+      uh="$(getent passwd "$u" | cut -d: -f6)"
+      [[ "$uh" == "$home" ]] && userdel "$u" || true
+    fi
+    rm -f "/etc/vsftpd.user_conf/$u" 2>/dev/null || true
+  done
   rm -rf "$home"
   systemctl restart vsftpd || true
-  log "FTP user deleted: $username${alias_user:+ + alias $alias_user}"
+  log "FTP user deleted: $username"
 }
 cmd_ftp_password() {
-  local username="${1:-}" password="${2:-}" alias_user="" home=""
+  local username="${1:-}" password="${2:-}" variants=() u owner="" home="" common=""
   [[ -n "$username" && -n "$password" ]] || err "Username and password required"
   valid_name "$username" || err "Invalid username"
-  alias_user="$(ftp_alias_for "$username")"
-  [[ "$alias_user" == "$username" ]] && alias_user=""
-  if ! id "$username" >/dev/null 2>&1; then
-    # v36: если строка в панели есть, а системного пользователя нет — не падаем, а создаём его заново.
-    cmd_create_ftp "$username" "$password" all-sites
-    return
-  fi
-  home="$(getent passwd "$username" | cut -d: -f6)"
+  mapfile -t variants < <(ftp_user_variants "$username")
+  [[ ${#variants[@]} -gt 0 ]] || err "Invalid ftp username"
+  home="$(getent passwd "$username" | cut -d: -f6 || true)"
   [[ -n "$home" && "$home" == "$FTP_DIR"/* ]] || home="$FTP_DIR/$username"
-  ensure_single_ftp_os_user "$username" "$password" "$home"
-  if [[ -n "$alias_user" ]] && valid_name "$alias_user"; then
-    ensure_single_ftp_os_user "$alias_user" "$password" "$home"
-  fi
-  fix_web_permissions "$SITES_DIR" "$username"
-  fix_web_permissions "$BOTS_DIR" "$username"
-  if [[ -d "$home/common" ]]; then
-    fix_web_permissions "$home/common" "$username"
-    [[ -n "$alias_user" ]] && fix_web_permissions "$home/common" "$alias_user"
-  fi
+  common="$home/common"
+  mkdir -p "$common" "$common/sites" "$common/bots"
+  for u in "${variants[@]}"; do
+    if ensure_single_ftp_os_user "$u" "$password" "$home"; then
+      [[ -z "$owner" ]] && owner="$u"
+      write_ftp_user_conf "$u" "$common"
+    fi
+  done
+  [[ -n "$owner" ]] || err "Не удалось восстановить FTP Linux-пользователя"
+  chown root:root "$home" 2>/dev/null || true
+  chmod 0755 "$home" 2>/dev/null || true
+  chown -R "$owner":www-data "$common" 2>/dev/null || true
+  chmod -R u+rwX,g+rwX,o+rX "$common" 2>/dev/null || true
+  find "$common" -type d -exec chmod 2775 {} + 2>/dev/null || true
+  for pair in "$SITES_DIR:$common/sites" "$BOTS_DIR:$common/bots"; do
+    local src dst
+    src="${pair%%:*}"; dst="${pair#*:}"
+    mkdir -p "$src" "$dst"
+    mountpoint -q "$dst" || mount --bind "$src" "$dst" 2>/dev/null || true
+    mountpoint -q "$dst" && grep -qs " $dst " /etc/fstab || echo "$src $dst none bind 0 0" >> /etc/fstab
+  done
+  for u in "${variants[@]}"; do
+    id "$u" >/dev/null 2>&1 || continue
+    fix_web_permissions "$SITES_DIR" "$u"
+    fix_web_permissions "$BOTS_DIR" "$u"
+    fix_web_permissions "$common" "$u"
+  done
   ensure_vsftpd_external_access
-  log "FTP password updated: $username${alias_user:+ + alias $alias_user}"
+  log "FTP password/login repaired: $username (aliases: $(printf '%s ' "${variants[@]}" | sed 's/[[:space:]]*$//'))"
+}
+
+cmd_ftp_test_login() {
+  local username="${1:-}" password="${2:-}" host="${3:-127.0.0.1}"
+  [[ -n "$username" && -n "$password" ]] || err "Используй: sudo hyper ftp test LOGIN PASSWORD [HOST]"
+  python3 - "$host" "$username" "$password" <<'PYFTPTEST'
+import ftplib, sys
+host,user,pw=sys.argv[1],sys.argv[2],sys.argv[3]
+try:
+    ftp=ftplib.FTP()
+    ftp.connect(host,21,timeout=8)
+    banner=getattr(ftp,'welcome','')
+    ftp.login(user,pw)
+    ftp.set_pasv(True)
+    items=ftp.nlst()
+    ftp.quit()
+    print('OK: FTP login works')
+    print('host:', host)
+    print('user:', user)
+    print('banner:', banner)
+    print('items:', ', '.join(items[:20]) if items else '(empty)')
+except Exception as e:
+    print('ERROR:', type(e).__name__, str(e))
+    sys.exit(1)
+PYFTPTEST
 }
 
 cmd_create_db() {
@@ -1955,9 +2026,9 @@ ensure_vsftpd_external_access() {
   # ВАЖНО: если сервер за роутером, public IP должен быть сохранён через:
   #   sudo hyper ftp public-ip set 90.189.208.25
   # и на роутере должны быть проброшены 21 + 40000-40100 на LAN IP сервера.
-  local pub pasv_line=""
-  pub="$(ftp_passive_address)"
-  [[ -n "$pub" ]] && pasv_line="pasv_address=${pub}"
+  # v37: для FileZilla не прописываем pasv_address жёстко.
+  # Так LAN-клиент может заходить по 192.168.x.x, а внешний FileZilla сам заменит private PASV IP
+  # на адрес control-соединения. Это надёжнее, чем ломать локальный вход public PASV IP.
   ensure_nologin_shell
   mkdir -p /var/run/vsftpd/empty "$FTP_DIR" /etc/vsftpd.user_conf
   chmod 0755 /var/run/vsftpd/empty "$FTP_DIR" 2>/dev/null || true
@@ -1986,6 +2057,8 @@ allow_writeable_chroot=YES
 secure_chroot_dir=/var/run/vsftpd/empty
 pam_service_name=vsftpd
 userlist_enable=NO
+user_config_dir=/etc/vsftpd.user_conf
+check_shell=NO
 tcp_wrappers=NO
 rsa_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
 rsa_private_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
@@ -1994,7 +2067,6 @@ require_ssl_reuse=NO
 pasv_enable=YES
 pasv_min_port=40000
 pasv_max_port=40100
-${pasv_line}
 pasv_addr_resolve=NO
 pasv_promiscuous=YES
 port_promiscuous=YES
@@ -2040,7 +2112,7 @@ cmd_ftp_doctor_json() {
   if [[ "$service" != "active" ]]; then issue="vsftpd не запущен"; hint="sudo hyper ftp fix && systemctl status vsftpd --no-pager -l"; fi
   if [[ -z "$issue" && "$listen21" != 1 ]]; then issue="порт 21 не слушается локально"; hint="sudo hyper ftp fix"; fi
   if [[ -z "$issue" && -z "$local_banner" ]]; then issue="локальный FTP banner не отвечает"; hint="sudo journalctl -u vsftpd -n 80 --no-pager"; fi
-  if [[ -z "$issue" && -n "$pub" && -n "$pasv" && "$pub" != "$pasv" ]]; then issue="PASV IP отличается от сохранённого public IP"; hint="sudo hyper ftp fix"; fi
+  if [[ -z "$issue" && -n "$pasv" && "${SERVER_IP:-}" == 192.168.* ]]; then issue="PASV IP задан жёстко: локальный вход по 192.168.x.x может ломаться"; hint="sudo hyper ftp fix"; fi
   if [[ -z "$issue" && "${users_count:-0}" == "0" ]]; then issue="FTP работает, но FTP-пользователей нет"; hint="Создай FTP в панели или выполни: sudo hyper ftp user LOGIN PASSWORD"; fi
   if [[ -z "$issue" ]]; then issue="локально FTP исправен"; hint="Если FileZilla с другого интернета не подключается — пробрось на роутере TCP 21 и TCP 40000-40100 на LAN IP сервера."; fi
   SERVER_IP="$SERVER_IP" PUBLIC_IP="$(public_ip)" CONFIGURED_PUBLIC_IP="$(configured_public_ip)" FTP_PASV="$pasv" FTP_PASV_EXPECTED="$pub" LISTEN21="$listen21" LOCAL_BANNER="$local_banner" LAN_BANNER="$lan_banner" SERVICE="$service" CONF_TEST="$conf" USERS_COUNT="$users_count" AUTH_FAIL_USERS="$auth_fail_users" UFW_STATUS="$ufw_status" FTP21_FW="$ftp21_fw" PASV_FW="$pasv_fw" ISSUE="$issue" HINT="$hint" python3 - <<'PYFTP'
@@ -2719,6 +2791,7 @@ case "${1:-}" in
   create-ftp) shift; cmd_create_ftp "$@" ;;
   delete-ftp) shift; cmd_delete_ftp "$@" ;;
   ftp-password) shift; cmd_ftp_password "$@" ;;
+  ftp-test-login) shift; cmd_ftp_test_login "$@" ;;
   create-db) shift; cmd_create_db "$@" ;;
   delete-db) shift; cmd_delete_db "$@" ;;
   create-mysql-account) shift; cmd_create_mysql_account "$@" ;;
@@ -2770,6 +2843,7 @@ case "${1:-}" in
   *) cat >&2 <<EOHELP
 Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
        hyper-host-ctl create-ftp USER PASS [all-sites]
+       hyper-host-ctl ftp-test-login USER PASS [HOST]
        hyper-host-ctl bot-create NAME python|node|php|custom MAIN_FILE [MEM_MB]
        hyper-host-ctl bot-deploy NAME python MAIN_FILE TMP_BOT TMP_ENV TMP_REQ [MEM_MB]
        hyper-host-ctl backup-run all|sites|bots|db|panel

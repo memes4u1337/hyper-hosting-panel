@@ -125,6 +125,7 @@ cmd_ftp() {
   if [[ "$sub" == "public-ip" ]]; then shift || true; local act="${1:-get}"; shift || true; $CTL public-ip "$act" "$@"; $CTL ftp-fix; return; fi
   if [[ "$sub" == "user" || "$sub" == "create" ]]; then shift || true; [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper ftp user LOGIN PASSWORD"; $CTL create-ftp "$1" "$2" all-sites; return; fi
   if [[ "$sub" == "reset" || "$sub" == "password" ]]; then shift || true; [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper ftp reset LOGIN NEW_PASSWORD"; $CTL ftp-password "$1" "$2"; return; fi
+  if [[ "$sub" == "test" ]]; then shift || true; [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper ftp test LOGIN PASSWORD [HOST]"; $CTL ftp-test-login "$@"; return; fi
   local json
   json="$($CTL sync-json 2>/dev/null || echo '{}')"
   JSON="$json" python3 - <<'PYFTPCLI'
@@ -141,6 +142,7 @@ for x in items:
 print('')
 print('FileZilla: Protocol=FTP, Port=21, Encryption=Only use plain FTP, Transfer mode=Passive')
 print('Создать/починить логин: sudo hyper ftp user LOGIN PASSWORD или sudo hyper ftp reset LOGIN NEW_PASSWORD')
+print('Проверка входа: sudo hyper ftp test LOGIN PASSWORD 127.0.0.1')
 PYFTPCLI
 }
 

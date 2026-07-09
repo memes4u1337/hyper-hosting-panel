@@ -770,6 +770,7 @@ function view_ftp(): void
   <div class="col-lg-8">
     <div class="panel-card mb-3 ftp-connection-card">
       <div class="connection-line"><span>FileZilla</span><code>FTP <?= e($ftpHost) ?> : 21</code><b>Plain + Passive</b></div>
+      <div class="connection-line"><span>LAN</span><code>FTP <?= e($serverIp ?: '192.168.x.x') ?> : 21</code><b>для локальной сети</b></div>
       <div class="ftp-connect-grid mt-3">
         <div><span>Из интернета</span><code><?= e($publicHost) ?></code></div>
         <div><span>В локальной сети</span><code><?= e($lanHost ?: $publicHost) ?></code></div>
