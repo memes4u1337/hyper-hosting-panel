@@ -17,6 +17,40 @@ document.addEventListener('click', function(e){
   if(modal.parentElement !== document.body) document.body.appendChild(modal);
 }, true);
 
+// HYPER-HOST v45: мобильное меню — бургер открывает/закрывает sidebar как off-canvas drawer.
+(function(){
+  function init(){
+    const toggle = document.getElementById('mobileNavToggle');
+    const backdrop = document.getElementById('mobileNavBackdrop');
+    const shell = document.getElementById('appShell');
+    if(!toggle || !shell) return;
+    function close(){
+      shell.classList.remove('nav-open');
+      document.body.classList.remove('nav-open');
+      toggle.setAttribute('aria-expanded','false');
+    }
+    function open(){
+      shell.classList.add('nav-open');
+      document.body.classList.add('nav-open');
+      toggle.setAttribute('aria-expanded','true');
+    }
+    toggle.addEventListener('click', function(){
+      shell.classList.contains('nav-open') ? close() : open();
+    });
+    if(backdrop) backdrop.addEventListener('click', close);
+    document.querySelectorAll('.flyout-panels .nav-link').forEach(function(link){
+      link.addEventListener('click', close);
+    });
+    window.addEventListener('resize', function(){
+      if(window.innerWidth > 1100) close();
+    });
+    window.addEventListener('keydown', function(e){
+      if(e.key === 'Escape') close();
+    });
+  }
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+})();
+
 // HYPER-HOST v31: icon-rail sidebar — sliding indicator + animated flyout switch.
 (function(){
   function init(){

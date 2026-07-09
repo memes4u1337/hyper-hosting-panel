@@ -39,6 +39,44 @@ FTP_DIR = Path(os.environ.get("FTP_DIR", "/var/www/hyper-host-ftp"))
 AUTH_TXT = Path(os.environ.get("FTP_AUTH_TXT", str(BASE_DIR / "data" / "vsftpd_virtual_users.txt")))
 USER_CONF_DIR = Path(os.environ.get("FTP_USER_CONF_DIR", str(BASE_DIR / "ftp" / "user_conf")))
 LOG_FILE = Path(os.environ.get("HYPER_FTP_LOG", "/var/log/hyper-host-ftp.log"))
+PUBLIC_IP_FILE = Path(os.environ.get("HYPER_HOST_PUBLIC_IP_FILE", "/etc/hyper-host/public_ip"))
+
+
+def is_private_ipv4(ip: str) -> bool:
+    if not ip:
+        return True
+    parts = ip.split(".")
+    if len(parts) != 4 or not all(p.isdigit() for p in parts):
+        return True
+    a, b = int(parts[0]), int(parts[1])
+    if a == 10:
+        return True
+    if a == 192 and b == 168:
+        return True
+    if a == 172 and 16 <= b <= 31:
+        return True
+    if a == 127:
+        return True
+    if a == 169 and b == 254:
+        return True
+    return False
+
+
+def configured_public_ip() -> str:
+    # Файл /etc/hyper-host/public_ip обновляется panel'ю "на лету" (hyper public-ip set),
+    # а переменные окружения читаются один раз при старте процесса. Поэтому сначала
+    # смотрим файл (даёт эффект без перезапуска FTP), и только потом - окружение.
+    try:
+        ip = PUBLIC_IP_FILE.read_text(encoding="utf-8", errors="ignore").strip()
+        if ip and not is_private_ipv4(ip):
+            return ip
+    except Exception:
+        pass
+    for key in ("PUBLIC_IP", "SERVER_PUBLIC_IP"):
+        ip = (os.environ.get(key) or "").strip()
+        if ip and not is_private_ipv4(ip):
+            return ip
+    return ""
 
 
 def log(msg: str) -> None:
@@ -333,7 +371,10 @@ class FTPSession(threading.Thread):
         return True
 
     def open_pasv(self, epsv: bool) -> None:
-        local_ip = self.ctrl.getsockname()[0]
+        # v44 fix: раньше тут всегда был self.ctrl.getsockname()[0] - локальный адрес,
+        # недоступный снаружи через роутер/NAT. Сначала пробуем настроенный публичный IP
+        # (PUBLIC_IP из hyper-host.conf/панели), и только если он не задан - старое поведение.
+        local_ip = configured_public_ip() or self.ctrl.getsockname()[0]
         bind_host = "0.0.0.0"
         self.pasv = PassiveListener(bind_host, self.passive_min, self.passive_max)
         port = self.pasv.open()

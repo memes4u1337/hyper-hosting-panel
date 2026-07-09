@@ -1365,6 +1365,17 @@ CREATE USER IF NOT EXISTS '${user}'@'localhost' IDENTIFIED BY '${epass}';
 ALTER USER '${user}'@'localhost' IDENTIFIED BY '${epass}';
 GRANT ALL PRIVILEGES ON \`${db}\`.* TO '${user}'@'localhost';
 SQL
+  # v44 fix: phpMyAdmin в этой панели всегда ходит в MySQL по TCP на 127.0.0.1
+  # (см. configure_phpmyadmin_label: $cfg['Servers'][$i]['host'] = '127.0.0.1').
+  # А MySQL/MariaDB считает 'user'@'localhost' и 'user'@'127.0.0.1' РАЗНЫМИ учётками:
+  # 'localhost' match'ится только для подключения через unix-сокет. Из-за этого
+  # "Войти" в phpMyAdmin падал с Access denied, даже если логин/пароль верные.
+  # Поэтому всегда дополнительно создаём аккаунт на 127.0.0.1, независимо от чекбокса remote.
+  mysql <<SQL
+CREATE USER IF NOT EXISTS '${user}'@'127.0.0.1' IDENTIFIED BY '${epass}';
+ALTER USER '${user}'@'127.0.0.1' IDENTIFIED BY '${epass}';
+GRANT ALL PRIVILEGES ON \`${db}\`.* TO '${user}'@'127.0.0.1';
+SQL
   if [[ "$remote" == "1" ]]; then mysql <<SQL
 CREATE USER IF NOT EXISTS '${user}'@'${host_pattern}' IDENTIFIED BY '${epass}';
 ALTER USER '${user}'@'${host_pattern}' IDENTIFIED BY '${epass}';
@@ -1372,7 +1383,7 @@ GRANT ALL PRIVILEGES ON \`${db}\`.* TO '${user}'@'${host_pattern}';
 SQL
   fi
   mysql -e "FLUSH PRIVILEGES;"
-  log "Database created: $db / $user / remote=$remote host=$host_pattern"
+  log "Database created: $db / $user / remote=$remote host=$host_pattern (localhost + 127.0.0.1 for phpMyAdmin)"
 }
 
 cmd_delete_db() {
@@ -1402,24 +1413,33 @@ cmd_create_mysql_account() {
   [[ -z "$db" || "$db" == "*" || "$db" == "*.*" || "$db" =~ ^[A-Za-z0-9_]{2,48}$ ]] || err "Invalid db name"
   [[ "$priv" =~ ^(ALL|SELECT|READ)$ ]] || priv="ALL"
   local epass; epass="$(sql_escape "$pass")"
-  mysql <<SQL
-CREATE USER IF NOT EXISTS '${user}'@'${host}' IDENTIFIED BY '${epass}';
-ALTER USER '${user}'@'${host}' IDENTIFIED BY '${epass}';
+  # v44 fix: phpMyAdmin подключается к MySQL по TCP на 127.0.0.1, а не через unix-сокет
+  # localhost, поэтому если аккаунт создан только на 'localhost', кнопка "Войти" в
+  # phpMyAdmin отдаёт Access denied даже с правильным паролем. Всегда добавляем 127.0.0.1
+  # к списку хостов аккаунта, в дополнение к выбранному в форме host.
+  local hosts=("$host")
+  [[ "$host" != "127.0.0.1" && "$host" != "%" ]] && hosts+=("127.0.0.1")
+  local h
+  for h in "${hosts[@]}"; do
+    mysql <<SQL
+CREATE USER IF NOT EXISTS '${user}'@'${h}' IDENTIFIED BY '${epass}';
+ALTER USER '${user}'@'${h}' IDENTIFIED BY '${epass}';
 SQL
-  if [[ -n "$db" && "$db" != "*" && "$db" != "*.*" ]]; then
-    mysql -e "CREATE DATABASE IF NOT EXISTS \`${db}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-    if [[ "$priv" == "SELECT" || "$priv" == "READ" ]]; then
-      mysql -e "GRANT SELECT, SHOW VIEW ON \`${db}\`.* TO '${user}'@'${host}';"
+    if [[ -n "$db" && "$db" != "*" && "$db" != "*.*" ]]; then
+      mysql -e "CREATE DATABASE IF NOT EXISTS \`${db}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+      if [[ "$priv" == "SELECT" || "$priv" == "READ" ]]; then
+        mysql -e "GRANT SELECT, SHOW VIEW ON \`${db}\`.* TO '${user}'@'${h}';"
+      else
+        mysql -e "GRANT ALL PRIVILEGES ON \`${db}\`.* TO '${user}'@'${h}';"
+      fi
+    elif [[ "$db" == "*" || "$db" == "*.*" ]]; then
+      mysql -e "GRANT ALL PRIVILEGES ON *.* TO '${user}'@'${h}' WITH GRANT OPTION;"
     else
-      mysql -e "GRANT ALL PRIVILEGES ON \`${db}\`.* TO '${user}'@'${host}';"
+      mysql -e "GRANT USAGE ON *.* TO '${user}'@'${h}';"
     fi
-  elif [[ "$db" == "*" || "$db" == "*.*" ]]; then
-    mysql -e "GRANT ALL PRIVILEGES ON *.* TO '${user}'@'${host}' WITH GRANT OPTION;"
-  else
-    mysql -e "GRANT USAGE ON *.* TO '${user}'@'${host}';"
-  fi
+  done
   mysql -e "FLUSH PRIVILEGES;"
-  log "MySQL/phpMyAdmin account ready: ${user}@${host} db=${db:-usage}"
+  log "MySQL/phpMyAdmin account ready: ${user}@(${hosts[*]}) db=${db:-usage}"
 }
 
 cmd_delete_mysql_account() {
@@ -2223,6 +2243,22 @@ def run(cmd):
 
 def service(name): return run(f'systemctl is-active {name}') or 'inactive'
 
+def ftp_service_status():
+    # v44 fix: раньше статус FTP на дашборде брался только через systemctl is-active
+    # hyper-host-ftp. Если /etc был read-only (или юнит не завёлся) при создании FTP,
+    # панель включает fallback-режим через nohup (start_hyper_ftp_runtime) - сам FTP
+    # при этом реально работает, но systemd про него не знает, и бейдж всегда
+    # показывал "ftp: inactive", даже когда FileZilla мог подключиться.
+    # Теперь дополнительно проверяем, что порт 21 реально слушается и процесс жив.
+    st = service('hyper-host-ftp')
+    if st == 'active':
+        return 'active'
+    listening = run("ss -H -ltn 2>/dev/null | awk '$4 ~ /:21$/'")
+    proc = run("pgrep -af 'hyper_ftp_server.py|hyper-host-ftp-server'")
+    if listening and proc:
+        return 'active'
+    return st or 'inactive'
+
 def meminfo():
     data={}
     try:
@@ -2296,7 +2332,7 @@ pm2=run('command -v pm2 >/dev/null 2>&1 && pm2 -v || true')
 paths={'root':'/','sites':os.environ.get('SITES_DIR','/var/www/hyper-host-sites'),'bots':os.environ.get('BOTS_DIR','/var/www/hyper-host-bots'),'ftp':os.environ.get('FTP_DIR','/var/www/hyper-host-ftp'),'backups':os.environ.get('BACKUP_DIR','/opt/hyper-host/backups')}
 disks={k:disk_usage(v) for k,v in paths.items()}
 root=disks['root']
-print(json.dumps({'server_ip':os.environ.get('SERVER_IP',''),'panel_domain':os.environ.get('PANEL_DOMAIN',''),'hostname':run('hostname'),'kernel':run('uname -srmo'),'cpu_model':cpu_model(),'cpu_cores':cores,'cpu_percent':cpu_percent(),'cpu_temp':temp_c(),'load1':round(load[0],2),'load5':round(load[1],2),'load15':round(load[2],2),'load_percent':round((load[0]/cores*100) if cores else 0,1),'uptime':uptime_text(),'disk_total':root['total'],'disk_used':root['used'],'disk_free':root['free'],'disk_percent':root['percent'],'disks':disks,'mem_total':mem['total'],'mem_used':mem['used'],'mem_available':mem['available'],'mem_free':mem['free'],'mem_cached':mem['cached'],'mem_buffers':mem['buffers'],'mem_percent':round((mem['used']/mem['total']*100) if mem['total'] else 0,1),'swap_total':mem['swap_total'],'swap_used':mem['swap_used'],'swap_free':mem['swap_free'],'pm2_version':pm2,'services':{'nginx':service('nginx'),'mariadb':service('mariadb'),'ftp':service('hyper-host-ftp'),'php_fpm':service(php),'bind9':service('bind9'),'hyperbot_pm2':service('hyperbot-pm2')},'paths':{'panel':os.environ.get('PANEL_DIR',''),'sites':paths['sites'],'bots':paths['bots'],'ftp':paths['ftp'],'backups':paths['backups'],'phpmyadmin':os.environ.get('PHPMYADMIN_PATH','/usr/share/phpmyadmin')},'updated_at':int(time.time())},ensure_ascii=False))
+print(json.dumps({'server_ip':os.environ.get('SERVER_IP',''),'panel_domain':os.environ.get('PANEL_DOMAIN',''),'hostname':run('hostname'),'kernel':run('uname -srmo'),'cpu_model':cpu_model(),'cpu_cores':cores,'cpu_percent':cpu_percent(),'cpu_temp':temp_c(),'load1':round(load[0],2),'load5':round(load[1],2),'load15':round(load[2],2),'load_percent':round((load[0]/cores*100) if cores else 0,1),'uptime':uptime_text(),'disk_total':root['total'],'disk_used':root['used'],'disk_free':root['free'],'disk_percent':root['percent'],'disks':disks,'mem_total':mem['total'],'mem_used':mem['used'],'mem_available':mem['available'],'mem_free':mem['free'],'mem_cached':mem['cached'],'mem_buffers':mem['buffers'],'mem_percent':round((mem['used']/mem['total']*100) if mem['total'] else 0,1),'swap_total':mem['swap_total'],'swap_used':mem['swap_used'],'swap_free':mem['swap_free'],'pm2_version':pm2,'services':{'nginx':service('nginx'),'mariadb':service('mariadb'),'ftp':ftp_service_status(),'php_fpm':service(php),'bind9':service('bind9'),'hyperbot_pm2':service('hyperbot-pm2')},'paths':{'panel':os.environ.get('PANEL_DIR',''),'sites':paths['sites'],'bots':paths['bots'],'ftp':paths['ftp'],'backups':paths['backups'],'phpmyadmin':os.environ.get('PHPMYADMIN_PATH','/usr/share/phpmyadmin')},'updated_at':int(time.time())},ensure_ascii=False))
 PY
 }
 

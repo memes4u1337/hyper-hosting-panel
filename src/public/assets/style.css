@@ -543,21 +543,32 @@ code{color:#9ee8ff;background:rgba(34,211,238,.09);border-radius:8px;padding:2px
 .logs{background:#04070d;color:#d7e7ff;border:1px solid var(--hh-line);border-radius:17px;padding:17px;max-height:70vh;overflow:auto;white-space:pre-wrap;font-size:12.5px;line-height:1.55}
 
 /* ---------- responsive ---------- */
+.mobile-nav-toggle{display:none;align-items:center;justify-content:center;width:42px;height:42px;border-radius:12px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);color:#fff;font-size:17px;flex:0 0 auto;margin-right:6px}
+.mobile-nav-backdrop{display:none}
 @media(max-width:1300px){.live-hardware-grid-v29{grid-template-columns:repeat(2,1fr)}.dashboard-hero-v29{grid-template-columns:1fr}.hero-metrics-v29{grid-template-columns:repeat(2,1fr)}.quick-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:1200px){.file-manager-layout{grid-template-columns:1fr}.pc-panel{position:static}}
 @media(max-width:1100px){
-  .sidebar-v2{position:static;width:100%;flex-direction:column;height:auto;box-shadow:none}
-  .rail{width:100%;flex-direction:row;padding:12px;gap:8px;overflow-x:auto;border-right:0;border-bottom:1px solid var(--hh-line)}
-  .rail-indicator{display:none}
-  .rail-spacer{display:none}
-  .flyout{width:100%;flex:1 1 auto}
-  .flyout-panels{display:block}
-  .flyout-panel{display:block!important;animation:none!important;margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--hh-line-soft)}
-  .flyout-panel:last-child{border-bottom:0}
-  .nav{display:grid;grid-template-columns:repeat(2,1fr);gap:6px}
+  /* v45: sidebar стал полноценным off-canvas drawer вместо "простыни" со всеми разделами
+     сразу под шапкой — теперь контент страницы сразу виден, а меню открывается по бургеру. */
+  .mobile-nav-toggle{display:inline-flex}
   .app-shell{display:block}
+  .sidebar-v2{position:fixed;inset:0 auto 0 0;width:min(88vw,380px);height:100vh;transform:translateX(-100%);transition:transform .3s var(--hh-ease);z-index:60;box-shadow:20px 0 60px rgba(0,0,0,.5)}
+  .app-shell.nav-open .sidebar-v2{transform:translateX(0)}
+  .mobile-nav-backdrop{display:block;position:fixed;inset:0;background:rgba(4,7,13,.6);backdrop-filter:blur(2px);opacity:0;pointer-events:none;transition:opacity .3s var(--hh-ease);z-index:55}
+  .app-shell.nav-open .mobile-nav-backdrop{opacity:1;pointer-events:auto}
+  body.nav-open{overflow:hidden}
+  .rail{width:var(--hh-rail-w);flex:0 0 var(--hh-rail-w);flex-direction:column;overflow-x:visible;overflow-y:auto;border-bottom:0;border-right:1px solid var(--hh-line)}
+  .rail-indicator{display:block}
+  .rail-spacer{display:block;flex:1}
+  .flyout{width:calc(min(88vw,380px) - var(--hh-rail-w));flex:1 1 auto}
+  .flyout-head{display:flex}
+  .flyout-panels{display:block}
+  .flyout-panel{display:none!important}
+  .flyout-panel.active{display:block!important;animation:none!important}
+  .nav{display:flex;flex-direction:column;gap:4px}
   .content{margin-left:0;width:100%;padding:16px}
-  .topbar{align-items:flex-start;flex-direction:column;gap:12px}
+  .topbar{align-items:flex-start;flex-direction:row}
+  .topbar>div{min-width:0;flex:1 1 auto}
   .sidebar-footer{display:none}
   .login-shell-v2{grid-template-columns:1fr!important}
   .login-side{display:none!important}
@@ -643,7 +654,7 @@ code{color:#9ee8ff;background:rgba(34,211,238,.09);border-radius:8px;padding:2px
 @media(max-width:1350px){.dash-layout-v33{grid-template-columns:1fr}.dash-side-v33{position:static;grid-template-columns:repeat(3,minmax(0,1fr))}.dash-events-v33{max-height:none}.dash-counts-v33{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:950px){.dash-hero-v33{grid-template-columns:1fr}.dash-actions-v33{grid-template-columns:repeat(4,1fr)}.dash-action-v33{height:70px}.dash-resource-grid-v33{grid-template-columns:1fr}.dash-side-v33{grid-template-columns:1fr}}
 @media(max-width:720px){.dash-actions-v33{grid-template-columns:repeat(2,1fr)}.dash-hero-v33{padding:19px}.dash-counts-v33{grid-template-columns:1fr}}
-@media(max-width:1100px){.rail{overflow-x:auto;overflow-y:hidden}.sidebar-v2{width:100%}.flyout-head{display:none}.sidebar-status{display:none}.nav-link{min-height:44px}}
+@media(max-width:1100px){.sidebar-status{display:none}.nav-link{min-height:44px}}
 
 /* v34 FTP/DNS hardening UI */
 .ftp-layout-v34 .compact-status{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
@@ -694,3 +705,46 @@ code{color:#9ee8ff;background:rgba(34,211,238,.09);border-radius:8px;padding:2px
 .php-page-v40 .table-responsive{overflow:visible}.php-page-v40 form{min-width:0}.php-page-v40 select{min-width:160px}
 @media(max-width:1200px){.dns-hero{grid-template-columns:1fr}.dns-create-form{grid-template-columns:1fr 1fr}.dns-create-form button{grid-column:1/-1}}
 @media(max-width:760px){.dns-create-form,.dns-record-form,.dns-inspect-form{grid-template-columns:1fr}.network-check-grid,.status-grid,.dns-compact-grid{grid-template-columns:1fr}.content{min-width:0}.topbar{min-width:0}}
+
+/* ---------- v45: общая мобильная полировка (телефоны ~360-480px) ---------- */
+@media(max-width:576px){
+  html,body{overflow-x:hidden}
+  .content{padding:12px 12px 28px}
+  .panel-card{padding:16px;border-radius:16px}
+  .topbar h1{font-size:19px;letter-spacing:-.03em}
+  .topbar .topbar-kicker{font-size:10.5px}
+  .card-title-row{flex-wrap:wrap;gap:10px}
+  .card-title-row h2{font-size:16px}
+  h2{font-size:17px}
+  /* Кнопки и группы кнопок — в столбик и на всю ширину, чтобы не вылезали за экран */
+  .btn{padding-left:14px;padding-right:14px}
+  .card-title-row .btn,.card-title-row form{width:100%}
+  .card-title-row .d-flex{flex-wrap:wrap;width:100%}
+  .card-title-row .d-flex .btn{flex:1 1 auto}
+  .db-actions,.connection-line,.service-row,.service-row-v29{flex-wrap:wrap}
+  form.d-inline{display:block!important;width:100%;margin:6px 0!important}
+  .btn-group{flex-wrap:wrap;width:100%}
+  .quick-grid{grid-template-columns:1fr!important}
+  .dash-actions-v33{grid-template-columns:repeat(2,1fr)!important}
+  .hero-metrics-v29,.live-hardware-grid-v29,.dash-counts-v33{grid-template-columns:1fr!important}
+  /* Модалки — на всю ширину экрана с отступами по бокам */
+  .modal-dialog{margin:10px;max-width:calc(100vw - 20px)!important}
+  .hh-modal .modal-dialog,.bot-delete-modal .modal-dialog{max-width:calc(100vw - 20px)!important}
+  .modal-content{border-radius:16px}
+  /* Таблицы — компактнее и без обрезания текста */
+  .table-responsive{border-radius:12px}
+  .table td,.table th{font-size:12.5px;padding:.55rem .5rem}
+  .db-row-card{padding:14px}
+  /* Инпуты/группы вводов не должны вылезать за карточку */
+  .input-group{flex-wrap:nowrap}
+  .input-group .form-control{min-width:0}
+  select.form-select,input.form-control,textarea.form-control{font-size:16px} /* избегаем авто-zoom в iOS Safari */
+  .breadcrumb-line{overflow-wrap:anywhere}
+  .ftp-tags{flex-wrap:wrap}
+  .cred{flex-wrap:wrap}
+}
+@media(max-width:400px){
+  .rail-btn,.rail-logo{width:40px;height:40px}
+  .flyout{width:calc(100vw - var(--hh-rail-w) - 10px)}
+  .sidebar-v2{width:92vw}
+}
