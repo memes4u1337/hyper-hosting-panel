@@ -659,3 +659,12 @@ code{color:#9ee8ff;background:rgba(34,211,238,.09);border-radius:8px;padding:2px
 .dns-transfer-box span{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em;width:100%}
 .dns-transfer-box code{background:rgba(0,0,0,.22);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:6px 8px;color:#eaf0ff}
 @media (max-width:768px){.dns-transfer-box{grid-template-columns:1fr}.connection-line{align-items:flex-start;flex-direction:column}.ftp-layout-v34 .compact-status{grid-template-columns:1fr}}
+/* v35 FileZilla FTP diagnostics */
+.ftp-health{display:grid;gap:5px;padding:12px 14px;border-radius:16px;background:rgba(34,211,238,.09);border:1px solid rgba(34,211,238,.18)}
+.ftp-health b{color:#eaf0ff;font-size:14px}
+.ftp-health span{color:#9fb0c7;font-size:12px;line-height:1.35}
+.ftp-connect-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.ftp-connect-grid>div{padding:11px 12px;border-radius:14px;background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.08);min-width:0}
+.ftp-connect-grid span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
+.ftp-connect-grid code{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#fff;background:transparent;border:0;padding:0}
+@media(max-width:768px){.ftp-connect-grid{grid-template-columns:1fr}}

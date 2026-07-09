@@ -122,9 +122,10 @@ cmd_ftp() {
   local sub="${1:-list}"
   if [[ "$sub" == "fix" ]]; then $CTL ftp-fix; return; fi
   if [[ "$sub" == "doctor" || "$sub" == "status" ]]; then $CTL ftp-doctor-json | json_pretty; return; fi
+  if [[ "$sub" == "public-ip" ]]; then shift || true; local act="${1:-get}"; shift || true; $CTL public-ip "$act" "$@"; $CTL ftp-fix; return; fi
   local json
   json="$($CTL sync-json 2>/dev/null || echo '{}')"
-  JSON="$json" python3 - <<'PY'
+  JSON="$json" python3 - <<'PYFTPCLI'
 import os,json
 j=json.loads(os.environ.get('JSON','{}') or '{}')
 items=j.get('ftp',[]) or []
@@ -132,10 +133,12 @@ print('📁 HYPER-HOST — FTP')
 print('──────────────────')
 if not items:
     print('FTP-пользователей пока нет.'); raise SystemExit
-print(f"{'USER':<28} {'HOST':<18} HOME")
+print(f"{'USER':<28} {'PUBLIC HOST':<18} {'LAN HOST':<16} HOME")
 for x in items:
-    print(f"{x.get('username',''):<28} {x.get('host',''):<18} {x.get('target_path','')}")
-PY
+    print(f"{x.get('username',''):<28} {x.get('host_public') or x.get('host',''):<18} {x.get('host_lan',''):<16} {x.get('target_path','')}")
+print('')
+print('FileZilla: Protocol=FTP, Encryption=Only use plain FTP, Transfer mode=Passive, Port=21')
+PYFTPCLI
 }
 
 cmd_dbs() {
@@ -371,6 +374,7 @@ cmd_help() {
   sudo hyper ftp                     FTP-пользователи
   sudo hyper ftp doctor              диагностика FTP/vsftpd/passive
   sudo hyper ftp fix                 починить FTP для FileZilla
+  sudo hyper ftp public-ip set IP     сохранить public IP для PASV
   sudo hyper access guide            гайд по подключению с любого ПК/интернета
   sudo hyper access doctor           диагностика портов SSH/FTP/HTTP/MySQL
   sudo hyper access fix              открыть доступ с другого ПК на Ubuntu
@@ -517,6 +521,7 @@ case "${1:-help}" in
   doctor) shift; cmd_doctor "$@" ;;
   sync) shift; cmd_sync "$@" ;;
   update) shift; cmd_update "$@" ;;
+  public-ip) shift; $CTL public-ip "${1:-get}" "${@:2}" ;;
   raw) shift; cmd_raw "$@" ;;
   help|-h|--help|'') cmd_help ;;
   *) err "Неизвестная команда: $1. Помощь: sudo hyper help" ;;

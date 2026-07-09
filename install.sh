@@ -288,6 +288,8 @@ cat > /etc/vsftpd.conf <<EOFTP
 listen=YES
 listen_ipv6=NO
 listen_address=0.0.0.0
+listen_port=21
+background=NO
 anonymous_enable=NO
 local_enable=YES
 write_enable=YES
@@ -298,7 +300,9 @@ use_localtime=YES
 xferlog_enable=YES
 dual_log_enable=YES
 vsftpd_log_file=/var/log/vsftpd.log
+xferlog_file=/var/log/xferlog
 connect_from_port_20=YES
+ftp_data_port=20
 chroot_local_user=YES
 allow_writeable_chroot=YES
 secure_chroot_dir=/var/run/vsftpd/empty
@@ -308,6 +312,7 @@ tcp_wrappers=NO
 rsa_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
 rsa_private_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
 ssl_enable=NO
+require_ssl_reuse=NO
 pasv_enable=YES
 pasv_min_port=40000
 pasv_max_port=40100
@@ -318,6 +323,10 @@ port_promiscuous=YES
 seccomp_sandbox=NO
 force_dot_files=YES
 utf8_filesystem=YES
+max_clients=200
+max_per_ip=20
+idle_session_timeout=600
+data_connection_timeout=300
 EOFTP
 systemctl enable vsftpd >/dev/null 2>&1 || true
 systemctl restart vsftpd || true
@@ -397,6 +406,22 @@ ufw allow 53/tcp >/dev/null 2>&1 || true
 ufw allow 53/udp >/dev/null 2>&1 || true
 ufw allow 21/tcp >/dev/null 2>&1 || true
 ufw allow 40000:40100/tcp >/dev/null 2>&1 || true
+if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+  firewall-cmd --permanent --add-port=21/tcp >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-port=40000-40100/tcp >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-port=53/tcp >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-port=53/udp >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-port=80/tcp >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-port=443/tcp >/dev/null 2>&1 || true
+  firewall-cmd --reload >/dev/null 2>&1 || true
+fi
+if command -v nft >/dev/null 2>&1; then
+  nft add table inet hyper_host 2>/dev/null || true
+  nft 'add chain inet hyper_host input { type filter hook input priority -100; policy accept; }' 2>/dev/null || true
+  nft add rule inet hyper_host input tcp dport '{ 21, 22, 53, 80, 443 }' accept 2>/dev/null || true
+  nft add rule inet hyper_host input tcp dport 40000-40100 accept 2>/dev/null || true
+  nft add rule inet hyper_host input udp dport 53 accept 2>/dev/null || true
+fi
 # 3306 открывается через настройки панели, когда включаешь внешние подключения.
 
 log "Финальный ремонт прав и сервисов..."
