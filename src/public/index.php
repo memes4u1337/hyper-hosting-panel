@@ -159,6 +159,16 @@ function handle_post(string $action): void
             case 'mysql_external': {
                 $state=(string)($_POST['state']??'disable'); $res=run_ctl(['mysql-external',$state],180); if($res['code']!==0) throw new RuntimeException($res['output']); setting_set('mysql_external',$state==='enable'?'1':'0'); redirect('/?page=databases');
             }
+            case 'phpmyadmin_fix': {
+                hh_clear_cache();
+                $res=run_ctl(['phpmyadmin-fix'],300); if($res['code']!==0) throw new RuntimeException($res['output']);
+                flash('phpMyAdmin настроен: pmadb включён, лимиты загрузки/экспорта подняты', 'success'); redirect('/?page=databases');
+            }
+            case 'php_versions_install': {
+                hh_clear_cache();
+                $res=run_ctl(['php-install-all'],900); if($res['code']!==0) throw new RuntimeException($res['output']);
+                flash('PHP-FPM версии установлены/проверены', 'success'); redirect('/?page=php');
+            }
             case 'create_mysql_account': {
                 $user=trim((string)($_POST['mysql_user']??'')); $pass=(string)($_POST['password']??''); $dbn=trim((string)($_POST['grant_db']??'')); $remote=!empty($_POST['remote_allowed'])?'1':'0'; $host=$remote==='1'?(trim((string)($_POST['host_pattern']??'%'))):'localhost'; if($host==='custom') $host=trim((string)($_POST['custom_host']??'%')); $priv=(string)($_POST['privileges']??'ALL');
                 if(!is_valid_db_name($user)) throw new RuntimeException('Имя пользователя: латиница, цифры, _');
@@ -347,7 +357,7 @@ function fm_delete(): void
 function rrmdir(string $path): void { if(is_dir($path)&&!is_link($path)){ foreach(scandir($path)?:[] as $i){ if($i==='.'||$i==='..') continue; rrmdir($path.'/'.$i);} if(!@rmdir($path)){ run_ctl(['repair'],180); @rmdir($path); } } else { if(!@unlink($path)){ run_ctl(['repair'],180); @unlink($path); } } }
 
 
-function hh_app_version(): string { return '1.1-ui'; }
+function hh_app_version(): string { return '1.1-v39'; }
 
 function hh_nav_config(): array
 {
@@ -370,36 +380,22 @@ function nav_item(string $id,string $icon,string $label,string $page): string { 
 function render_login(): void
 {
     $flash=flash(); $need2fa=setting_get('security_2fa_enabled','0')==='1'; ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=38" rel="stylesheet"></head><body class="login-body">
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=39" rel="stylesheet"></head><body class="login-body">
 <div class="login-orb login-orb-a"></div><div class="login-orb login-orb-b"></div><div class="login-orb login-orb-c"></div>
-<div class="login-shell-v2">
-  <div class="login-side">
-    <div class="login-side-logo"><div class="brand-mark"><i class="fa-solid fa-bolt"></i></div><b>HYPER-HOST</b></div>
-    <h1>Твой сервер.<br>Под полным контролем.</h1>
-    <p>Сайты, боты, базы данных, FTP и SSL — в одной панели, которая живёт на твоём железе.</p>
-    <div class="login-side-points">
-      <div><i class="fa-solid fa-bolt"></i><span>Живая статистика CPU / RAM / диска</span></div>
-      <div><i class="fa-solid fa-robot"></i><span>PM2-боты 24/7 с автозапуском</span></div>
-      <div><i class="fa-solid fa-shield-halved"></i><span>SSL, 2FA и IP allowlist из коробки</span></div>
-    </div>
-    <div class="login-side-foot">powered by memes4u1337</div>
-  </div>
-  <div class="login-form-wrap">
-    <div class="login-card card-glass">
-      <div class="brand-mark login-card-mark"><i class="fa-solid fa-bolt"></i></div>
-      <h2>Вход в панель</h2>
-      <p>HYPER-HOST control panel</p>
-      <?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> py-2"><?= e($flash['message']) ?></div><?php endif; ?>
-      <form method="post" class="vstack gap-3"><?= csrf_field() ?>
-        <label class="hh-field"><span>Логин</span><input class="form-control form-control-lg" name="username" placeholder="admin" autofocus required></label>
-        <label class="hh-field"><span>Пароль</span><input class="form-control form-control-lg" type="password" name="password" placeholder="••••••••" required></label>
-        <?php if($need2fa): ?><label class="hh-field"><span>2FA код</span><input class="form-control form-control-lg" name="totp" placeholder="123456" inputmode="numeric"></label><?php endif; ?>
-        <button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-right-to-bracket me-2"></i>Войти в панель</button>
-      </form>
-      <div class="login-version">HYPER-HOST <b>version: <?= e(hh_app_version()) ?></b></div>
-    </div>
-  </div>
-</div>
+<main class="login-clean">
+  <section class="login-card card-glass login-clean-card">
+    <div class="brand-mark login-card-mark"><i class="fa-solid fa-bolt"></i></div>
+    <h1>HYPER-HOST</h1>
+    <h2>Вход</h2>
+    <?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> py-2 mt-3"><?= e($flash['message']) ?></div><?php endif; ?>
+    <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?>
+      <label class="hh-field"><span>Логин</span><input class="form-control form-control-lg" name="username" autocomplete="username" autofocus required></label>
+      <label class="hh-field"><span>Пароль</span><input class="form-control form-control-lg" type="password" name="password" autocomplete="current-password" required></label>
+      <?php if($need2fa): ?><label class="hh-field"><span>2FA</span><input class="form-control form-control-lg" name="totp" inputmode="numeric"></label><?php endif; ?>
+      <button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-right-to-bracket me-2"></i>Войти</button>
+    </form>
+  </section>
+</main>
 </body></html><?php
 }
 
@@ -412,7 +408,7 @@ function render_page(string $page, array $user): void
 <link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
-<link href="/assets/style.css?v=38" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell">
+<link href="/assets/style.css?v=39" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell">
 <aside class="sidebar sidebar-v2">
   <div class="rail" data-active-cat="<?= e($activeCat) ?>">
     <a href="/?page=dashboard" class="rail-logo"><i class="fa-solid fa-bolt"></i></a>
@@ -442,7 +438,7 @@ function render_page(string $page, array $user): void
     </div>
   </div>
 </aside>
-<main class="content" style="--cat-accent:<?= e($nav[$activeCat]['accent']??'#4f7dff') ?>"><header class="topbar"><div><div class="topbar-kicker"><i class="fa-solid <?= e($nav[$activeCat]['icon']??'fa-rocket') ?>"></i><?= e($nav[$activeCat]['label']??'') ?></div><h1><?= e($title) ?></h1><div class="small muted">Сервер: <code><?= e(host_name()) ?></code></div></div><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft"><i class="fa-solid fa-rotate me-2"></i>Обновить</button></form></header><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?><?php route_view($page); ?></main></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script><script src="/assets/app.js?v=38" defer></script></body></html><?php
+<main class="content" style="--cat-accent:<?= e($nav[$activeCat]['accent']??'#4f7dff') ?>"><header class="topbar"><div><div class="topbar-kicker"><i class="fa-solid <?= e($nav[$activeCat]['icon']??'fa-rocket') ?>"></i><?= e($nav[$activeCat]['label']??'') ?></div><h1><?= e($title) ?></h1><div class="small muted">Сервер: <code><?= e(host_name()) ?></code></div></div><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft"><i class="fa-solid fa-rotate me-2"></i>Обновить</button></form></header><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?><?php route_view($page); ?></main></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script><script src="/assets/app.js?v=39" defer></script></body></html><?php
 }
 function route_view(string $page): void { match($page){ 'files'=>view_files(), 'sites'=>view_sites(), 'ftp'=>view_ftp(), 'databases'=>view_databases(), 'pma_login'=>view_pma_login(), 'bots'=>view_bots(), 'bot_logs'=>view_bot_logs(), 'backups'=>view_backups(), 'dns'=>view_dns(), 'network'=>view_network(), 'ssl'=>view_ssl(), 'php'=>view_php(), 'cron'=>view_cron(), 'logs'=>view_logs(), 'security'=>view_security(), 'settings'=>view_settings(), 'access'=>view_access(), 'disk'=>view_disk(), default=>view_dashboard(), }; }
 function stat_card(string $icon,string $label,string $value,string $sub=''): void { ?><div class="stat-card"><div class="stat-icon"><i class="fa-solid <?= e($icon) ?>"></i></div><div><span><?= e($label) ?></span><b><?= e($value) ?></b><?php if($sub): ?><em><?= e($sub) ?></em><?php endif; ?></div></div><?php }
@@ -616,6 +612,7 @@ function view_databases(): void
     $accounts=db()->query('SELECT * FROM mysql_accounts ORDER BY id DESC')->fetchAll();
     $mysql=run_ctl_json_cached(['mysql-status-json'],5,120);
     $doctor=run_ctl_json_cached(['mysql-doctor-json'],5,120);
+    $pmaStatus=run_ctl_json_cached(['phpmyadmin-status-json'],5,120);
     $gen=default_db_password();
     $external=setting_get('mysql_external','0')==='1' || (($mysql['bind_address']??'')==='0.0.0.0');
     $pma=phpmyadmin_url();
@@ -634,8 +631,9 @@ function view_databases(): void
         
       </div>
       <div class="d-flex gap-2 flex-wrap">
-        <a class="btn btn-primary" href="<?= e($pma) ?>" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square me-2"></i>Открыть phpMyAdmin</a>
-        <form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="mysql_external"><input type="hidden" name="state" value="enable"><button class="btn btn-soft"><i class="fa-solid fa-plug-circle-bolt me-2"></i>Включить внешний SQL</button></form>
+        <a class="btn btn-primary" href="<?= e($pma) ?>" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square me-2"></i>phpMyAdmin</a>
+        <form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="phpmyadmin_fix"><button class="btn btn-soft"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Настроить phpMyAdmin</button></form>
+        <form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="mysql_external"><input type="hidden" name="state" value="enable"><button class="btn btn-soft"><i class="fa-solid fa-plug-circle-bolt me-2"></i>Внешний SQL</button></form>
       </div>
     </div>
     <div class="db-status-grid mt-3">
@@ -643,6 +641,9 @@ function view_databases(): void
       <div><span>3306</span><b class="<?= $listen?'hh-ok':'hh-bad' ?>"><?= $listen?'слушает':'закрыт' ?></b></div>
       <div><span>Доступ</span><b class="<?= $external?'hh-ok':'hh-warn' ?>"><?= $external?'внешний включён':'локально' ?></b></div>
       <div><span>SQL host</span><b><?= e($mysqlExternalHost) ?></b></div>
+      <div><span>pmadb</span><b class="<?= !empty($pmaStatus['ready'])?'hh-ok':'hh-warn' ?>"><?= !empty($pmaStatus['ready'])?'готово':'настроить' ?></b></div>
+      <div><span>Импорт</span><b><?= e((string)($pmaStatus['upload_max_filesize']??'1024M')) ?></b></div>
+      <div><span>Экспорт</span><b><?= e((string)($pmaStatus['memory_limit']??'1024M')) ?></b></div>
     </div>
     <?php if(!empty($doctor['problem'])): ?><div class="alert alert-warning mt-3 mb-0"><i class="fa-solid fa-triangle-exclamation me-2"></i><?= e((string)$doctor['problem']) ?></div><?php endif; ?>
   </section>
@@ -697,7 +698,7 @@ function view_databases(): void
 
     <div class="col-xl-8">
       <div class="panel-card">
-        <div class="card-title-row"><h2><i class="fa-solid fa-table me-2"></i>Базы</h2><div class="d-flex gap-2"><button class="btn btn-sm btn-soft" onclick="copyText('<?= e(mysql_env_block($mysqlExternalHost)) ?>')">SQL host</button><button class="btn btn-sm btn-soft" onclick="copyText('<?= e($pma) ?>')">phpMyAdmin</button></div></div>
+        <div class="card-title-row"><h2><i class="fa-solid fa-table me-2"></i>Базы</h2><div class="d-flex gap-2"><button class="btn btn-sm btn-soft" onclick="copyText('<?= e($mysqlExternalHost) ?>')">SQL host</button><button class="btn btn-sm btn-soft" onclick="copyText('<?= e($pma) ?>')">phpMyAdmin</button></div></div>
         <div class="db-cards-list">
         <?php foreach($rows as $r): $a=$accountByUser[$r['db_user']]??null; $hostPattern=(string)($a['host_pattern']??($r['remote_allowed']?'%':'localhost')); $connHost=(int)$r['remote_allowed']?$mysqlLanHost:$mysqlLocalHost; ?>
           <div class="db-row-card">
@@ -706,7 +707,7 @@ function view_databases(): void
             <div><span>Пароль</span><code><?= e($r['db_password_plain']?:'не сохранён') ?></code></div>
             <div class="db-actions">
               <a class="btn btn-sm btn-primary" href="/?page=pma_login&type=db&id=<?= (int)$r['id'] ?>">Войти</a>
-              <button class="btn btn-sm btn-soft" onclick="copyText('<?= e(mysql_env_block($connHost, $r['db_name'], $r['db_user'], $r['db_password_plain'])) ?>')">.env</button>
+              <button class="btn btn-sm btn-soft" onclick="copyText('Host: <?= e($connHost) ?>\nDatabase: <?= e($r['db_name']) ?>\nUser: <?= e($r['db_user']) ?>\nPassword: <?= e($r['db_password_plain']) ?>')">Данные</button>
               <form method="post" onsubmit="return confirm('Удалить базу?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_db"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form>
             </div>
           </div>
@@ -724,7 +725,7 @@ function view_databases(): void
             <div><span>Пароль</span><code><?= e($a['password_plain']) ?></code></div>
             <div class="db-actions">
               <a class="btn btn-sm btn-primary" href="/?page=pma_login&type=account&id=<?= (int)$a['id'] ?>">Войти</a>
-              <button class="btn btn-sm btn-soft" onclick="copyText('<?= e(mysql_env_block($connHost, $a['db_name'], $a['username'], $a['password_plain'])) ?>')">.env</button>
+              <button class="btn btn-sm btn-soft" onclick="copyText('Host: <?= e($connHost) ?>\nDatabase: <?= e($a['db_name']) ?>\nUser: <?= e($a['username']) ?>\nPassword: <?= e($a['password_plain']) ?>')">Данные</button>
               <form method="post" onsubmit="return confirm('Удалить MySQL аккаунт?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_mysql_account"><input type="hidden" name="id" value="<?= (int)$a['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form>
             </div>
           </div>
@@ -1080,8 +1081,8 @@ function view_ssl(): void {
 </div>
 <?php }
 
-function view_php(): void { $sites=db()->query('SELECT * FROM sites ORDER BY domain')->fetchAll(); $versions=run_ctl_json_cached(['php-list-json'],10,300); ?>
-<div class="panel-card"><h2>PHP-версии по сайтам</h2><table class="table table-dark-soft align-middle"><tbody><?php foreach($sites as $s): ?><tr><td><b><?= e($s['domain']) ?></b><div class="small muted">текущая: PHP <?= e($s['php_version']?:'default') ?></div></td><td><form method="post" class="d-flex gap-2"><?= csrf_field() ?><input type="hidden" name="action" value="set_site_php"><input type="hidden" name="id" value="<?= (int)$s['id'] ?>"><select class="form-select" name="php_version"><?php foreach(($versions['_error']??null)?[]:$versions as $v): ?><option value="<?= e($v['version']) ?>" <?= ($s['php_version']??'')===$v['version']?'selected':'' ?>>PHP <?= e($v['version']) ?></option><?php endforeach; ?></select><button class="btn btn-primary">Сохранить</button></form></td></tr><?php endforeach; ?></tbody></table><p class="muted">Панель переключает только уже установленные PHP-FPM версии. Новые версии PHP ставятся пакетами Ubuntu/PPA.</p></div><?php }
+function view_php(): void { $sites=db()->query('SELECT * FROM sites ORDER BY domain')->fetchAll(); $versions=run_ctl_json_cached(['php-list-json'],10,120); ?>
+<div class="panel-card"><div class="card-title-row flex-wrap"><div><h2>PHP-версии по сайтам</h2><p class="muted mb-0">Выбери версию отдельно для каждого домена.</p></div><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="php_versions_install"><button class="btn btn-soft"><i class="fa-solid fa-download me-2"></i>Установить PHP 8.1 / 8.2 / 8.3 / 8.4</button></form></div><div class="service-row mt-3 mb-3"><?php foreach(($versions['_error']??null)?[]:$versions as $v): ?><span class="badge rounded-pill text-bg-info">PHP <?= e($v['version']) ?></span><?php endforeach; ?></div><table class="table table-dark-soft align-middle"><tbody><?php foreach($sites as $s): ?><tr><td><b><?= e($s['domain']) ?></b><div class="small muted">сейчас: PHP <?= e($s['php_version']?:'default') ?></div></td><td><form method="post" class="d-flex gap-2"><?= csrf_field() ?><input type="hidden" name="action" value="set_site_php"><input type="hidden" name="id" value="<?= (int)$s['id'] ?>"><select class="form-select" name="php_version"><?php foreach(($versions['_error']??null)?[]:$versions as $v): ?><option value="<?= e($v['version']) ?>" <?= ($s['php_version']??'')===$v['version']?'selected':'' ?>>PHP <?= e($v['version']) ?></option><?php endforeach; ?></select><button class="btn btn-primary">Сохранить</button></form></td></tr><?php endforeach; if(!$sites): ?><tr><td class="empty">Сайтов пока нет</td></tr><?php endif; ?></tbody></table></div><?php }
 
 function view_cron(): void { $rows=db()->query('SELECT * FROM cron_tasks ORDER BY id DESC')->fetchAll(); ?>
 <div class="row g-4"><div class="col-lg-4"><div class="panel-card"><h2>Новая cron-задача</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_cron"><input class="form-control" name="name" placeholder="clear_cache" required><input class="form-control" name="schedule" value="*/10 * * * *" required><input class="form-control" name="command" placeholder="php /var/www/site/artisan schedule:run" required><button class="btn btn-primary">Сохранить</button></form></div></div><div class="col-lg-8"><div class="panel-card"><h2>Cron задачи</h2><table class="table table-dark-soft"><?php foreach($rows as $r): ?><tr><td><b><?= e($r['name']) ?></b></td><td><code><?= e($r['schedule']) ?></code></td><td><code><?= e($r['command']) ?></code></td><td><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="delete_cron"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form></td></tr><?php endforeach; if(!$rows): ?><tr><td class="empty">Cron-задач пока нет</td></tr><?php endif; ?></table></div></div></div><?php }

@@ -78,6 +78,115 @@ safe_chown_tree() {
   cleanup_hyper_host_mounts
   find "$path" -xdev -exec chown -h "$owner" {} + 2>/dev/null || true
 }
+
+
+sql_quote() {
+  printf "%s" "$1" | sed "s/'/''/g"
+}
+
+install_php_versions() {
+  log "Установка PHP-FPM версий для сайтов..."
+  apt-get install -y software-properties-common apt-transport-https lsb-release >/dev/null 2>&1 || true
+  if ! apt-cache show php8.4-fpm >/dev/null 2>&1; then
+    add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 && apt-get update -y || warn "PPA ondrej/php недоступен, будут установлены только версии PHP из текущих репозиториев"
+  fi
+  local v pkgs pkg
+  for v in 8.1 8.2 8.3 8.4; do
+    pkgs=("php${v}-fpm" "php${v}-cli" "php${v}-mysql" "php${v}-sqlite3" "php${v}-curl" "php${v}-mbstring" "php${v}-xml" "php${v}-zip" "php${v}-gd" "php${v}-intl" "php${v}-bcmath" "php${v}-soap" "php${v}-readline")
+    if apt-cache show "php${v}-fpm" >/dev/null 2>&1; then
+      apt-get install -y "${pkgs[@]}" || warn "Не удалось полностью установить PHP ${v}. Продолжаю установку."
+      systemctl enable "php${v}-fpm" >/dev/null 2>&1 || true
+      systemctl restart "php${v}-fpm" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+configure_php_limits() {
+  log "Настройка больших загрузок PHP/phpMyAdmin..."
+  local dir fpm
+  for dir in /etc/php/*/fpm/conf.d /etc/php/*/cli/conf.d; do
+    [[ -d "$dir" ]] || continue
+    cat > "$dir/99-hyper-host-limits.ini" <<'EOINI'
+; HYPER-HOST upload/export limits
+file_uploads = On
+upload_max_filesize = 1024M
+post_max_size = 1024M
+memory_limit = 1024M
+max_execution_time = 600
+max_input_time = 600
+max_file_uploads = 100
+max_input_vars = 10000
+EOINI
+  done
+  for fpm in php*-fpm; do
+    systemctl restart "$fpm" >/dev/null 2>&1 || true
+  done
+}
+
+configure_phpmyadmin_storage() {
+  log "Настройка хранилища конфигурации phpMyAdmin..."
+  mkdir -p /etc/phpmyadmin/conf.d /var/lib/phpmyadmin/tmp /etc/hyper-host
+  chown -R www-data:www-data /var/lib/phpmyadmin/tmp 2>/dev/null || true
+  chmod 0770 /var/lib/phpmyadmin/tmp 2>/dev/null || true
+  local pass secret_file sqlpass create_sql
+  secret_file=/etc/hyper-host/phpmyadmin-control.secret
+  if [[ -f "$secret_file" ]]; then
+    pass="$(cat "$secret_file" 2>/dev/null || true)"
+  fi
+  if [[ -z "${pass:-}" ]]; then
+    pass="$(openssl rand -base64 30 | tr -d '\n')"
+    printf '%s' "$pass" > "$secret_file"
+    chmod 0600 "$secret_file"
+  fi
+  sqlpass="$(sql_quote "$pass")"
+  mysql --protocol=socket -uroot <<EOSQL >/dev/null 2>&1 || true
+CREATE DATABASE IF NOT EXISTS phpmyadmin DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS 'pma'@'localhost' IDENTIFIED BY '${sqlpass}';
+ALTER USER 'pma'@'localhost' IDENTIFIED BY '${sqlpass}';
+GRANT SELECT, INSERT, UPDATE, DELETE ON phpmyadmin.* TO 'pma'@'localhost';
+FLUSH PRIVILEGES;
+EOSQL
+  create_sql="/usr/share/phpmyadmin/sql/create_tables.sql"
+  if [[ -f "$create_sql" ]]; then
+    mysql --protocol=socket -uroot phpmyadmin < "$create_sql" >/dev/null 2>&1 || true
+  fi
+  cat > /etc/phpmyadmin/conf.d/hyper-host-storage.php <<EOPMASTORE
+<?php
+// HYPER-HOST: phpMyAdmin advanced configuration storage + large import/export.
+\$cfg['TempDir'] = '/var/lib/phpmyadmin/tmp';
+\$cfg['UploadDir'] = '';
+\$cfg['SaveDir'] = '';
+\$cfg['ExecTimeLimit'] = 0;
+\$cfg['MemoryLimit'] = '1024M';
+if (isset(\$i) && isset(\$cfg['Servers'][\$i])) {
+    \$cfg['Servers'][\$i]['pmadb'] = 'phpmyadmin';
+    \$cfg['Servers'][\$i]['controlhost'] = 'localhost';
+    \$cfg['Servers'][\$i]['controluser'] = 'pma';
+    \$cfg['Servers'][\$i]['controlpass'] = '${pass}';
+    \$cfg['Servers'][\$i]['bookmarktable'] = 'pma__bookmark';
+    \$cfg['Servers'][\$i]['relation'] = 'pma__relation';
+    \$cfg['Servers'][\$i]['table_info'] = 'pma__table_info';
+    \$cfg['Servers'][\$i]['table_coords'] = 'pma__table_coords';
+    \$cfg['Servers'][\$i]['pdf_pages'] = 'pma__pdf_pages';
+    \$cfg['Servers'][\$i]['column_info'] = 'pma__column_info';
+    \$cfg['Servers'][\$i]['history'] = 'pma__history';
+    \$cfg['Servers'][\$i]['table_uiprefs'] = 'pma__table_uiprefs';
+    \$cfg['Servers'][\$i]['tracking'] = 'pma__tracking';
+    \$cfg['Servers'][\$i]['userconfig'] = 'pma__userconfig';
+    \$cfg['Servers'][\$i]['recent'] = 'pma__recent';
+    \$cfg['Servers'][\$i]['favorite'] = 'pma__favorite';
+    \$cfg['Servers'][\$i]['users'] = 'pma__users';
+    \$cfg['Servers'][\$i]['usergroups'] = 'pma__usergroups';
+    \$cfg['Servers'][\$i]['navigationhiding'] = 'pma__navigationhiding';
+    \$cfg['Servers'][\$i]['savedsearches'] = 'pma__savedsearches';
+    \$cfg['Servers'][\$i]['central_columns'] = 'pma__central_columns';
+    \$cfg['Servers'][\$i]['designer_settings'] = 'pma__designer_settings';
+    \$cfg['Servers'][\$i]['export_templates'] = 'pma__export_templates';
+}
+EOPMASTORE
+  chmod 0644 /etc/phpmyadmin/conf.d/hyper-host-storage.php || true
+}
+
 ensure_nologin_shell() {
   if [[ -x /usr/sbin/nologin ]] && ! grep -qxF /usr/sbin/nologin /etc/shells 2>/dev/null; then
     echo /usr/sbin/nologin >> /etc/shells
@@ -91,10 +200,12 @@ ensure_nologin_shell() {
 log "Установка системных пакетов..."
 apt-get update -y
 apt-get install -y \
-  ca-certificates curl git unzip rsync sudo openssl ufw \
+  ca-certificates curl git unzip rsync sudo openssl ufw software-properties-common apt-transport-https lsb-release \
   nginx mariadb-server \
   php-fpm php-cli php-sqlite3 php-mysql php-curl php-mbstring php-xml php-zip php-gd \
   vsftpd openssh-server certbot python3-certbot-nginx python3 python3-venv python3-pip acl cron bind9 dnsutils
+
+install_php_versions
 
 log "Установка phpMyAdmin..."
 if ! dpkg -s phpmyadmin >/dev/null 2>&1; then
@@ -190,6 +301,8 @@ if (isset(\$i)) {
 }
 EOPMA
 chmod 0644 /etc/phpmyadmin/conf.d/hyper-host-server.php || true
+configure_php_limits
+configure_phpmyadmin_storage
 
 
 log "Настройка пользователей и прав..."
@@ -232,7 +345,7 @@ server {
 
     root ${PANEL_DIR}/public;
     index index.php index.html;
-    client_max_body_size 256M;
+    client_max_body_size 1024M;
 
     access_log /var/log/nginx/hyper-host-panel.access.log;
     error_log /var/log/nginx/hyper-host-panel.error.log;
@@ -250,6 +363,9 @@ server {
         alias /usr/share/phpmyadmin/\$1;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME /usr/share/phpmyadmin/\$1;
+        fastcgi_read_timeout 600;
+        fastcgi_send_timeout 600;
+        fastcgi_connect_timeout 60;
         fastcgi_pass unix:${PHP_FPM_SOCK};
     }
 
@@ -259,6 +375,9 @@ server {
 
     location ~ \.php$ {
         include snippets/fastcgi-php.conf;
+        fastcgi_read_timeout 600;
+        fastcgi_send_timeout 600;
+        fastcgi_connect_timeout 60;
         fastcgi_pass unix:${PHP_FPM_SOCK};
     }
 

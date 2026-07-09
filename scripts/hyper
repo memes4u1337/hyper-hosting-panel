@@ -356,7 +356,14 @@ cmd_backup() {
   esac
 }
 
-cmd_php() { $CTL php-list-json | json_pretty; }
+cmd_php() {
+  local sub="${1:-list}"; shift || true
+  case "$sub" in
+    list|status) $CTL php-list-json | json_pretty ;;
+    install|fix) $CTL php-install-all ;;
+    *) err "PHP команды: sudo hyper php list | install" ;;
+  esac
+}
 cmd_repair() { $CTL repair; }
 cmd_doctor() { $CTL bot-doctor; }
 cmd_sync() { $CTL sync-json | json_pretty; }
@@ -378,6 +385,8 @@ cmd_help() {
   sudo hyper panel ssl DOMAIN EMAIL   выпустить SSL для панели
   sudo hyper ftp                     FTP-пользователи
   sudo hyper ftp doctor              диагностика FTP/vsftpd/passive
+  sudo hyper php install             установить/проверить PHP 8.1/8.2/8.3/8.4
+  sudo hyper db pma-fix              настроить phpMyAdmin pmadb и лимиты
   sudo hyper ftp fix                 починить FTP для FileZilla
   sudo hyper ftp public-ip set IP     сохранить public IP для PASV
   sudo hyper ftp user LOGIN PASS all  создать FTP и открыть всё

@@ -668,3 +668,12 @@ code{color:#9ee8ff;background:rgba(34,211,238,.09);border-radius:8px;padding:2px
 .ftp-connect-grid span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
 .ftp-connect-grid code{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#fff;background:transparent;border:0;padding:0}
 @media(max-width:768px){.ftp-connect-grid{grid-template-columns:1fr}}
+
+/* ---------- v39 clean login ---------- */
+.login-clean{position:relative;z-index:1;min-height:100vh;width:100%;display:grid;place-items:center;padding:28px}
+.login-clean-card{width:min(430px,100%);text-align:left;padding:38px}
+.login-clean-card h1{font-size:30px;font-weight:950;letter-spacing:-.06em;margin:0 0 4px;color:#fff}
+.login-clean-card h2{font-size:22px;margin:0;color:#dbeafe}
+.login-clean-card .brand-mark{margin-bottom:18px}
+.login-clean-card .form-control{background:rgba(255,255,255,.075);border-color:rgba(255,255,255,.12);color:#fff}
+.login-clean-card .form-control:focus{background:rgba(255,255,255,.1);border-color:rgba(96,165,250,.72);box-shadow:0 0 0 .25rem rgba(79,125,255,.18);color:#fff}
