@@ -138,14 +138,14 @@ if not items:
     print('FTP-пользователей пока нет.'); raise SystemExit
 print(f"{'USER':<28} {'INTERNET':<24} {'LAN':<22} HOME")
 for x in items:
-    print(f"{x.get('username',''):<28} {(str(x.get('host_public') or x.get('host',''))+':'+str(x.get('public_port',x.get('port',2121)))):<24} {(str(x.get('host_lan',''))+':'+str(x.get('lan_port',21))):<22} {x.get('target_path','')}")
+    print(f"{x.get('username',''):<28} {(str(x.get('host_public') or x.get('host',''))+':'+str(x.get('public_port',x.get('port',21)))):<24} {(str(x.get('host_lan',''))+':'+str(x.get('lan_port',21))):<22} {x.get('target_path','')}")
 print('')
-print('FileZilla LAN: host=192.168.0.179 port=21 passive 40000-40020')
-print('FileZilla Internet: host=90.189.208.25 port=2121 passive 40100-40120')
-print('Encryption: Use explicit FTP over TLS if available (или Plain FTP), Transfer mode=Passive')
+print('FileZilla LAN: host=192.168.0.179 port=21 passive 40000-40100')
+print('FileZilla Internet: host=90.189.208.25 port=21 passive 40000-40100')
+print('Encryption: Plain FTP, Transfer mode=Passive')
 print('Создать/починить логин: sudo hyper ftp user LOGIN PASSWORD или sudo hyper ftp reset LOGIN NEW_PASSWORD')
 print('Проверка LAN: sudo hyper ftp test LOGIN PASSWORD 127.0.0.1 21')
-print('Проверка WAN backend: sudo hyper ftp test LOGIN PASSWORD 127.0.0.1 2121')
+print('Проверка: sudo hyper ftp test LOGIN PASSWORD 127.0.0.1 21')
 PYFTPCLI
 }
 

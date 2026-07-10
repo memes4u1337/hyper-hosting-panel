@@ -1,9 +1,12 @@
-HYPER-HOST v55
+HYPER-HOST v56
 
-Установка:
-sudo bash apply-v55-readonly-ftp-fix.sh
+Запуск:
+sudo bash apply-v56-single-ftp-fix.sh
 
-Проверка:
-sudo hyper connectivity doctor
-sudo hyper connectivity test
-cat /root/hyper-host-v55-ftp-report.txt
+После установки:
+sudo hyper ftp doctor
+sudo hyper ftp test ЛОГИН ПАРОЛЬ 127.0.0.1 21
+
+FTP LAN:      192.168.0.179:21
+FTP Internet: 90.189.208.25:21
+PASV:         40000-40100

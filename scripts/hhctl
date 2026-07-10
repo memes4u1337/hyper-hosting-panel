@@ -41,18 +41,22 @@ FTP_USER_CONF_DIR="${FTP_USER_CONF_DIR:-$BASE_DIR/ftp/user_conf}"
 FTP_AUTH_TXT="${FTP_AUTH_TXT:-$BASE_DIR/data/vsftpd_virtual_users.txt}"
 FTP_AUTH_DB_BASE="${FTP_AUTH_DB_BASE:-$BASE_DIR/data/vsftpd_virtual_users}"
 FTP_AUTH_DB="${FTP_AUTH_DB:-$FTP_AUTH_DB_BASE.db}"
-FTP_LAN_PORT="${FTP_LAN_PORT:-21}"
-FTP_WAN_PORT="${FTP_WAN_PORT:-2121}"
-FTP_LAN_PASV_MIN="${FTP_LAN_PASV_MIN:-40000}"
-FTP_LAN_PASV_MAX="${FTP_LAN_PASV_MAX:-40020}"
-FTP_WAN_PASV_MIN="${FTP_WAN_PASV_MIN:-40100}"
-FTP_WAN_PASV_MAX="${FTP_WAN_PASV_MAX:-40120}"
+FTP_PORT="${FTP_PORT:-21}"
+FTP_PASV_MIN="${FTP_PASV_MIN:-40000}"
+FTP_PASV_MAX="${FTP_PASV_MAX:-40100}"
+# Compatibility aliases for older panel code. v56 runs one service on TCP 21.
+FTP_LAN_PORT="$FTP_PORT"
+FTP_WAN_PORT="$FTP_PORT"
+FTP_LAN_PASV_MIN="$FTP_PASV_MIN"
+FTP_LAN_PASV_MAX="$FTP_PASV_MAX"
+FTP_WAN_PASV_MIN="$FTP_PASV_MIN"
+FTP_WAN_PASV_MAX="$FTP_PASV_MAX"
 FTP_RUNTIME_SCRIPT="${FTP_RUNTIME_SCRIPT:-$BASE_DIR/bin/hyper_ftp_runtime.py}"
 FTP_RUNTIME_VENV="${FTP_RUNTIME_VENV:-$BASE_DIR/venv-ftp}"
 FTP_RUNTIME_RUN_DIR="${FTP_RUNTIME_RUN_DIR:-$BASE_DIR/run}"
 FTP_RUNTIME_LOG_DIR="${FTP_RUNTIME_LOG_DIR:-$BASE_DIR/logs}"
 
-export PANEL_NAME POWERED_BY CONFIGURED_SERVER_IP DETECTED_INTERNAL_IP SERVER_IP PUBLIC_IP PUBLIC_IP_MODE PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB FTP_LAN_PORT FTP_WAN_PORT FTP_LAN_PASV_MIN FTP_LAN_PASV_MAX FTP_WAN_PASV_MIN FTP_WAN_PASV_MAX FTP_RUNTIME_SCRIPT FTP_RUNTIME_VENV FTP_RUNTIME_RUN_DIR FTP_RUNTIME_LOG_DIR
+export PANEL_NAME POWERED_BY CONFIGURED_SERVER_IP DETECTED_INTERNAL_IP SERVER_IP PUBLIC_IP PUBLIC_IP_MODE PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB FTP_PORT FTP_PASV_MIN FTP_PASV_MAX FTP_LAN_PORT FTP_WAN_PORT FTP_LAN_PASV_MIN FTP_LAN_PASV_MAX FTP_WAN_PASV_MIN FTP_WAN_PASV_MAX FTP_RUNTIME_SCRIPT FTP_RUNTIME_VENV FTP_RUNTIME_RUN_DIR FTP_RUNTIME_LOG_DIR
 BOT_USER="${BOT_USER:-hyperbot}"
 PM2_HOME_DIR="${PM2_HOME_DIR:-$BOTS_DIR/.pm2}"
 NODE_MAJOR_MIN="${NODE_MAJOR_MIN:-18}"
@@ -749,9 +753,9 @@ print(json.dumps({
   'nat_mode': os.environ.get('NAT') == '1',
   'ftp_lan': f'{internal}:21' if internal else '',
   'ftp_lan_endpoint': f'{internal}:21' if internal else '',
-  'ftp_external': f'{external}:2121' if external else '',
-  'ftp_external_endpoint': f'{external}:2121' if external else '',
-  'ftp_passive_ports': {'lan':'40000-40020','internet':'40100-40120'},
+  'ftp_external': f'{external}:21' if external else '',
+  'ftp_external_endpoint': f'{external}:21' if external else '',
+  'ftp_passive_ports': {'lan':'40000-40100','internet':'40000-40100'},
   'mysql_local': '127.0.0.1:3306',
   'mysql_local_endpoint': '127.0.0.1:3306',
   'mysql_lan': f'{internal}:3306' if internal else '',
@@ -1296,85 +1300,51 @@ ensure_ftp_virtual_dirs() {
 }
 
 ftp_auth_rebuild_db() {
-  # v55: pyftpdlib reads the normalized text file directly. Berkeley DB is
-  # optional compatibility output only and can never block create/delete.
+  # v56: pyftpdlib reads this canonical text file directly. No PAM and no
+  # Berkeley DB are required. The operation is atomic and never writes /etc.
   ensure_ftp_virtual_dirs
-  local normalized newdb
-  normalized="$(mktemp)"
-  python3 - "$FTP_AUTH_TXT" "$normalized" <<'PYFTPAUTHNORMALIZE'
+  local tmp
+  tmp="$(mktemp "${FTP_AUTH_TXT}.tmp.XXXXXX")"
+  if ! python3 - "$FTP_AUTH_TXT" "$tmp" <<'PYFTPAUTHNORMALIZE'
 from pathlib import Path
 import sys
 
-auth_path = Path(sys.argv[1])
-normalized_path = Path(sys.argv[2])
+source = Path(sys.argv[1])
+target = Path(sys.argv[2])
 try:
-    raw = auth_path.read_text(encoding='utf-8', errors='surrogateescape')
+    raw = source.read_text(encoding="utf-8", errors="surrogateescape")
 except FileNotFoundError:
-    raw = ''
-if '\\n' in raw and raw.count('\n') <= 1:
-    raw = raw.replace('\\r\\n', '\n').replace('\\n', '\n')
+    raw = ""
+
+# Repair the malformed v53/v55 form containing literal backslash+n tokens.
+if "\\n" in raw and raw.count("\n") <= 1:
+    raw = raw.replace("\\r\\n", "\n").replace("\\n", "\n")
+
 lines = raw.splitlines()
 pairs = []
 seen = set()
-for i in range(0, len(lines) - 1, 2):
-    username = lines[i].strip()
-    password = lines[i + 1]
+for index in range(0, len(lines) - 1, 2):
+    username = lines[index].strip()
+    password = lines[index + 1]
     if not username or not password or username in seen:
         continue
     seen.add(username)
     pairs.append((username, password))
-text = ''.join(f'{u}\n{pw}\n' for u, pw in pairs)
-auth_path.parent.mkdir(parents=True, exist_ok=True)
-auth_path.write_text(text, encoding='utf-8', errors='surrogateescape')
-normalized_path.write_text(text, encoding='utf-8', errors='surrogateescape')
-PYFTPAUTHNORMALIZE'
-from pathlib import Path
-import sys
 
-auth_path = Path(sys.argv[1])
-normalized_path = Path(sys.argv[2])
-try:
-    raw = auth_path.read_text(encoding='utf-8', errors='surrogateescape')
-except FileNotFoundError:
-    raw = ''
-if '\n' in raw and raw.count('
-') <= 1:
-    raw = raw.replace('\r\n', '
-').replace('\n', '
-')
-lines = raw.splitlines()
-pairs = []
-seen = set()
-for i in range(0, len(lines) - 1, 2):
-    username = lines[i].strip()
-    password = lines[i + 1]
-    if not username or not password or username in seen:
-        continue
-    seen.add(username)
-    pairs.append((username, password))
-text = ''.join(f'{u}
-{pw}
-' for u, pw in pairs)
-auth_path.parent.mkdir(parents=True, exist_ok=True)
-auth_path.write_text(text, encoding='utf-8', errors='surrogateescape')
-normalized_path.write_text(text, encoding='utf-8', errors='surrogateescape')
+text = "".join(f"{username}\n{password}\n" for username, password in pairs)
+target.write_text(text, encoding="utf-8", errors="surrogateescape")
 PYFTPAUTHNORMALIZE
+  then
+    rm -f "$tmp" 2>/dev/null || true
+    err "Не удалось нормализовать FTP auth-файл"
+  fi
+  chmod 0600 "$tmp" 2>/dev/null || true
+  chown root:root "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$FTP_AUTH_TXT"
   chmod 0600 "$FTP_AUTH_TXT" 2>/dev/null || true
   chown root:root "$FTP_AUTH_TXT" 2>/dev/null || true
-
-  if command -v db_load >/dev/null 2>&1 && [[ -s "$normalized" ]]; then
-    newdb="${FTP_AUTH_DB}.new.$$"
-    rm -f "$newdb" 2>/dev/null || true
-    if db_load -T -t hash -f "$normalized" "$newdb" >/dev/null 2>&1 && [[ -s "$newdb" ]]; then
-      mv -f "$newdb" "$FTP_AUTH_DB"
-      chmod 0600 "$FTP_AUTH_DB" 2>/dev/null || true
-      chown root:root "$FTP_AUTH_DB" 2>/dev/null || true
-    else
-      rm -f "$newdb" 2>/dev/null || true
-      warn "Berkeley DB не собрана, но FTP runtime продолжает работать через TXT"
-    fi
-  fi
-  rm -f "$normalized" 2>/dev/null || true
+  # Remove obsolete PAM/Berkeley output from old versions. Failure is harmless.
+  rm -f "$FTP_AUTH_DB" "$FTP_AUTH_DB_BASE" 2>/dev/null || true
   return 0
 }
 
@@ -1382,6 +1352,7 @@ ftp_auth_set_password_for_variants() {
   local password="${1:-}"; shift || true
   [[ -n "$password" ]] || return 1
   ensure_ftp_virtual_dirs
+  ftp_auth_rebuild_db
   python3 - "$FTP_AUTH_TXT" "$password" "$@" <<'PYFTPAUTHSET'
 import sys, pathlib
 path=pathlib.Path(sys.argv[1]); password=sys.argv[2]; users=[u for u in sys.argv[3:] if u]
@@ -1407,6 +1378,7 @@ PYFTPAUTHSET
 
 ftp_auth_remove_variants() {
   ensure_ftp_virtual_dirs
+  ftp_auth_rebuild_db
   python3 - "$FTP_AUTH_TXT" "$@" <<'PYFTPAUTHRM'
 import sys, pathlib
 path=pathlib.Path(sys.argv[1]); users=set([u for u in sys.argv[2:] if u])
@@ -1600,7 +1572,7 @@ cmd_ftp_test_saved_json() {
 import ftplib, io, json, os, secrets, sqlite3
 path=os.environ.get('DBFILE','')
 result={'accounts':[], 'tested':0, 'passed':0, 'failed':0, 'ok':True,
-        'endpoints':[{'name':'LAN','host':'127.0.0.1','port':21},{'name':'WAN backend','host':'127.0.0.1','port':2121}]}
+        'endpoints':[{'name':'FTP','host':'127.0.0.1','port':21}]}
 if not path or not os.path.exists(path):
     print(json.dumps(result, ensure_ascii=False)); raise SystemExit
 try:
@@ -1608,7 +1580,7 @@ try:
     cols={r[1] for r in con.execute('pragma table_info(ftp_accounts)')}
     if not {'username','password_plain'} <= cols:
         print(json.dumps(result, ensure_ascii=False)); raise SystemExit
-    rows=con.execute("select username,coalesce(password_plain,'') from ftp_accounts order by id limit 10").fetchall()
+    rows=con.execute("select username,coalesce(password_plain,'') from ftp_accounts order by id limit 20").fetchall()
 finally:
     try: con.close()
     except Exception: pass
@@ -1616,24 +1588,23 @@ for user,pw in rows:
     if not user or not pw: continue
     item={'username':str(user),'checks':[],'ok':True}
     result['tested']+=1
-    for label,host,port in [('LAN','127.0.0.1',21),('WAN backend','127.0.0.1',2121)]:
-        name='.hyper-host-v53-test-'+secrets.token_hex(5)+'.txt'
-        payload=('HYPER-HOST FTP STORED TEST '+secrets.token_hex(12)).encode()
-        ftp=None; check={'name':label,'host':host,'port':port,'passive':True,'ok':False,'error':''}
-        try:
-            ftp=ftplib.FTP(); ftp.connect(host,port,timeout=6); ftp.login(str(user),str(pw)); ftp.set_pasv(True)
-            ftp.storbinary('STOR '+name, io.BytesIO(payload))
-            got=bytearray(); ftp.retrbinary('RETR '+name, got.extend)
-            if bytes(got)!=payload: raise RuntimeError('upload/download content mismatch')
-            ftp.delete(name); ftp.quit(); ftp=None; check['ok']=True
-        except Exception as e:
-            check['error']=f'{type(e).__name__}: {e}'; item['ok']=False
-            if ftp is not None:
-                try: ftp.delete(name)
-                except Exception: pass
-                try: ftp.close()
-                except Exception: pass
-        item['checks'].append(check)
+    name='.hyper-host-v56-test-'+secrets.token_hex(5)+'.txt'
+    payload=('HYPER-HOST FTP STORED TEST '+secrets.token_hex(12)).encode()
+    ftp=None; check={'name':'FTP','host':'127.0.0.1','port':21,'passive':True,'ok':False,'error':''}
+    try:
+        ftp=ftplib.FTP(); ftp.connect('127.0.0.1',21,timeout=8); ftp.login(str(user),str(pw)); ftp.set_pasv(True)
+        ftp.storbinary('STOR '+name, io.BytesIO(payload))
+        got=bytearray(); ftp.retrbinary('RETR '+name, got.extend)
+        if bytes(got)!=payload: raise RuntimeError('upload/download content mismatch')
+        ftp.delete(name); ftp.quit(); ftp=None; check['ok']=True
+    except Exception as exc:
+        check['error']=f'{type(exc).__name__}: {exc}'; item['ok']=False
+        if ftp is not None:
+            try: ftp.delete(name)
+            except Exception: pass
+            try: ftp.close()
+            except Exception: pass
+    item['checks'].append(check)
     if item['ok']: result['passed']+=1
     else: result['failed']+=1; result['ok']=False
     result['accounts'].append(item)
@@ -2705,16 +2676,12 @@ def run(cmd):
 def service(name): return run(f'systemctl is-active {name}') or 'inactive'
 
 def ftp_service_status():
-    lan = service('hyper-host-vsftpd-lan')
-    wan = service('hyper-host-vsftpd-wan')
-    listening21 = run("ss -H -ltn 2>/dev/null | awk '$4 ~ /:21$/'")
-    listening2121 = run("ss -H -ltn 2>/dev/null | awk '$4 ~ /:2121$/'")
-    proc = run("pgrep -af '[/]usr/sbin/vsftpd'")
-    if lan == 'active' and wan == 'active' and listening21 and listening2121:
+    state = service('hyper-host-ftp')
+    listening = run("ss -H -ltn 2>/dev/null | awk '$4 ~ /:21$/'")
+    proc = run("pgrep -af '[h]yper_ftp_runtime.py'")
+    if listening and (state == 'active' or proc):
         return 'active'
-    if listening21 and listening2121 and proc:
-        return 'active'
-    return f'lan={lan},wan={wan}'
+    return state or 'inactive'
 
 def meminfo():
     data={}
@@ -2850,7 +2817,7 @@ try:
         seen.add(base.lower())
         home=os.path.join(FTP_DIR, name if os.path.isdir(os.path.join(FTP_DIR,name)) else base)
         scope,target=ftp_scope_from_conf(name, home)
-        ftp.append({'username':name,'target_path':home,'host':host_public,'host_public':host_public,'host_lan':host_lan,'port':2121,'public_port':2121,'lan_port':21,'passive_range':'40100-40120','lan_passive_range':'40000-40020','access_scope':scope,'access_target':target})
+        ftp.append({'username':name,'target_path':home,'host':host_public,'host_public':host_public,'host_lan':host_lan,'port':21,'public_port':21,'lan_port':21,'passive_range':'40000-40100','lan_passive_range':'40000-40100','access_scope':scope,'access_target':target})
 except Exception:
     pass
 # Fallback для старых Linux FTP-пользователей, если они остались после прошлых версий.
@@ -2867,7 +2834,7 @@ for home, name in sorted(by_home.items(), key=lambda x: x[1]):
     if (name[6:] if name.startswith('hhftp_') else name).lower() in seen:
         continue
     scope,target=ftp_scope_from_conf(name, home)
-    ftp.append({'username':name,'target_path':home,'host':host_public,'host_public':host_public,'host_lan':host_lan,'port':2121,'public_port':2121,'lan_port':21,'passive_range':'40100-40120','lan_passive_range':'40000-40020','access_scope':scope,'access_target':target})
+    ftp.append({'username':name,'target_path':home,'host':host_public,'host_public':host_public,'host_lan':host_lan,'port':21,'public_port':21,'lan_port':21,'passive_range':'40000-40100','lan_passive_range':'40000-40100','access_scope':scope,'access_target':target})
 bots=[]
 try:
     data=json.loads(subprocess.check_output('pm2 jlist',shell=True,text=True,stderr=subprocess.DEVNULL))
@@ -2950,53 +2917,36 @@ listen_port_udp() {
 }
 
 open_server_ports() {
-  # Открываем именно firewall Ubuntu. Роутер/NAT всё равно пробрасывается отдельно.
-  local tcp_ports=(21 2121 22 53 80 443 3306)
+  # v56: one FTP control port and one passive range.
+  local tcp_ports=(21 22 53 80 443 3306)
   local p
   if command -v ufw >/dev/null 2>&1; then
-    ufw allow 21/tcp >/dev/null 2>&1 || true
-    ufw allow 2121/tcp >/dev/null 2>&1 || true
-    ufw allow 40000:40020/tcp >/dev/null 2>&1 || true
-    ufw allow 40100:40120/tcp >/dev/null 2>&1 || true
-    ufw allow 22/tcp >/dev/null 2>&1 || true
-    ufw allow 53/tcp >/dev/null 2>&1 || true
+    for p in "${tcp_ports[@]}"; do ufw allow "$p/tcp" >/dev/null 2>&1 || true; done
+    ufw allow 40000:40100/tcp >/dev/null 2>&1 || true
     ufw allow 53/udp >/dev/null 2>&1 || true
-    ufw allow 80/tcp >/dev/null 2>&1 || true
-    ufw allow 443/tcp >/dev/null 2>&1 || true
-    ufw allow 3306/tcp >/dev/null 2>&1 || true
   fi
   if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-    firewall-cmd --permanent --add-port=21/tcp >/dev/null 2>&1 || true
-    firewall-cmd --permanent --add-port=2121/tcp >/dev/null 2>&1 || true
-    firewall-cmd --permanent --add-port=40000-40020/tcp >/dev/null 2>&1 || true
-    firewall-cmd --permanent --add-port=40100-40120/tcp >/dev/null 2>&1 || true
-    firewall-cmd --permanent --add-port=22/tcp >/dev/null 2>&1 || true
-    firewall-cmd --permanent --add-port=53/tcp >/dev/null 2>&1 || true
+    for p in "${tcp_ports[@]}"; do firewall-cmd --permanent --add-port="$p/tcp" >/dev/null 2>&1 || true; done
+    firewall-cmd --permanent --add-port=40000-40100/tcp >/dev/null 2>&1 || true
     firewall-cmd --permanent --add-port=53/udp >/dev/null 2>&1 || true
-    firewall-cmd --permanent --add-port=80/tcp >/dev/null 2>&1 || true
-    firewall-cmd --permanent --add-port=443/tcp >/dev/null 2>&1 || true
-    firewall-cmd --permanent --add-port=3306/tcp >/dev/null 2>&1 || true
     firewall-cmd --reload >/dev/null 2>&1 || true
   fi
   if command -v iptables >/dev/null 2>&1; then
     for p in "${tcp_ports[@]}"; do
       iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || true
     done
+    iptables -C INPUT -p tcp --dport 40000:40100 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 40000:40100 -j ACCEPT 2>/dev/null || true
     iptables -C INPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-    iptables -C INPUT -p tcp --dport 2121 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 2121 -j ACCEPT 2>/dev/null || true
-    iptables -C INPUT -p tcp --dport 40000:40020 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 40000:40020 -j ACCEPT 2>/dev/null || true
-    iptables -C INPUT -p tcp --dport 40100:40120 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 40100:40120 -j ACCEPT 2>/dev/null || true
   fi
   if command -v nft >/dev/null 2>&1; then
-    nft list ruleset >/dev/null 2>&1 || true
     nft add table inet hyper_host 2>/dev/null || true
     nft 'add chain inet hyper_host input { type filter hook input priority -100; policy accept; }' 2>/dev/null || true
-    nft add rule inet hyper_host input tcp dport '{ 21, 2121, 22, 53, 80, 443, 3306 }' accept 2>/dev/null || true
-    nft add rule inet hyper_host input tcp dport 40000-40020 accept 2>/dev/null || true
-    nft add rule inet hyper_host input tcp dport 40100-40120 accept 2>/dev/null || true
+    nft add rule inet hyper_host input tcp dport '{ 21, 22, 53, 80, 443, 3306 }' accept 2>/dev/null || true
+    nft add rule inet hyper_host input tcp dport 40000-40100 accept 2>/dev/null || true
     nft add rule inet hyper_host input udp dport 53 accept 2>/dev/null || true
   fi
 }
+
 
 is_private_ipv4_simple() {
   local ip="${1:-}"
@@ -3130,7 +3080,7 @@ ftp_runtime_install_dependency() {
 }
 
 ftp_runtime_stop() {
-  systemctl stop hyper-host-ftp-lan.service hyper-host-ftp-wan.service hyper-host-vsftpd-lan.service hyper-host-vsftpd-wan.service vsftpd.service hyper-host-ftp.service >/dev/null 2>&1 || true
+  systemctl stop hyper-host-ftp.service hyper-host-ftp-lan.service hyper-host-ftp-wan.service hyper-host-vsftpd-lan.service hyper-host-vsftpd-wan.service vsftpd.service >/dev/null 2>&1 || true
   pkill -f 'hyper_ftp_runtime.py' >/dev/null 2>&1 || true
   local pidfile pid
   for pidfile in "$FTP_RUNTIME_RUN_DIR"/ftp-*.pid; do
@@ -3139,20 +3089,21 @@ ftp_runtime_stop() {
     [[ "$pid" =~ ^[0-9]+$ ]] && kill "$pid" >/dev/null 2>&1 || true
     rm -f "$pidfile"
   done
+  rm -f /run/systemd/system/hyper-host-ftp-lan.service /run/systemd/system/hyper-host-ftp-wan.service 2>/dev/null || true
 }
 
 write_ftp_runtime_unit() {
-  local name="$1" port="$2" masq="$3" pmin="$4" pmax="$5" logfile="$6" py="$7"
+  local py="$1"
   mkdir -p /run/systemd/system "$FTP_RUNTIME_LOG_DIR" "$FTP_RUNTIME_RUN_DIR"
-  cat > "/run/systemd/system/${name}.service" <<EOFTPUNIT
+  cat > /run/systemd/system/hyper-host-ftp.service <<EOFTPUNIT
 [Unit]
-Description=HYPER-HOST FTP runtime ${name}
+Description=HYPER-HOST FTP single engine
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${py} ${FTP_RUNTIME_SCRIPT} --listen 0.0.0.0 --port ${port} --masquerade ${masq} --passive-min ${pmin} --passive-max ${pmax} --auth-file ${FTP_AUTH_TXT} --user-conf-dir ${FTP_USER_CONF_DIR} --ftp-dir ${FTP_DIR} --banner HYPER-HOST-FTP-${name} --log-file ${logfile}
+ExecStart=${py} ${FTP_RUNTIME_SCRIPT} --listen 0.0.0.0 --port ${FTP_PORT} --lan-ip ${FIXED_INTERNAL_IP} --wan-ip ${FIXED_PUBLIC_IP} --passive-min ${FTP_PASV_MIN} --passive-max ${FTP_PASV_MAX} --auth-file ${FTP_AUTH_TXT} --user-conf-dir ${FTP_USER_CONF_DIR} --ftp-dir ${FTP_DIR} --banner HYPER-HOST-FTP --log-file ${FTP_RUNTIME_LOG_DIR}/ftp.log
 Restart=always
 RestartSec=2
 KillSignal=SIGTERM
@@ -3165,8 +3116,8 @@ EOFTPUNIT
 
 ftp_runtime_start_no_systemd() {
   local py="$1"
-  nohup "$py" "$FTP_RUNTIME_SCRIPT" --listen 0.0.0.0 --port "$FTP_LAN_PORT" --masquerade "$FIXED_INTERNAL_IP" --passive-min "$FTP_LAN_PASV_MIN" --passive-max "$FTP_LAN_PASV_MAX" --auth-file "$FTP_AUTH_TXT" --user-conf-dir "$FTP_USER_CONF_DIR" --ftp-dir "$FTP_DIR" --banner HYPER-HOST-FTP-LAN --log-file "$FTP_RUNTIME_LOG_DIR/ftp-lan.log" >/dev/null 2>&1 & echo $! > "$FTP_RUNTIME_RUN_DIR/ftp-lan.pid"
-  nohup "$py" "$FTP_RUNTIME_SCRIPT" --listen 0.0.0.0 --port "$FTP_WAN_PORT" --masquerade "$FIXED_PUBLIC_IP" --passive-min "$FTP_WAN_PASV_MIN" --passive-max "$FTP_WAN_PASV_MAX" --auth-file "$FTP_AUTH_TXT" --user-conf-dir "$FTP_USER_CONF_DIR" --ftp-dir "$FTP_DIR" --banner HYPER-HOST-FTP-WAN --log-file "$FTP_RUNTIME_LOG_DIR/ftp-wan.log" >/dev/null 2>&1 & echo $! > "$FTP_RUNTIME_RUN_DIR/ftp-wan.pid"
+  nohup "$py" "$FTP_RUNTIME_SCRIPT" --listen 0.0.0.0 --port "$FTP_PORT" --lan-ip "$FIXED_INTERNAL_IP" --wan-ip "$FIXED_PUBLIC_IP" --passive-min "$FTP_PASV_MIN" --passive-max "$FTP_PASV_MAX" --auth-file "$FTP_AUTH_TXT" --user-conf-dir "$FTP_USER_CONF_DIR" --ftp-dir "$FTP_DIR" --banner HYPER-HOST-FTP --log-file "$FTP_RUNTIME_LOG_DIR/ftp.log" >/dev/null 2>&1 &
+  echo $! > "$FTP_RUNTIME_RUN_DIR/ftp-main.pid"
 }
 
 install_ftp_runtime_boot_hook() {
@@ -3180,10 +3131,9 @@ install_ftp_runtime_boot_hook() {
 }
 
 configure_vsftpd_backend() {
-  # v55: proven pyftpdlib runtime backend. It does not use /etc/fstab, PAM,
-  # /etc/passwd or writable /etc, therefore account create/delete works even
-  # when /etc is mounted read-only.
+  # v56: one pyftpdlib process, one TCP port, virtual users from /opt.
   ensure_ftp_virtual_dirs
+  ftp_auth_rebuild_db
   ftp_runtime_install_dependency
   [[ -x "$FTP_RUNTIME_SCRIPT" ]] || err "FTP runtime script not found: $FTP_RUNTIME_SCRIPT"
   mkdir -p "$FTP_RUNTIME_LOG_DIR" "$FTP_RUNTIME_RUN_DIR" "$BASE_DIR/bin"
@@ -3191,10 +3141,9 @@ configure_vsftpd_backend() {
   py="$(ftp_runtime_python)"
   ftp_runtime_stop
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
-    write_ftp_runtime_unit hyper-host-ftp-lan "$FTP_LAN_PORT" "$FIXED_INTERNAL_IP" "$FTP_LAN_PASV_MIN" "$FTP_LAN_PASV_MAX" "$FTP_RUNTIME_LOG_DIR/ftp-lan.log" "$py"
-    write_ftp_runtime_unit hyper-host-ftp-wan "$FTP_WAN_PORT" "$FIXED_PUBLIC_IP" "$FTP_WAN_PASV_MIN" "$FTP_WAN_PASV_MAX" "$FTP_RUNTIME_LOG_DIR/ftp-wan.log" "$py"
+    write_ftp_runtime_unit "$py"
     systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl start hyper-host-ftp-lan.service hyper-host-ftp-wan.service
+    systemctl start hyper-host-ftp.service
   else
     ftp_runtime_start_no_systemd "$py"
   fi
@@ -3202,18 +3151,29 @@ configure_vsftpd_backend() {
 }
 
 hyper_ftp_is_active() {
-  listen_port_tcp "$FTP_LAN_PORT" && listen_port_tcp "$FTP_WAN_PORT"
+  listen_port_tcp "$FTP_PORT"
 }
 
 assert_hyper_ftp_ready() {
-  local i
-  for i in 1 2 3 4 5 6 7 8; do
-    hyper_ftp_is_active && return 0
+  local i banner
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if hyper_ftp_is_active; then
+      banner="$(python3 - <<'PYBANNER'
+import socket
+try:
+    with socket.create_connection(('127.0.0.1', 21), timeout=2) as sock:
+        print(sock.recv(512).decode('utf-8','replace').strip())
+except Exception:
+    pass
+PYBANNER
+)"
+      [[ "$banner" == 220* ]] && return 0
+    fi
     sleep 1
   done
-  journalctl -u hyper-host-ftp-lan.service -u hyper-host-ftp-wan.service -n 160 --no-pager >&2 2>/dev/null || true
-  tail -n 100 "$FTP_RUNTIME_LOG_DIR/ftp-lan.log" "$FTP_RUNTIME_LOG_DIR/ftp-wan.log" >&2 2>/dev/null || true
-  err "FTP runtime не поднялся на портах 21/2121. Проверь логи: $FTP_RUNTIME_LOG_DIR/ftp-lan.log и ftp-wan.log"
+  journalctl -u hyper-host-ftp.service -n 160 --no-pager >&2 2>/dev/null || true
+  tail -n 160 "$FTP_RUNTIME_LOG_DIR/ftp.log" >&2 2>/dev/null || true
+  err "FTP runtime не поднялся на TCP 21. Лог: $FTP_RUNTIME_LOG_DIR/ftp.log"
 }
 
 ensure_vsftpd_external_access() {
@@ -3222,89 +3182,74 @@ ensure_vsftpd_external_access() {
   assert_hyper_ftp_ready
 }
 
-
 cmd_ftp_fix_all() {
-  # v41: ftp fix теперь не только правит vsftpd, но и восстанавливает bind-mount'ы аккаунтов из базы панели.
   ensure_vsftpd_external_access
-  local db="${BASE_DIR}/data/hyperhost.sqlite" line username password scope target
+  local db="${BASE_DIR}/data/hyperhost.sqlite" username password scope target home
   if [[ -f "$db" ]]; then
     while IFS=$'\t' read -r username password scope target; do
       [[ -n "$username" ]] || continue
       scope="$(ftp_scope_normalize "${scope:-all}")"
-      if [[ -n "$password" && ${#password} -ge 8 ]]; then
-        HYPER_FTP_BATCH=1 cmd_ftp_password "$username" "$password" "$scope" "${target:-}" >/dev/null 2>&1 || warn "Не удалось восстановить FTP $username"
+      if [[ -n "$password" && ${#password} -ge 1 ]]; then
+        HYPER_FTP_BATCH=1 cmd_ftp_password "$username" "$password" "$scope" "${target:-}" >/dev/null || warn "Не удалось восстановить FTP $username"
       else
         home="$FTP_DIR/$username"
         mkdir -p "$home"
-        ftp_prepare_scope "$username" "$scope" "${target:-}" "$home" >/dev/null || warn "Не удалось восстановить mount'ы FTP $username"
+        ftp_prepare_scope "$username" "$scope" "${target:-}" "$home" >/dev/null || warn "Не удалось восстановить FTP-папки $username"
       fi
     done < <(python3 - "$db" <<'PYFTPROWS'
 import sqlite3, sys
-path=sys.argv[1]
 try:
-    con=sqlite3.connect(path)
-    cur=con.execute("SELECT username, COALESCE(password_plain,''), COALESCE(access_scope,'all'), COALESCE(access_target,'') FROM ftp_accounts ORDER BY id")
-    for r in cur:
-        print('\t'.join(str(x or '') for x in r))
+    con=sqlite3.connect(sys.argv[1])
+    for row in con.execute("SELECT username, COALESCE(password_plain,''), COALESCE(access_scope,'all'), COALESCE(access_target,'') FROM ftp_accounts ORDER BY id"):
+        print('\t'.join(str(value or '') for value in row))
 except Exception:
     pass
 PYFTPROWS
 )
   fi
-  ensure_vsftpd_external_access
-  log "FTP исправлен: FileZilla, passive-порты и папки аккаунтов восстановлены"
+  ftp_auth_rebuild_db
+  assert_hyper_ftp_ready
+  log "FTP исправлен: один pyftpdlib-сервис, TCP 21, PASV ${FTP_PASV_MIN}-${FTP_PASV_MAX}"
 }
 
 cmd_ftp_doctor_json() {
-  local pub internal listen21 listen2121 lan_service wan_service users_count lan_banner wan_banner owner21 owner2121 issue hint lan_pasv wan_pasv
-  pub="$(public_ip)"; internal="$(detect_internal_ipv4)"; listen21=0; listen2121=0
-  listen_port_tcp 21 && listen21=1
-  listen_port_tcp 2121 && listen2121=1
-  lan_service="$(systemctl is-active hyper-host-ftp-lan.service 2>/dev/null || true)"
-  wan_service="$(systemctl is-active hyper-host-ftp-wan.service 2>/dev/null || true)"
-  [[ "$listen21" == 1 && "$lan_service" != active ]] && lan_service="runtime"
-  [[ "$listen2121" == 1 && "$wan_service" != active ]] && wan_service="runtime"
-  owner21="$(ss -H -ltnp 'sport = :21' 2>/dev/null | grep -oE 'users:\(\("[^"]+' | head -n1 | sed -E 's/users:\(\("//;s/"//' || true)"
-  owner2121="$(ss -H -ltnp 'sport = :2121' 2>/dev/null | grep -oE 'users:\(\("[^"]+' | head -n1 | sed -E 's/users:\(\("//;s/"//' || true)"
-  lan_banner="$(timeout 3 bash -c 'head -c 120 < /dev/tcp/127.0.0.1/21' 2>/dev/null | tr -d '\r' | head -n1 || true)"
-  wan_banner="$(timeout 3 bash -c 'head -c 120 < /dev/tcp/127.0.0.1/2121' 2>/dev/null | tr -d '\r' | head -n1 || true)"
+  local pub internal listening service users_count banner owner issue hint pasv
+  pub="$(public_ip)"; internal="$(detect_internal_ipv4)"; listening=0
+  listen_port_tcp "$FTP_PORT" && listening=1
+  service="$(systemctl is-active hyper-host-ftp.service 2>/dev/null || true)"
+  [[ "$listening" == 1 && "$service" != active ]] && service="runtime"
+  owner="$(ss -H -ltnp 'sport = :21' 2>/dev/null | grep -oE 'users:\(\("[^"]+' | head -n1 | sed -E 's/users:\(\("//;s/"//' || true)"
+  banner="$(python3 - <<'PYBANNER'
+import socket
+try:
+    with socket.create_connection(('127.0.0.1',21),timeout=2) as sock:
+        print(sock.recv(512).decode('utf-8','replace').strip())
+except Exception:
+    pass
+PYBANNER
+)"
   users_count="$(awk 'NF{c++} END{print int(c/2)}' "$FTP_AUTH_TXT" 2>/dev/null || echo 0)"
-  lan_pasv="address=${FIXED_INTERNAL_IP},min_port=${FTP_LAN_PASV_MIN},max_port=${FTP_LAN_PASV_MAX}"
-  wan_pasv="address=${FIXED_PUBLIC_IP},min_port=${FTP_WAN_PASV_MIN},max_port=${FTP_WAN_PASV_MAX}"
-  issue=""; hint=""
-  if [[ "$lan_service" != active || "$listen21" != 1 ]]; then
-    issue="LAN FTP не слушает TCP 21"
-    hint="sudo hyper ftp fix; tail -n 120 /opt/hyper-host/logs/ftp-lan.log"
-  elif [[ "$wan_service" != active || "$listen2121" != 1 ]]; then
-    issue="WAN FTP backend не слушает TCP 2121"
-    hint="sudo hyper ftp fix; tail -n 120 /opt/hyper-host/logs/ftp-wan.log"
-  elif [[ -z "$lan_banner" || -z "$wan_banner" ]]; then
-    issue="Один из FTP-экземпляров не отдаёт banner"
-    hint="tail -n 160 /opt/hyper-host/logs/ftp-lan.log /opt/hyper-host/logs/ftp-wan.log"
+  pasv="dynamic LAN=${FIXED_INTERNAL_IP}, WAN=${FIXED_PUBLIC_IP}, ports=${FTP_PASV_MIN}-${FTP_PASV_MAX}"
+  if [[ "$listening" != 1 || ( "$service" != active && "$service" != runtime ) ]]; then
+    issue="FTP не слушает TCP 21"; hint="sudo hyper ftp fix; tail -n 160 /opt/hyper-host/logs/ftp.log"
+  elif [[ "$banner" != 220* ]]; then
+    issue="FTP порт открыт, но нет корректного banner"; hint="tail -n 160 /opt/hyper-host/logs/ftp.log"
   elif [[ "${users_count:-0}" == 0 ]]; then
-    issue="FTP работает, но нет пользователей"
-    hint="sudo hyper ftp user LOGIN PASSWORD all"
+    issue="FTP работает, но нет пользователей"; hint="Создай FTP-аккаунт в панели"
   else
-    issue="Оба FTP-экземпляра локально исправны"
-    hint="LAN: 192.168.0.179:21 (PASV 40000-40020). Internet: 90.189.208.25:2121 (PASV 40100-40120). На роутере пробрось 2121 и 40100-40120."
+    issue="FTP локально исправен"; hint="LAN и Internet используют TCP 21. На роутере: TCP 21 и TCP ${FTP_PASV_MIN}-${FTP_PASV_MAX} -> ${FIXED_INTERNAL_IP}"
   fi
-  SERVER_IP="$internal" PUBLIC_IP="$pub" LISTEN21="$listen21" LISTEN2121="$listen2121" LAN_SERVICE="$lan_service" WAN_SERVICE="$wan_service" OWNER21="$owner21" OWNER2121="$owner2121" LAN_BANNER="$lan_banner" WAN_BANNER="$wan_banner" USERS_COUNT="$users_count" LAN_PASV="$lan_pasv" WAN_PASV="$wan_pasv" ISSUE="$issue" HINT="$hint" python3 - <<'PYFTP'
+  SERVER_IP="$internal" PUBLIC_IP="$pub" LISTENING="$listening" SERVICE="$service" OWNER="$owner" BANNER="$banner" USERS_COUNT="$users_count" PASV="$pasv" ISSUE="$issue" HINT="$hint" python3 - <<'PYFTP'
 import os,json
 print(json.dumps({
  'server_ip':os.environ.get('SERVER_IP',''), 'public_ip':os.environ.get('PUBLIC_IP',''),
- 'ftp_backend':'pyftpdlib dual-instance (read-only /etc safe)',
- 'services':{'lan':os.environ.get('LAN_SERVICE',''),'wan':os.environ.get('WAN_SERVICE','')},
- 'listen_21':os.environ.get('LISTEN21')=='1','listen_2121':os.environ.get('LISTEN2121')=='1',
- 'port_owners':{'21':os.environ.get('OWNER21',''),'2121':os.environ.get('OWNER2121','')},
- 'banners':{'lan':os.environ.get('LAN_BANNER',''),'wan':os.environ.get('WAN_BANNER','')},
- 'ftp_users':int(os.environ.get('USERS_COUNT') or 0),
- 'passive_ranges':{'lan':'40000-40020','internet':'40100-40120'},
- 'pasv_config':{'lan':os.environ.get('LAN_PASV',''),'wan':os.environ.get('WAN_PASV','')},
- 'tls_optional':False,
- 'lan_endpoint':'192.168.0.179:21','internet_endpoint':'90.189.208.25:2121',
- 'router_rules':['TCP 2121 -> 192.168.0.179:2121','TCP 40100-40120 -> 192.168.0.179:40100-40120'],
- 'optional_standard_port_alias':'TCP external 21 -> 192.168.0.179:2121',
- 'issue':os.environ.get('ISSUE',''),'hint':os.environ.get('HINT','')
+ 'ftp_backend':'pyftpdlib single-engine', 'service':os.environ.get('SERVICE',''),
+ 'listen_21':os.environ.get('LISTENING')=='1', 'port_owner':os.environ.get('OWNER',''),
+ 'banner':os.environ.get('BANNER',''), 'ftp_users':int(os.environ.get('USERS_COUNT') or 0),
+ 'passive_range':'40000-40100', 'pasv_config':os.environ.get('PASV',''),
+ 'tls':False, 'lan_endpoint':'192.168.0.179:21', 'internet_endpoint':'90.189.208.25:21',
+ 'router_rules':['TCP 21 -> 192.168.0.179:21','TCP 40000-40100 -> 192.168.0.179:40000-40100'],
+ 'issue':os.environ.get('ISSUE',''), 'hint':os.environ.get('HINT','')
 },ensure_ascii=False))
 PYFTP
 }
@@ -3319,17 +3264,16 @@ cmd_access_fix() {
     systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1 || true
     systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1 || true
   fi
-  log "External access fixed: SSH 22, FTP LAN 21/40000-40020 + WAN 2121/40100-40120, HTTP 80, HTTPS 443, MySQL 3306 opened on Ubuntu. На роутере пробрось нужные порты на $SERVER_IP."
+  log "External access fixed: SSH 22, FTP TCP 21/PASV 40000-40100, HTTP 80, HTTPS 443, MySQL 3306 opened on Ubuntu. На роутере пробрось нужные порты на $SERVER_IP."
 }
 
 
 cmd_access_doctor_json() {
-  local pub cfg out server ufw ssh ftp ftp_wan http https mysql dns_tcp dns_udp nginx mariadb ftp_service sshsvc bind9
+  local pub cfg out server ufw ssh ftp http https mysql dns_tcp dns_udp nginx mariadb ftp_service sshsvc bind9
   server="$SERVER_IP"; cfg="$(configured_public_ip)"; pub="$(public_ip)"; out="$(outbound_public_ip)"
   ufw="$(ufw status 2>/dev/null | head -n1 | sed 's/^Status: //')"
   ssh=0; listen_port_tcp 22 && ssh=1
   ftp=0; listen_port_tcp 21 && ftp=1
-  ftp_wan=0; listen_port_tcp 2121 && ftp_wan=1
   http=0; listen_port_tcp 80 && http=1
   https=0; listen_port_tcp 443 && https=1
   mysql=0; listen_port_tcp 3306 && mysql=1
@@ -3337,290 +3281,57 @@ cmd_access_doctor_json() {
   dns_udp=0; listen_port_udp 53 && dns_udp=1
   nginx="$(systemctl is-active nginx 2>/dev/null || true)"
   mariadb="$(systemctl is-active mariadb 2>/dev/null || systemctl is-active mysql 2>/dev/null || true)"
-  ftp_service="lan=$(systemctl is-active hyper-host-ftp-lan.service 2>/dev/null || true),wan=$(systemctl is-active hyper-host-ftp-wan.service 2>/dev/null || true)"
+  ftp_service="$(systemctl is-active hyper-host-ftp.service 2>/dev/null || true)"
   sshsvc="$(systemctl is-active ssh 2>/dev/null || systemctl is-active sshd 2>/dev/null || true)"
   bind9="$(systemctl is-active bind9 2>/dev/null || true)"
-  SERVER_IP="$server" PUBLIC_IP="$pub" CONFIGURED_PUBLIC_IP="$cfg" OUTBOUND_PUBLIC_IP="$out" UFW="$ufw" SSH="$ssh" FTP="$ftp" FTP_WAN="$ftp_wan" HTTP="$http" HTTPS="$https" MYSQL="$mysql" DNS_TCP="$dns_tcp" DNS_UDP="$dns_udp" NGINX="$nginx" MARIADB="$mariadb" FTP_SERVICE="$ftp_service" SSHSVC="$sshsvc" BIND9="$bind9" python3 - <<'PYACCESS'
+  SERVER_IP="$server" PUBLIC_IP="$pub" CONFIGURED_PUBLIC_IP="$cfg" OUTBOUND_PUBLIC_IP="$out" UFW="$ufw" SSH="$ssh" FTP="$ftp" HTTP="$http" HTTPS="$https" MYSQL="$mysql" DNS_TCP="$dns_tcp" DNS_UDP="$dns_udp" NGINX="$nginx" MARIADB="$mariadb" FTP_SERVICE="$ftp_service" SSHSVC="$sshsvc" BIND9="$bind9" python3 - <<'PYACCESS'
 import os,json
 server=os.environ.get('SERVER_IP','')
-public=os.environ.get('PUBLIC_IP','')
 ports={
- 'ssh_22': os.environ.get('SSH')=='1',
- 'ftp_lan_21': os.environ.get('FTP')=='1',
- 'ftp_wan_2121': os.environ.get('FTP_WAN')=='1',
- 'http_80': os.environ.get('HTTP')=='1',
- 'https_443': os.environ.get('HTTPS')=='1',
- 'mysql_3306': os.environ.get('MYSQL')=='1',
- 'dns_tcp_53': os.environ.get('DNS_TCP')=='1',
- 'dns_udp_53': os.environ.get('DNS_UDP')=='1',
-}
+ 'ssh_22': os.environ.get('SSH')=='1', 'ftp_21': os.environ.get('FTP')=='1',
+ 'http_80': os.environ.get('HTTP')=='1', 'https_443': os.environ.get('HTTPS')=='1',
+ 'mysql_3306': os.environ.get('MYSQL')=='1', 'dns_tcp_53': os.environ.get('DNS_TCP')=='1',
+ 'dns_udp_53': os.environ.get('DNS_UDP')=='1'}
 router=[]
 if server:
     router=[
-      {'service':'HTTP sites + SSL','rule':'TCP 80 -> %s:80' % server},
-      {'service':'HTTPS sites','rule':'TCP 443 -> %s:443' % server},
-      {'service':'SSH/SFTP','rule':'TCP 22 -> %s:22' % server},
-      {'service':'FTP Internet','rule':'TCP 2121 -> %s:2121 and TCP 40100-40120 -> %s:40100-40120; optional external 21 -> internal 2121' % (server, server)},
-      {'service':'MySQL external','rule':'TCP 3306 -> %s:3306' % server},
-      {'service':'Own DNS','rule':'TCP/UDP 53 -> %s:53' % server},
-    ]
-missing=[]
-for key, ok in ports.items():
-    if not ok: missing.append(key)
+      {'service':'HTTP sites + SSL','rule':f'TCP 80 -> {server}:80'},
+      {'service':'HTTPS sites','rule':f'TCP 443 -> {server}:443'},
+      {'service':'SSH/SFTP','rule':f'TCP 22 -> {server}:22'},
+      {'service':'FTP','rule':f'TCP 21 -> {server}:21 and TCP 40000-40100 -> {server}:40000-40100'},
+      {'service':'MySQL external','rule':f'TCP 3306 -> {server}:3306'},
+      {'service':'Own DNS','rule':f'TCP/UDP 53 -> {server}:53'}]
+missing=[key for key,ok in ports.items() if not ok]
 print(json.dumps({
-  'server_ip': server,
-  'public_ip': public,
-  'configured_public_ip': os.environ.get('CONFIGURED_PUBLIC_IP',''),
-  'outbound_public_ip': os.environ.get('OUTBOUND_PUBLIC_IP',''),
-  'ufw_status': os.environ.get('UFW',''),
-  'services': {'nginx':os.environ.get('NGINX',''), 'mariadb':os.environ.get('MARIADB',''), 'ftp':os.environ.get('FTP_SERVICE',''), 'ssh':os.environ.get('SSHSVC',''), 'bind9':os.environ.get('BIND9','')},
-  'listen_ports': ports,
-  'missing_server_ports': missing,
-  'router_forwarding_needed': router,
-  'ok_for_lan': bool(ports['http_80'] and ports['ssh_22']),
-  'note': 'Ubuntu firewall чинится командой sudo hyper access fix. Роутер нужно пробросить вручную на внутренний IP сервера.'
-}, ensure_ascii=False))
+  'server_ip':server,'public_ip':os.environ.get('PUBLIC_IP',''),
+  'configured_public_ip':os.environ.get('CONFIGURED_PUBLIC_IP',''),
+  'outbound_public_ip':os.environ.get('OUTBOUND_PUBLIC_IP',''),
+  'ufw_status':os.environ.get('UFW',''),
+  'services':{'nginx':os.environ.get('NGINX',''),'mariadb':os.environ.get('MARIADB',''),'ftp':os.environ.get('FTP_SERVICE',''),'ssh':os.environ.get('SSHSVC',''),'bind9':os.environ.get('BIND9','')},
+  'listen_ports':ports,'missing_server_ports':missing,'router_forwarding_needed':router,
+  'ok_for_lan':bool(ports['http_80'] and ports['ssh_22'] and ports['ftp_21']),
+  'note':'FTP: один сервис на TCP 21, PASV 40000-40100.'},ensure_ascii=False))
 PYACCESS
 }
+
 
 cmd_access_guide() {
   local pub; pub="$(configured_public_ip)"; [[ -z "$pub" || "$pub" == "_" ]] && pub="$(public_ip)"
   cat <<EOACCESS
-HYPER-HOST: подключение к серверу с любого ПК/интернета
+HYPER-HOST: подключение
 
-Схема:
-  сервер Ubuntu внутри сети: ${SERVER_IP}
-  публичный IP роутера:      ${pub}
+Сервер LAN: ${SERVER_IP}
+Публичный IP: ${pub}
 
-1) На сервере включить доступ:
-   sudo hyper access fix
-   sudo hyper access doctor
+На роутере:
+  TCP 21          -> ${SERVER_IP}:21
+  TCP 40000-40100 -> ${SERVER_IP}:40000-40100
+  TCP 3306        -> ${SERVER_IP}:3306      если нужен MySQL извне
+  TCP 80/443      -> ${SERVER_IP}:80/443
 
-2) На роутере Keenetic: Сетевые правила -> Переадресация портов.
-   Создай правила:
-   TCP 80          -> ${SERVER_IP}:80        сайты и выпуск SSL
-   TCP 443         -> ${SERVER_IP}:443       HTTPS
-   TCP 22          -> ${SERVER_IP}:22        SSH/SFTP с другого ПК
-   TCP 2121        -> ${SERVER_IP}:2121      FTP из интернета
-   TCP 40100-40120 -> ${SERVER_IP}:40100-40120 passive FTP из интернета
-   Необязательно: внешний TCP 21 -> ${SERVER_IP}:2121 для стандартного порта
-   TCP 3306        -> ${SERVER_IP}:3306      MySQL извне, если нужно
-   TCP/UDP 53      -> ${SERVER_IP}:53        свои NS/DNS, если переносишь домены
-
-3) Как подключаться:
-   Из домашней сети:
-     панель:  http://${SERVER_IP}/ или https://${SERVER_IP}/
-     SSH:     ssh root@${SERVER_IP}
-     FTP:     host=${SERVER_IP}, port=21
-     MySQL:   host=${SERVER_IP}, port=3306
-
-   Из интернета:
-     панель:  https://panel.hyper-host.pw или http://${pub}/
-     SSH:     ssh root@${pub}
-     FTP:     host=${pub}, port=2121
-     MySQL:   host=panel.hyper-host.pw или ${pub}, port=3306
-
-4) Важно:
-   Если из Wi-Fi не открывается внешний IP ${pub}, а с мобильного интернета открывается — это NAT Loopback.
-   Для домашнего ПК можно прописать hosts:
-     ${SERVER_IP} panel.hyper-host.pw
-     ${SERVER_IP} hyper-host.pw
-
-5) Проверка:
-   sudo hyper network doctor hyper-host.pw
-   sudo hyper ssl check hyper-host.pw
-   sudo ss -lntp | grep -E ':22|:80|:443|:3306|:21'
+FileZilla внутри сети: host=${SERVER_IP}, port=21, passive
+FileZilla из интернета: host=${pub}, port=21, passive
 EOACCESS
-}
-
-cmd_disk_doctor_json() {
-  python3 - <<'PYDISK'
-import json, subprocess, shutil, os
-
-def sh(cmd):
-    try:
-        return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
-    except Exception:
-        return ''
-
-def hb(n):
-    try: n=float(n)
-    except Exception: n=0
-    for u in ['B','KB','MB','GB','TB']:
-        if n < 1024 or u == 'TB': return f'{n:.1f} {u}' if u!='B' else f'{n:.0f} {u}'
-        n/=1024
-
-def real(path):
-    try: return os.path.realpath(path)
-    except Exception: return path
-
-usage=shutil.disk_usage('/')
-root_source=sh('findmnt -n -o SOURCE /')
-root_fstype=sh('findmnt -n -o FSTYPE /')
-root_realpath=real(root_source)
-lsblk=sh('lsblk -b -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS')
-lvs=sh('lvs --noheadings --units b --nosuffix -o lv_path,vg_name,lv_size 2>/dev/null')
-pvs=sh('pvs --noheadings --units b --nosuffix -o pv_name,vg_name,pv_size,pv_free 2>/dev/null')
-vgs=sh('vgs --noheadings --units b --nosuffix -o vg_name,vg_size,vg_free 2>/dev/null')
-root_lv=''
-vg=''
-lv_size=''
-for line in lvs.splitlines():
-    parts=line.split()
-    if len(parts) < 3:
-        continue
-    lv_path, vg_name, size = parts[0], parts[1], parts[2]
-    lv_real=real(lv_path)
-    if lv_path == root_source or lv_real == root_realpath or os.path.basename(lv_path) == os.path.basename(root_source):
-        root_lv=lv_path
-        vg=vg_name
-        lv_size=size
-        break
-# fallback for Ubuntu mapper naming: /dev/mapper/ubuntu--vg-ubuntu--lv -> VG ubuntu-vg
-if not vg and root_source.startswith('/dev/mapper/'):
-    encoded=os.path.basename(root_source)
-    # lvs raw knows the actual lv path; compare by realpath first, then derive if possible
-    for line in lvs.splitlines():
-        parts=line.split()
-        if len(parts) >= 3 and real(parts[0]) == root_realpath:
-            root_lv, vg, lv_size = parts[0], parts[1], parts[2]
-            break
-pv_candidates=[]
-vg_free=0
-vg_size=0
-if vg:
-    for line in vgs.splitlines():
-        parts=line.split()
-        if len(parts)>=3 and parts[0]==vg:
-            vg_size=float(parts[1]); vg_free=float(parts[2])
-    for line in pvs.splitlines():
-        parts=line.split()
-        if len(parts)>=4 and parts[1]==vg:
-            pv_candidates.append({'pv':parts[0], 'vg':parts[1], 'size_bytes':float(parts[2]), 'free_bytes':float(parts[3]), 'size':hb(parts[2]), 'free':hb(parts[3])})
-can_lvm=bool(vg and root_lv)
-print(json.dumps({
-  'root_source': root_source,
-  'root_realpath': root_realpath,
-  'root_lv_path': root_lv,
-  'root_fstype': root_fstype,
-  'root_total_bytes': usage.total,
-  'root_used_bytes': usage.used,
-  'root_free_bytes': usage.free,
-  'root_total': hb(usage.total),
-  'root_used': hb(usage.used),
-  'root_free': hb(usage.free),
-  'root_used_percent': round(usage.used*100/usage.total,2) if usage.total else 0,
-  'lvm_detected': can_lvm,
-  'root_vg': vg,
-  'vg_size_bytes': vg_size,
-  'vg_free_bytes': vg_free,
-  'vg_size': hb(vg_size),
-  'vg_free': hb(vg_free),
-  'pv_candidates': pv_candidates,
-  'vgs_raw': vgs,
-  'lvs_raw': lvs,
-  'pvs_raw': pvs,
-  'lsblk_raw': lsblk,
-  'recommended_command': 'sudo hyper disk expand' if can_lvm else 'Нужна ручная проверка: lsblk; pvs; vgs; lvs',
-}, ensure_ascii=False))
-PYDISK
-}
-
-cmd_disk_expand() {
-  [[ "${EUID}" -eq 0 ]] || err "Запусти: sudo hyper disk expand"
-  if ! command -v pvresize >/dev/null 2>&1; then
-    apt-get update
-    apt-get install -y lvm2
-  fi
-
-  local root_src root_real lv_path vg pv vg_free
-  root_src="$(findmnt -n -o SOURCE /)"
-  root_real="$(readlink -f "$root_src" 2>/dev/null || echo "$root_src")"
-
-  lv_path=""
-  vg=""
-  while read -r lp vgname; do
-    [[ -z "$lp" || -z "$vgname" ]] && continue
-    if [[ "$lp" == "$root_src" || "$(readlink -f "$lp" 2>/dev/null || echo "$lp")" == "$root_real" ]]; then
-      lv_path="$lp"
-      vg="$vgname"
-      break
-    fi
-  done < <(lvs --noheadings -o lv_path,vg_name 2>/dev/null | awk '{print $1" "$2}')
-
-  # fallback: try direct lvs on the original mapper path before failing
-  if [[ -z "$vg" ]]; then
-    vg="$(lvs --noheadings -o vg_name "$root_src" 2>/dev/null | head -n1 | xargs || true)"
-    lv_path="$root_src"
-  fi
-  if [[ -z "$vg" ]]; then
-    vg="$(lvs --noheadings -o vg_name "$root_real" 2>/dev/null | head -n1 | xargs || true)"
-    lv_path="$root_real"
-  fi
-  [[ -n "$vg" ]] || err "Root раздел не похож на LVM. Пришли вывод: lsblk; pvs; vgs; lvs"
-
-  pv="$(pvs --noheadings -o pv_name --select "vg_name=$vg" 2>/dev/null | head -n1 | xargs || true)"
-  [[ -n "$pv" ]] || err "Не нашёл physical volume для VG=$vg. Пришли вывод: pvs; vgs; lvs"
-
-  vg_free="$(vgs --noheadings --units g --nosuffix -o vg_free "$vg" 2>/dev/null | head -n1 | xargs || echo 0)"
-
-  echo "[HYPER-HOST] Root source: $root_src"
-  echo "[HYPER-HOST] Root real:   $root_real"
-  echo "[HYPER-HOST] Root LV:     $lv_path"
-  echo "[HYPER-HOST] VG:          $vg"
-  echo "[HYPER-HOST] PV:          $pv"
-  echo "[HYPER-HOST] VG free:     ${vg_free}G"
-  echo
-  echo "[HYPER-HOST] Расширяю PV до размера диска..."
-  pvresize "$pv"
-  echo
-  echo "[HYPER-HOST] Расширяю root LV на всё свободное место..."
-  lvextend -r -l +100%FREE "$lv_path"
-  echo
-  echo "[HYPER-HOST] Готово. Новый размер root:"
-  df -hT /
-  echo
-  lsblk
-}
-
-cmd_disk_guide() {
-  cat <<'EODISKGUIDE'
-HYPER-HOST: расширение диска Ubuntu/LVM
-
-У тебя диск физически примерно 1ТБ, а root показывает около 98ГБ — это типичная ситуация после установки Ubuntu с LVM: диск большой, но logical volume root не расширен.
-
-Проверка:
-  sudo hyper disk doctor
-  lsblk
-  df -hT /
-  sudo pvs
-  sudo vgs
-  sudo lvs
-
-Автоматическое расширение на весь свободный объём:
-  sudo hyper disk expand
-
-Ручной вариант для твоей типовой схемы /dev/sda3 -> ubuntu-vg -> ubuntu-lv:
-  sudo apt update
-  sudo apt install -y lvm2
-  sudo pvresize /dev/sda3
-  sudo lvextend -r -l +100%FREE /dev/mapper/ubuntu--vg-ubuntu--lv
-  df -hT /
-  lsblk
-
-Если команда выдаст ошибку — не повторяй вслепую, пришли вывод:
-  lsblk
-  sudo pvs
-  sudo vgs
-  sudo lvs
-EODISKGUIDE
-}
-
-ensure_nginx_public_listen() {
-  systemctl enable nginx >/dev/null 2>&1 || true
-  nginx_force_listen_all
-  nginx -t >/dev/null 2>&1 || nginx -t
-  systemctl restart nginx 2>/dev/null || systemctl reload nginx 2>/dev/null || true
 }
 
 nginx_force_listen_all() {
@@ -3643,59 +3354,49 @@ PYNGINXALL
 }
 
 cmd_hairpin_fix() {
-  local script="/usr/local/sbin/hyper-host-hairpin"
+  local script="$BASE_DIR/bin/hyper-host-hairpin"
+  mkdir -p "$BASE_DIR/bin" /run/systemd/system
   cat > "$script" <<'EOHAIRPIN'
 #!/usr/bin/env bash
 set -e
 PUB="90.189.208.25"; LAN="192.168.0.179"
 add(){ local chain="$1"; shift; iptables -t nat -C "$chain" "$@" 2>/dev/null || iptables -t nat -A "$chain" "$@"; }
-# Локальный сервер при обращении к WAN FTP:21 должен попадать в WAN backend:2121.
-add OUTPUT -d "$PUB" -p tcp --dport 21 -j DNAT --to-destination "$LAN:2121"
-for port in 2121 80 443 3306; do
-  add OUTPUT -d "$PUB" -p tcp --dport "$port" -j DNAT --to-destination "$LAN:$port"
-done
-add OUTPUT -d "$PUB" -p tcp --dport 40100:40120 -j DNAT --to-destination "$LAN"
+for port in 21 80 443 3306; do add OUTPUT -d "$PUB" -p tcp --dport "$port" -j DNAT --to-destination "$LAN:$port"; done
+add OUTPUT -d "$PUB" -p tcp --dport 40000:40100 -j DNAT --to-destination "$LAN"
 for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
-  add PREROUTING -s "$net" -d "$PUB" -p tcp --dport 21 -j DNAT --to-destination "$LAN:2121"
-  for port in 2121 80 443 3306; do add PREROUTING -s "$net" -d "$PUB" -p tcp --dport "$port" -j DNAT --to-destination "$LAN:$port"; done
-  add PREROUTING -s "$net" -d "$PUB" -p tcp --dport 40100:40120 -j DNAT --to-destination "$LAN"
+  for port in 21 80 443 3306; do add PREROUTING -s "$net" -d "$PUB" -p tcp --dport "$port" -j DNAT --to-destination "$LAN:$port"; done
+  add PREROUTING -s "$net" -d "$PUB" -p tcp --dport 40000:40100 -j DNAT --to-destination "$LAN"
 done
 EOHAIRPIN
   chmod 0755 "$script"
-  cat > /etc/systemd/system/hyper-host-hairpin.service <<EOSVC
+  cat > /run/systemd/system/hyper-host-hairpin.service <<EOSVC
 [Unit]
 Description=HYPER-HOST local public-IP hairpin rules
 After=network-online.target
-Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=$script
 RemainAfterExit=yes
-[Install]
-WantedBy=multi-user.target
 EOSVC
-  systemctl daemon-reload
-  systemctl enable --now hyper-host-hairpin.service >/dev/null 2>&1 || "$script"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl start hyper-host-hairpin.service >/dev/null 2>&1 || "$script" || true
 }
+
 
 cmd_router_upnp_fix() {
   export DEBIAN_FRONTEND=noninteractive
   command -v upnpc >/dev/null 2>&1 || { apt-get install -y miniupnpc >/dev/null 2>&1 || return 1; }
   command -v upnpc >/dev/null 2>&1 || return 1
-  local ftp_ok=0 ftp_alias_ok=0 db_ok=0 pasv_ok=1 p
-  # Основной WAN endpoint использует одинаковый внешний/внутренний порт 2121.
-  # Дополнительно пробуем сделать стандартный внешний 21 алиасом на внутренний 2121.
-  for p in 21 2121 3306 80 443 $(seq 40000 40020) $(seq 40100 40120); do upnpc -d "$p" TCP >/dev/null 2>&1 || true; done
-  upnpc -a "$FIXED_INTERNAL_IP" 2121 2121 TCP >/dev/null 2>&1 && ftp_ok=1 || true
-  upnpc -a "$FIXED_INTERNAL_IP" 2121 21 TCP >/dev/null 2>&1 && ftp_alias_ok=1 || true
+  local ftp_ok=0 db_ok=0 pasv_ok=1 p
+  for p in 21 3306 80 443 $(seq 40000 40100); do upnpc -d "$p" TCP >/dev/null 2>&1 || true; done
+  upnpc -a "$FIXED_INTERNAL_IP" 21 21 TCP >/dev/null 2>&1 && ftp_ok=1 || true
   upnpc -a "$FIXED_INTERNAL_IP" 3306 3306 TCP >/dev/null 2>&1 && db_ok=1 || true
   upnpc -a "$FIXED_INTERNAL_IP" 80 80 TCP >/dev/null 2>&1 || true
   upnpc -a "$FIXED_INTERNAL_IP" 443 443 TCP >/dev/null 2>&1 || true
-  for p in $(seq 40100 40120); do
-    upnpc -a "$FIXED_INTERNAL_IP" "$p" "$p" TCP >/dev/null 2>&1 || pasv_ok=0
-  done
+  for p in $(seq 40000 40100); do upnpc -a "$FIXED_INTERNAL_IP" "$p" "$p" TCP >/dev/null 2>&1 || pasv_ok=0; done
   [[ "$ftp_ok" == 1 && "$db_ok" == 1 && "$pasv_ok" == 1 ]]
 }
+
 
 
 cmd_connectivity_fix() {
@@ -3708,7 +3409,7 @@ cmd_connectivity_fix() {
   if cmd_router_upnp_fix; then
     log "UPnP: роутер принял автоматический проброс FTP/MySQL"
   else
-    warn "UPnP недоступен. На роутере вручную пробрось TCP 2121, 40100-40120 и 3306 на 192.168.0.179. Необязательно: внешний 21 -> внутренний 2121"
+    warn "UPnP недоступен. На роутере вручную пробрось TCP 21, TCP 40000-40100 и TCP 3306 на 192.168.0.179"
   fi
   local ftp_test mysql_test
   ftp_test="$(cmd_ftp_test_saved_json 2>/dev/null || echo '{"ok":false}')"
@@ -3734,7 +3435,7 @@ cmd_connectivity_doctor_json() {
   ftp_saved="$(cmd_ftp_test_saved_json 2>/dev/null || echo '{}')"
   mysql_saved="$(cmd_mysql_test_saved_json 2>/dev/null || echo '{}')"
   hairpin=0; systemctl is-active --quiet hyper-host-hairpin.service && hairpin=1
-  upnp="$(upnpc -l 2>/dev/null | grep -E '2121->192\.168\.0\.179:2121|21->192\.168\.0\.179:2121|3306->192\.168\.0\.179:3306|40100->192\.168\.0\.179:40100' | head -n20 || true)"
+  upnp="$(upnpc -l 2>/dev/null | grep -E '21->192\.168\.0\.179:21|3306->192\.168\.0\.179:3306|40000->192\.168\.0\.179:40000' | head -n20 || true)"
   FTP_JSON="$ftp" MYSQL_JSON="$mysql" FTP_SAVED="$ftp_saved" MYSQL_SAVED="$mysql_saved" HAIRPIN="$hairpin" UPNP="$upnp" python3 - <<'PYCONN'
 import os,json
 def load(k):

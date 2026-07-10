@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""HYPER-HOST FTP runtime based on pyftpdlib.
+"""HYPER-HOST single-process FTP runtime based on pyftpdlib.
 
-This backend intentionally does not depend on /etc/fstab, PAM, /etc/passwd,
-or persistent systemd unit files. It reads virtual users from the existing
-HYPER-HOST auth text file and per-user local_root configs.
+The server listens once on TCP 21 and selects the PASV address per client:
+LAN clients receive 192.168.0.179, internet clients receive 90.189.208.25.
+Virtual users are reloaded from the HYPER-HOST auth file without PAM,
+/etc/passwd, /etc/fstab or persistent writes under /etc.
 """
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import logging
-import os
 import signal
 import sys
-import time
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -20,12 +20,46 @@ try:
     from pyftpdlib.authorizers import AuthenticationFailed, DummyAuthorizer
     from pyftpdlib.handlers import FTPHandler
     from pyftpdlib.servers import FTPServer
-except Exception as exc:  # pragma: no cover - startup diagnostic
+except Exception as exc:  # pragma: no cover
     print(f"pyftpdlib import failed: {exc}", file=sys.stderr)
     raise
 
-
 FULL_PERMS = "elradfmwMT"
+RFC1918 = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+
+
+def normalize_auth_text(raw: str) -> str:
+    """Return canonical USER\nPASSWORD\n pairs and repair old literal \\n data."""
+    if "\\n" in raw and raw.count("\n") <= 1:
+        raw = raw.replace("\\r\\n", "\n").replace("\\n", "\n")
+    lines = raw.splitlines()
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for index in range(0, len(lines) - 1, 2):
+        username = lines[index].strip()
+        password = lines[index + 1]
+        if not username or not password or username in seen:
+            continue
+        seen.add(username)
+        pairs.append((username, password))
+    return "".join(f"{username}\n{password}\n" for username, password in pairs)
+
+
+def is_lan_client(value: str) -> bool:
+    value = value.removeprefix("::ffff:")
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    if address.is_loopback or address.is_link_local:
+        return True
+    if isinstance(address, ipaddress.IPv4Address):
+        return any(address in network for network in RFC1918)
+    return address.is_private
 
 
 class ReloadingAuthorizer(DummyAuthorizer):
@@ -41,36 +75,34 @@ class ReloadingAuthorizer(DummyAuthorizer):
     @staticmethod
     def _stat_signature(path: Path) -> Tuple[int, int]:
         try:
-            st = path.stat()
-            return st.st_mtime_ns, st.st_size
+            stat = path.stat()
+            return stat.st_mtime_ns, stat.st_size
         except FileNotFoundError:
             return 0, 0
 
     def _current_signature(self) -> Tuple[int, int, int, int]:
-        a_mtime, a_size = self._stat_signature(self.auth_file)
+        auth_mtime, auth_size = self._stat_signature(self.auth_file)
         try:
-            c_mtime = self.user_conf_dir.stat().st_mtime_ns
-            c_count = sum(1 for p in self.user_conf_dir.iterdir() if p.is_file())
+            conf_mtime = self.user_conf_dir.stat().st_mtime_ns
+            conf_count = sum(1 for item in self.user_conf_dir.iterdir() if item.is_file())
         except FileNotFoundError:
-            c_mtime, c_count = 0, 0
-        return a_mtime, a_size, c_mtime, c_count
+            conf_mtime, conf_count = 0, 0
+        return auth_mtime, auth_size, conf_mtime, conf_count
 
     def _read_pairs(self) -> Dict[str, str]:
         try:
             raw = self.auth_file.read_text(encoding="utf-8", errors="surrogateescape")
         except FileNotFoundError:
             return {}
-        # Repair the exact malformed v53 form if it still exists.
-        if "\\n" in raw and raw.count("\n") <= 1:
-            raw = raw.replace("\\r\\n", "\n").replace("\\n", "\n")
-        lines = raw.splitlines()
-        result: Dict[str, str] = {}
-        for i in range(0, len(lines) - 1, 2):
-            username = lines[i].strip()
-            password = lines[i + 1]
-            if username and password:
-                result[username] = password
-        return result
+        normalized = normalize_auth_text(raw)
+        if normalized != raw:
+            self.auth_file.write_text(normalized, encoding="utf-8", errors="surrogateescape")
+        lines = normalized.splitlines()
+        return {
+            lines[index].strip(): lines[index + 1]
+            for index in range(0, len(lines) - 1, 2)
+            if lines[index].strip() and lines[index + 1]
+        }
 
     def _local_root(self, username: str) -> Path:
         config = self.user_conf_dir / username
@@ -103,7 +135,7 @@ class ReloadingAuthorizer(DummyAuthorizer):
                     super().add_user(username, password, str(home), perm=FULL_PERMS)
                 except Exception as exc:
                     logging.error("Cannot load FTP user %s: %s", username, exc)
-            self._signature = signature
+            self._signature = self._current_signature()
             logging.info("Reloaded FTP users: %d", len(self.user_table))
         finally:
             self._reloading = False
@@ -113,8 +145,6 @@ class ReloadingAuthorizer(DummyAuthorizer):
         try:
             return super().validate_authentication(username, password, handler)
         except AuthenticationFailed:
-            # One forced refresh handles a create/password-change that happened
-            # within the filesystem timestamp granularity window.
             self._reload(force=True)
             return super().validate_authentication(username, password, handler)
 
@@ -141,12 +171,25 @@ class ReloadingAuthorizer(DummyAuthorizer):
 
 
 class HyperFTPHandler(FTPHandler):
-    permit_foreign_addresses = True
+    permit_foreign_addresses = False
     permit_privileged_ports = False
     use_sendfile = True
+    lan_ip = "192.168.0.179"
+    wan_ip = "90.189.208.25"
 
     def on_connect(self):
-        logging.info("connect remote=%s:%s local=%s:%s", self.remote_ip, self.remote_port, *self.socket.getsockname()[:2])
+        selected = self.lan_ip if is_lan_client(self.remote_ip) else self.wan_ip
+        # PassiveDTP reads the command-channel instance attribute at PASV time.
+        self.masquerade_address = selected
+        local_ip, local_port = self.socket.getsockname()[:2]
+        logging.info(
+            "connect remote=%s:%s local=%s:%s pasv_address=%s",
+            self.remote_ip,
+            self.remote_port,
+            local_ip,
+            local_port,
+            selected,
+        )
 
     def on_login(self, username):
         logging.info("login ok user=%s remote=%s", username, self.remote_ip)
@@ -161,8 +204,9 @@ class HyperFTPHandler(FTPHandler):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--listen", default="0.0.0.0")
-    parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--masquerade", required=True)
+    parser.add_argument("--port", type=int, default=21)
+    parser.add_argument("--lan-ip", required=True)
+    parser.add_argument("--wan-ip", required=True)
     parser.add_argument("--passive-min", type=int, required=True)
     parser.add_argument("--passive-max", type=int, required=True)
     parser.add_argument("--auth-file", required=True)
@@ -175,6 +219,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not 1 <= args.port <= 65535:
+        raise SystemExit("invalid FTP port")
+    if not 1 <= args.passive_min <= args.passive_max <= 65535:
+        raise SystemExit("invalid passive port range")
+    ipaddress.ip_address(args.lan_ip)
+    ipaddress.ip_address(args.wan_ip)
+
     log_path = Path(args.log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
@@ -195,7 +246,8 @@ def main() -> int:
     handler = HyperFTPHandler
     handler.authorizer = authorizer
     handler.banner = args.banner
-    handler.masquerade_address = args.masquerade
+    handler.lan_ip = args.lan_ip
+    handler.wan_ip = args.wan_ip
     handler.passive_ports = range(args.passive_min, args.passive_max + 1)
     handler.timeout = 300
     handler.max_login_attempts = 5
@@ -211,10 +263,11 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     logging.info(
-        "starting HYPER-HOST FTP listen=%s:%d masquerade=%s passive=%d-%d",
+        "starting HYPER-HOST FTP listen=%s:%d lan_ip=%s wan_ip=%s passive=%d-%d",
         args.listen,
         args.port,
-        args.masquerade,
+        args.lan_ip,
+        args.wan_ip,
         args.passive_min,
         args.passive_max,
     )
