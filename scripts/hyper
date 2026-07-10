@@ -125,7 +125,7 @@ cmd_ftp() {
   if [[ "$sub" == "public-ip" ]]; then shift || true; local act="${1:-get}"; shift || true; $CTL public-ip "$act" "$@"; $CTL ftp-fix; return; fi
   if [[ "$sub" == "user" || "$sub" == "create" ]]; then shift || true; [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper ftp user LOGIN PASSWORD [all|sites|site|bots|backups|files] [DOMAIN]"; $CTL create-ftp "$@"; return; fi
   if [[ "$sub" == "reset" || "$sub" == "password" ]]; then shift || true; [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper ftp reset LOGIN NEW_PASSWORD [all|sites|site|bots|backups|files] [DOMAIN]"; $CTL ftp-password "$@"; return; fi
-  if [[ "$sub" == "test" ]]; then shift || true; [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper ftp test LOGIN PASSWORD [HOST]"; $CTL ftp-test-login "$@"; return; fi
+  if [[ "$sub" == "test" ]]; then shift || true; [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper ftp test LOGIN PASSWORD [HOST] [PORT]"; $CTL ftp-test-login "$@"; return; fi
   local json
   json="$($CTL sync-json 2>/dev/null || echo '{}')"
   JSON="$json" python3 - <<'PYFTPCLI'
@@ -136,13 +136,16 @@ print('📁 HYPER-HOST — FTP')
 print('──────────────────')
 if not items:
     print('FTP-пользователей пока нет.'); raise SystemExit
-print(f"{'USER':<28} {'PUBLIC HOST':<18} {'LAN HOST':<16} HOME")
+print(f"{'USER':<28} {'INTERNET':<24} {'LAN':<22} HOME")
 for x in items:
-    print(f"{x.get('username',''):<28} {x.get('host_public') or x.get('host',''):<18} {x.get('host_lan',''):<16} {x.get('target_path','')}")
+    print(f"{x.get('username',''):<28} {(str(x.get('host_public') or x.get('host',''))+':'+str(x.get('public_port',x.get('port',2121)))):<24} {(str(x.get('host_lan',''))+':'+str(x.get('lan_port',21))):<22} {x.get('target_path','')}")
 print('')
-print('FileZilla: Protocol=FTP, Port=21, Encryption=Only use plain FTP, Transfer mode=Passive')
+print('FileZilla LAN: host=192.168.0.179 port=21 passive 40000-40020')
+print('FileZilla Internet: host=90.189.208.25 port=2121 passive 40100-40120')
+print('Encryption: Use explicit FTP over TLS if available (или Plain FTP), Transfer mode=Passive')
 print('Создать/починить логин: sudo hyper ftp user LOGIN PASSWORD или sudo hyper ftp reset LOGIN NEW_PASSWORD')
-print('Проверка входа: sudo hyper ftp test LOGIN PASSWORD 127.0.0.1')
+print('Проверка LAN: sudo hyper ftp test LOGIN PASSWORD 127.0.0.1 21')
+print('Проверка WAN backend: sudo hyper ftp test LOGIN PASSWORD 127.0.0.1 2121')
 PYFTPCLI
 }
 
@@ -175,7 +178,7 @@ PY
     external) [[ "${1:-}" == enable || "${1:-}" == disable ]] || err "Используй: sudo hyper db external enable|disable"; $CTL mysql-external "$1"; $CTL mysql-status-json | json_pretty ;;
     doctor) $CTL mysql-doctor-json | json_pretty ;;
     pma-fix) $CTL phpmyadmin-fix ;;
-    test) shift || true; [[ -n "${1:-}" && -n "${2:-}" && -n "${3:-}" ]] || err "Используй: sudo hyper db test HOST USER PASS [DB]"; $CTL mysql-test "$@" ;;
+    test) [[ -n "${1:-}" && -n "${2:-}" && -n "${3:-}" ]] || err "Используй: sudo hyper db test HOST USER PASS [DB]"; $CTL mysql-test "$@" ;;
     user) [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper db user USER PASS [DB] [HOST]"; $CTL create-mysql-account "$1" "$2" "${4:-%}" "${3:-}" ALL ;;
     *) err "Используй: sudo hyper db list | doctor | pma-fix | external enable|disable | user USER PASS [DB] [%|IP] | test HOST USER PASS [DB]" ;;
   esac
@@ -500,6 +503,10 @@ DNS:
   sudo hyper dns status hyper-host.pw
   sudo hyper dns guide
 
+FTP + MySQL полный ремонт:
+  sudo hyper connectivity fix
+  sudo hyper connectivity doctor
+
 Доступ с другого ПК/интернета:
   sudo hyper access guide
   sudo hyper access fix
@@ -523,6 +530,23 @@ EOF
 }
 
 
+
+
+cmd_connectivity() {
+  local sub="${1:-doctor}"; shift || true
+  case "$sub" in
+    fix|repair|apply) $CTL connectivity-fix ;;
+    doctor|status|check) $CTL connectivity-doctor-json | json_pretty ;;
+    test)
+      say "FTP — сохранённые аккаунты"
+      $CTL ftp-test-saved-json | json_pretty
+      echo
+      say "MySQL — сохранённые аккаунты"
+      $CTL mysql-test-saved-json | json_pretty
+      ;;
+    *) err "Используй: sudo hyper connectivity fix|doctor|test" ;;
+  esac
+}
 
 cmd_access() {
   local sub="${1:-guide}"; shift || true
@@ -584,6 +608,7 @@ case "${1:-help}" in
   bot) shift; cmd_bot "$@" ;;
   sites) shift; cmd_sites "$@" ;;
   ftp) shift; cmd_ftp "$@" ;;
+  connectivity|connect) shift; cmd_connectivity "$@" ;;
   access) shift; cmd_access "$@" ;;
   disk) shift; cmd_disk "$@" ;;
   db|dbs|databases) shift; cmd_dbs "$@" ;;

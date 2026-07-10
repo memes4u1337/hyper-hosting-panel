@@ -131,7 +131,7 @@ function handle_post(string $action): void
             case 'ftp_fix': {
                 hh_clear_cache();
                 $res=run_ctl(['ftp-fix'],120); if($res['code']!==0) throw new RuntimeException($res['output']);
-                flash('FTP исправлен для FileZilla: порт 21, passive 40000-40100, plain FTP','success'); redirect('/?page=ftp');
+                flash('FTP исправлен: LAN 21/40000-40020 и Internet 2121/40100-40120, TLS разрешён','success'); redirect('/?page=ftp');
             }
             case 'create_ftp': {
                 $username=trim((string)($_POST['username']??'')); $password=(string)($_POST['password']??''); if($username===''||!is_valid_name($username)) throw new RuntimeException('Неверный FTP логин'); if(strlen($password)<8) throw new RuntimeException('Пароль FTP минимум 8 символов');
@@ -377,7 +377,7 @@ function fm_delete(): void
 function rrmdir(string $path): void { if(is_dir($path)&&!is_link($path)){ foreach(scandir($path)?:[] as $i){ if($i==='.'||$i==='..') continue; rrmdir($path.'/'.$i);} if(!@rmdir($path)){ run_ctl(['repair'],180); @rmdir($path); } } else { if(!@unlink($path)){ run_ctl(['repair'],180); @unlink($path); } } }
 
 
-function hh_app_version(): string { return '1.7-v51'; }
+function hh_app_version(): string { return '1.7-v53'; }
 
 function hh_nav_config(): array
 {
@@ -668,7 +668,7 @@ function view_databases(): void
       <div><span>Импорт</span><b><?= e((string)($pmaStatus['upload_max_filesize']??'1024M')) ?></b></div>
       <div><span>Экспорт</span><b><?= e((string)($pmaStatus['memory_limit']??'1024M')) ?></b></div>
     </div>
-    <div class="alert alert-info mt-3 mb-0"><i class="fa-solid fa-circle-info me-2"></i>phpMyAdmin LAN: <b><?= e($pmaLan) ?></b> · phpMyAdmin Internet: <b><?= e($pmaWan) ?></b> · внешний SQL: <b><?= e($mysqlExternalHost) ?>:3306</b> · локальный SQL: <b>127.0.0.1:3306</b>.</div>
+    <div class="alert alert-info mt-3 mb-0"><i class="fa-solid fa-circle-info me-2"></i><b>phpMyAdmin — только веб-интерфейс, его URL нельзя указывать в коде бота.</b><br>Бот на этом сервере: <code>127.0.0.1:3306</code> · бот/ПК в LAN: <code><?= e($mysqlLanHost) ?>:3306</code> · бот на другом сервере: <code><?= e($mysqlExternalHost) ?>:3306</code>.<br>phpMyAdmin LAN: <b><?= e($pmaLan) ?></b> · Internet: <b><?= e($pmaWan) ?></b>.</div>
     <?php if(!empty($doctor['problem'])): ?><div class="alert alert-warning mt-3 mb-0"><i class="fa-solid fa-triangle-exclamation me-2"></i><?= e((string)$doctor['problem']) ?></div><?php endif; ?>
   </section>
 
@@ -802,17 +802,17 @@ function ftp_scope_label_ui(string $scope, string $target = ''): string
 }
 
 function view_ftp(): void
-{ $rows=db()->query('SELECT * FROM ftp_accounts ORDER BY id DESC')->fetchAll(); $siteOptions=db()->query('SELECT domain FROM sites ORDER BY domain ASC')->fetchAll(); $gen=default_ftp_password(); $doctor=run_ctl_json_cached(['ftp-doctor-json'],8,30); $publicHost=(string)(($doctor['configured_public_ip']??'') ?: ($doctor['public_ip']??'') ?: current_public_ipv4() ?: host_name()); $lanHost=(string)(($doctor['server_ip']??'') ?: app_config('server_ip','')); $ftpHost=$publicHost; $ftpIssue=(string)($doctor['issue']??''); $ftpHint=(string)($doctor['hint']??''); ?>
+{ $rows=db()->query('SELECT * FROM ftp_accounts ORDER BY id DESC')->fetchAll(); $siteOptions=db()->query('SELECT domain FROM sites ORDER BY domain ASC')->fetchAll(); $gen=default_ftp_password(); $doctor=run_ctl_json_cached(['ftp-doctor-json'],8,30); $publicHost=(string)(($doctor['configured_public_ip']??'') ?: ($doctor['public_ip']??'') ?: current_public_ipv4() ?: host_name()); $lanHost=(string)(($doctor['server_ip']??'') ?: app_config('server_ip','')); $ftpHost=$publicHost; $ftpIssue=(string)($doctor['issue']??''); $ftpHint=(string)($doctor['hint']??''); $ftpServices=(array)($doctor['services']??[]); $ftpBothActive=(($ftpServices['lan']??'')==='active' && ($ftpServices['wan']??'')==='active'); ?>
 <div class="ftp-layout-v34 row g-4">
   <div class="col-lg-4">
     <div class="panel-card ftp-create-card">
       <div class="kicker"><i class="fa-solid fa-folder-tree me-2"></i>FTP</div>
       <h2>Аккаунты доступа</h2>
       <div class="status-grid compact-status mt-3">
-        <div><span>FTP-сервер</span><b class="<?= (($doctor['ftp_service']??'')==='active' || !empty($doctor['listen_21']))?'text-success':'text-danger' ?>"><?= e((string)(($doctor['ftp_service']??'') ?: 'runtime')) ?></b></div>
-        <div><span>порт 21</span><b class="<?= !empty($doctor['listen_21'])?'text-success':'text-danger' ?>"><?= !empty($doctor['listen_21'])?'слушает':'закрыт' ?></b></div>
-        <div><span>passive</span><b>40000-40100</b></div>
-        <div><span>движок</span><b>Hyper FTP</b></div>
+        <div><span>FTP-сервисы</span><b class="<?= $ftpBothActive?'text-success':'text-danger' ?>"><?= $ftpBothActive?'оба активны':'нужен ремонт' ?></b></div>
+        <div><span>LAN порт</span><b class="<?= !empty($doctor['listen_21'])?'text-success':'text-danger' ?>">21 / <?= !empty($doctor['listen_21'])?'слушает':'закрыт' ?></b></div>
+        <div><span>Internet порт</span><b class="<?= !empty($doctor['listen_2121'])?'text-success':'text-danger' ?>">2121 / <?= !empty($doctor['listen_2121'])?'слушает':'закрыт' ?></b></div>
+        <div><span>движок</span><b>vsftpd ×2</b></div>
       </div>
       <?php if($ftpIssue !== ''): ?><div class="ftp-health mt-3"><b><?= e($ftpIssue) ?></b><?php if($ftpHint !== ''): ?><span><?= e($ftpHint) ?></span><?php endif; ?></div><?php endif; ?>
       <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_ftp">
@@ -837,12 +837,12 @@ function view_ftp(): void
   </div>
   <div class="col-lg-8">
     <div class="panel-card mb-3 ftp-connection-card">
-      <div class="connection-line"><span>FileZilla</span><code>FTP <?= e($ftpHost) ?> : 21</code><b>Plain + Passive</b></div>
-      <div class="connection-line"><span>LAN</span><code>FTP <?= e($lanHost ?: '192.168.x.x') ?> : 21</code><b>для локальной сети</b></div>
+      <div class="connection-line"><span>Internet</span><code>FTP <?= e($ftpHost) ?> : 2121</code><b>PASV 40100-40120</b></div>
+      <div class="connection-line"><span>LAN</span><code>FTP <?= e($lanHost ?: '192.168.x.x') ?> : 21</code><b>PASV 40000-40020</b></div>
       <div class="ftp-connect-grid mt-3">
-        <div><span>Из интернета</span><code><?= e($publicHost) ?></code></div>
-        <div><span>В локальной сети</span><code><?= e($lanHost ?: $publicHost) ?></code></div>
-        <div><span>Шифрование</span><code>Обычный FTP</code></div>
+        <div><span>Из интернета</span><code><?= e($publicHost) ?>:2121</code></div>
+        <div><span>В локальной сети</span><code><?= e($lanHost ?: $publicHost) ?>:21</code></div>
+        <div><span>Шифрование</span><code>Explicit TLS или Plain</code></div>
         <div><span>Режим</span><code>Пассивный</code></div>
       </div>
     </div>
@@ -850,15 +850,15 @@ function view_ftp(): void
       <?php foreach($rows as $r): $cardHost=$publicHost; $scope=ftp_scope_clean((string)($r['access_scope']??'all')); $target=(string)($r['access_target']??''); $scopeLabel=ftp_scope_label_ui($scope,$target); ?>
         <div class="col-md-6"><div class="ftp-card ftp-card-v25">
           <h3><i class="fa-solid fa-user-lock me-2"></i><?= e($r['username']) ?></h3>
-          <div class="cred"><span>Хост</span><code><?= e($cardHost) ?></code></div>
-          <div class="cred"><span>Локальный хост</span><code><?= e($lanHost ?: $cardHost) ?></code></div>
-          <div class="cred"><span>Порт</span><code>21</code></div>
+          <div class="cred"><span>Internet</span><code><?= e($cardHost) ?>:2121</code></div>
+          <div class="cred"><span>LAN</span><code><?= e($lanHost ?: $cardHost) ?>:21</code></div>
+          <div class="cred"><span>Passive</span><code>Internet 40100-40120 / LAN 40000-40020</code></div>
           <div class="cred"><span>FTP-логин</span><code><?= e($r['username']) ?></code></div>
           <div class="cred"><span>Пароль</span><code><?= e($r['password_plain']?:'задать новый') ?></code></div>
           <div class="cred"><span>Открывает</span><code><?= e($scopeLabel) ?></code></div>
-          <div class="ftp-tags"><span>Plain FTP</span><span>Passive</span><span><?= e($scopeLabel) ?></span></div>
+          <div class="ftp-tags"><span>TLS/Plain FTP</span><span>Passive</span><span><?= e($scopeLabel) ?></span></div>
           <div class="d-flex gap-2 mt-3 flex-wrap">
-            <button class="btn btn-sm btn-light" onclick="copyText('Protocol: FTP\nHost: <?= e($cardHost) ?>\nPort: 21\nEncryption: Only use plain FTP\nTransfer mode: Passive\nLogin: <?= e($r['username']) ?>\nPassword: <?= e($r['password_plain']) ?>')">Копировать</button>
+            <button class="btn btn-sm btn-light" onclick="copyText('Protocol: FTP\nHost: <?= e($cardHost) ?>\nPort: 2121\nEncryption: Use explicit FTP over TLS if available\nTransfer mode: Passive\nLogin: <?= e($r['username']) ?>\nPassword: <?= e($r['password_plain']) ?>')">Копировать</button>
             <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#ftp<?= (int)$r['id'] ?>">Пароль</button>
             <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="repair_ftp_account"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-soft">Восстановить</button></form>
             <form method="post" onsubmit="return confirm('Удалить FTP?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_ftp"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-danger">Удалить</button></form>

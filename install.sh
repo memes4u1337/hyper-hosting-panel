@@ -14,7 +14,6 @@ DNS_DIR="/etc/bind/hyper-host-zones"
 CONF_DIR="/etc/hyper-host"
 CONTROL_BIN="/usr/local/sbin/hyper-host-ctl"
 HYPER_BIN="/usr/local/bin/hyper"
-HYPER_FTP_BIN="/usr/local/sbin/hyper-host-ftp-server"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FIXED_SERVER_IP="192.168.0.179"
 FIXED_PUBLIC_IP="90.189.208.25"
@@ -240,7 +239,7 @@ apt-get install -y \
   ca-certificates curl git unzip rsync sudo openssl ufw software-properties-common apt-transport-https lsb-release \
   nginx mariadb-server \
   php-fpm php-cli php-sqlite3 php-mysql php-curl php-mbstring php-xml php-zip php-gd \
-  vsftpd openssh-server certbot python3-certbot-nginx python3 python3-venv python3-pip acl cron bind9 dnsutils whois db-util
+  vsftpd db-util libpam-modules miniupnpc openssh-server certbot python3-certbot-nginx python3 python3-venv python3-pip acl cron bind9 dnsutils whois db-util
 
 install_php_versions
 
@@ -272,12 +271,11 @@ rsync -a --delete "$PROJECT_DIR/src/" "$PANEL_DIR/"
 rsync -a --delete "$PROJECT_DIR/templates/" "$BASE_DIR/templates/"
 install -m 0755 "$PROJECT_DIR/scripts/hhctl" "$CONTROL_BIN"
 install -m 0755 "$PROJECT_DIR/scripts/hyper" "$HYPER_BIN"
-install -m 0755 "$PROJECT_DIR/scripts/hyper_ftp_server.py" "$HYPER_FTP_BIN"
 # v23: делаем CLI доступным для панели, PM2-ботов и обычной shell-среды.
 # Некоторые окружения/боты ищут hyper в /usr/local/bin или /usr/bin.
 ln -sf "$HYPER_BIN" /usr/bin/hyper 2>/dev/null || true
 ln -sf "$CONTROL_BIN" /usr/bin/hyper-host-ctl 2>/dev/null || true
-chmod 0755 "$CONTROL_BIN" "$HYPER_BIN" "$HYPER_FTP_BIN" /usr/bin/hyper /usr/bin/hyper-host-ctl 2>/dev/null || true
+chmod 0755 "$CONTROL_BIN" "$HYPER_BIN" /usr/bin/hyper /usr/bin/hyper-host-ctl 2>/dev/null || true
 
 log "Создание конфигурации HYPER-HOST..."
 cat > "$CONF_DIR/hyper-host.conf" <<EOCONF
@@ -438,70 +436,16 @@ nginx -t
 systemctl enable nginx >/dev/null 2>&1 || true
 systemctl reload nginx
 
-log "Настройка FTP..."
-FTP_USER_CONF_DIR="$BASE_DIR/ftp/user_conf"
-FTP_AUTH_TXT="$BASE_DIR/data/vsftpd_virtual_users.txt"
-FTP_GUEST_USER="www-data"
-mkdir -p "$FTP_DIR" "$BASE_DIR/data" "$BASE_DIR/ftp" "$FTP_USER_CONF_DIR" "$BASE_DIR/run" /var/log
-[[ -f "$FTP_AUTH_TXT" ]] || touch "$FTP_AUTH_TXT"
-chmod 0600 "$FTP_AUTH_TXT" 2>/dev/null || true
-chmod 0755 "$FTP_DIR" "$FTP_USER_CONF_DIR" 2>/dev/null || true
-
-# v44: FTP обслуживает встроенный HYPER-HOST FTP server.
-# Он не использует /etc/passwd, /etc/fstab, PAM, useradd и не зависит от vsftpd.
-# v45: mask, а не только stop/disable — иначе случайный "systemctl restart vsftpd"
-# в чьём-нибудь deploy-скрипте снова поднимет vsftpd на порту 21 и он будет драться
-# за порт с hyper-host-ftp.service.
-systemctl stop vsftpd >/dev/null 2>&1 || true
-systemctl disable vsftpd >/dev/null 2>&1 || true
-systemctl mask vsftpd >/dev/null 2>&1 || true
-
-start_hyper_ftp_runtime_install() {
-  pkill -f "hyper_ftp_server.py|hyper-host-ftp-server" >/dev/null 2>&1 || true
-  nohup "$HYPER_FTP_BIN" --host 0.0.0.0 --port 21 --passive-min 40000 --passive-max 40100 >>/var/log/hyper-host-ftp.log 2>&1 &
-  echo $! > "$BASE_DIR/run/hyper-host-ftp.pid" 2>/dev/null || true
-}
-
-if [[ -d /etc/systemd/system && -w /etc/systemd/system ]]; then
-  cat > /tmp/hyper-host-ftp.service.$$ <<EOSVC
-[Unit]
-Description=HYPER-HOST FTP server
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-Environment=HYPER_HOST_CONF=$CONF_DIR/hyper-host.conf
-ExecStart=$HYPER_FTP_BIN --host 0.0.0.0 --port 21 --passive-min 40000 --passive-max 40100
-Restart=always
-RestartSec=2
-LimitNOFILE=65535
-
-[Install]
-WantedBy=multi-user.target
-EOSVC
-  if cat /tmp/hyper-host-ftp.service.$$ > /etc/systemd/system/hyper-host-ftp.service 2>/dev/null; then
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl enable hyper-host-ftp.service >/dev/null 2>&1 || true
-    systemctl restart hyper-host-ftp.service >/dev/null 2>&1 || true
-  else
-    start_hyper_ftp_runtime_install
-  fi
-  rm -f /tmp/hyper-host-ftp.service.$$ 2>/dev/null || true
-else
-  start_hyper_ftp_runtime_install
-fi
-
-sleep 1
-if ! ss -ltn 2>/dev/null | grep -q ':21 '; then
-  start_hyper_ftp_runtime_install
-  sleep 1
-fi
-
-ufw allow 21/tcp >/dev/null 2>&1 || true
-ufw allow 40000:40100/tcp >/dev/null 2>&1 || true
-iptables -C INPUT -p tcp --dport 21 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 21 -j ACCEPT 2>/dev/null || true
-iptables -C INPUT -p tcp --match multiport --dports 40000:40100 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --match multiport --dports 40000:40100 -j ACCEPT 2>/dev/null || true
+log "Настройка FTP через стандартный vsftpd..."
+# v53: старый самописный FTP отключается. Управление пользователями остаётся в панели,
+# а сетевой протокол, TLS и passive mode обслуживает проверенный vsftpd.
+systemctl stop hyper-host-ftp.service >/dev/null 2>&1 || true
+systemctl disable hyper-host-ftp.service >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/hyper-host-ftp.service
+pkill -f "hyper_ftp_server.py|hyper-host-ftp-server" >/dev/null 2>&1 || true
+systemctl unmask vsftpd >/dev/null 2>&1 || true
+systemctl daemon-reload >/dev/null 2>&1 || true
+"$CONTROL_BIN" ftp-fix
 
 systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1 || true
 systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1 || true
@@ -574,18 +518,8 @@ systemctl restart "php${PHP_VER}-fpm" 2>/dev/null || systemctl restart php-fpm 2
 systemctl enable cron >/dev/null 2>&1 || true
 systemctl restart cron 2>/dev/null || true
 
-# v47: у многих домашних провайдеров публичный IP не статичный (меняется при
-# переподключении/перезагрузке роутера). Без этого вотчера при смене IP FTP и DNS
-# продолжали бы рекламировать старый, недоступный извне адрес. Проверяем раз в 5 минут.
-{
-cat > /etc/cron.d/hyper-host-ip-watch <<EOIPWATCH
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-*/5 * * * * root /usr/local/sbin/hyper-host-ctl ip-autofix --quiet >/var/log/hyper-host-ip-watch.log 2>&1
-EOIPWATCH
-} 2>/dev/null || warn "Не удалось поставить cron для автообновления IP (read-only /etc/cron.d?) — при смене IP чини вручную: sudo hyper network ip-fix"
-chmod 0644 /etc/cron.d/hyper-host-ip-watch 2>/dev/null || true
-systemctl reload cron 2>/dev/null || true
+# v53: IP фиксирован вручную; сторонний автоопределитель и cron-watch не используются.
+rm -f /etc/cron.d/hyper-host-ip-watch /var/log/hyper-host-ip-watch.log 2>/dev/null || true
 
 log "Настройка firewall..."
 ufw allow OpenSSH >/dev/null 2>&1 || true
@@ -594,10 +528,14 @@ ufw allow 443/tcp >/dev/null 2>&1 || true
 ufw allow 53/tcp >/dev/null 2>&1 || true
 ufw allow 53/udp >/dev/null 2>&1 || true
 ufw allow 21/tcp >/dev/null 2>&1 || true
-ufw allow 40000:40100/tcp >/dev/null 2>&1 || true
+ufw allow 2121/tcp >/dev/null 2>&1 || true
+ufw allow 40000:40020/tcp >/dev/null 2>&1 || true
+ufw allow 40100:40120/tcp >/dev/null 2>&1 || true
 if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
   firewall-cmd --permanent --add-port=21/tcp >/dev/null 2>&1 || true
-  firewall-cmd --permanent --add-port=40000-40100/tcp >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-port=2121/tcp >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-port=40000-40020/tcp >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-port=40100-40120/tcp >/dev/null 2>&1 || true
   firewall-cmd --permanent --add-port=53/tcp >/dev/null 2>&1 || true
   firewall-cmd --permanent --add-port=53/udp >/dev/null 2>&1 || true
   firewall-cmd --permanent --add-port=80/tcp >/dev/null 2>&1 || true
@@ -607,8 +545,9 @@ fi
 if command -v nft >/dev/null 2>&1; then
   nft add table inet hyper_host 2>/dev/null || true
   nft 'add chain inet hyper_host input { type filter hook input priority -100; policy accept; }' 2>/dev/null || true
-  nft add rule inet hyper_host input tcp dport '{ 21, 22, 53, 80, 443 }' accept 2>/dev/null || true
-  nft add rule inet hyper_host input tcp dport 40000-40100 accept 2>/dev/null || true
+  nft add rule inet hyper_host input tcp dport '{ 21, 2121, 22, 53, 80, 443 }' accept 2>/dev/null || true
+  nft add rule inet hyper_host input tcp dport 40000-40020 accept 2>/dev/null || true
+  nft add rule inet hyper_host input tcp dport 40100-40120 accept 2>/dev/null || true
   nft add rule inet hyper_host input udp dport 53 accept 2>/dev/null || true
 fi
 # В этой сборке внешний SQL включён по запросу пользователя; доступ всё равно ограничивается MySQL-аккаунтами и паролями.
@@ -620,7 +559,7 @@ log "Финальный ремонт прав и сервисов..."
 /usr/local/sbin/hyper-host-ctl ip-detect --apply >/dev/null 2>&1 || true
 /usr/local/sbin/hyper-host-ctl mysql-external enable >/dev/null 2>&1 || warn "Внешний MySQL не включился автоматически: sudo hyper db external enable"
 /usr/local/sbin/hyper-host-ctl phpmyadmin-fix >/dev/null 2>&1 || true
-/usr/local/sbin/hyper-host-ctl ftp-fix >/dev/null 2>&1 || true
+/usr/local/sbin/hyper-host-ctl connectivity-fix >/dev/null 2>&1 || warn "Connectivity fix не выполнился полностью: sudo hyper connectivity fix"
 /usr/local/sbin/hyper-host-ctl network-fix "${PANEL_DOMAIN}" "${PUBLIC_IP}" >/dev/null 2>&1 || true
 
 log "Проверка панели..."
@@ -647,7 +586,7 @@ cat <<EOF_DONE
  SQL LAN:      ${SERVER_IP}:3306
  SQL Internet: ${PUBLIC_IP:-не определён}:3306
  FTP LAN:      ${SERVER_IP}:21
- FTP Internet: ${PUBLIC_IP:-не определён}:21
+ FTP Internet: ${PUBLIC_IP:-не определён}:2121
 
  Проверка: sudo hyper ip
  ВАЖНО: сохрани пароль сейчас.
