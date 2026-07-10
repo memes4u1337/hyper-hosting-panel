@@ -3359,6 +3359,8 @@ write_proftpd_config() {
   chmod 0640 "$PROFTPD_LOG_DIR"/*.log 2>/dev/null || true
   cat > "$PROFTPD_CONFIG" <<EOPROFTPD
 ${module_lines}
+# Минимальный конфиг без необязательных mod_ident/mod_wtmp директив.
+# Подходит для пакетной сборки ProFTPD Ubuntu 22.04.
 ServerName                      "HYPER-HOST FTPS"
 ServerIdent                     on "HYPER-HOST FTPS"
 ServerType                      standalone
@@ -3370,15 +3372,9 @@ Group                           ${group}
 Umask                           022
 MaxInstances                    128
 MaxClients                      100
-MaxClientsPerHost               16
 MaxLoginAttempts                5
 UseReverseDNS                   off
-IdentLookups                    off
-WtmpLog                         off
 RequireValidShell               off
-UseFtpUsers                     off
-RootLogin                       off
-PersistentPasswd                off
 AuthOrder                       mod_auth_file.c
 AuthUserFile                    ${PROFTPD_PASSWD}
 AuthGroupFile                   ${PROFTPD_GROUP}
@@ -3391,7 +3387,6 @@ DeleteAbortedStores             on
 UseSendfile                     off
 PassivePorts                    ${FTP_PASV_MIN} ${FTP_PASV_MAX}
 MasqueradeAddress               ${FIXED_PUBLIC_IP}
-AllowForeignAddress             off
 TimeoutLogin                    60
 TimeoutNoTransfer               300
 TimeoutStalled                  300
@@ -3406,7 +3401,6 @@ TLSRequired                     on
 TLSProtocol                     TLSv1.2
 TLSOptions                      NoSessionReuseRequired
 TLSVerifyClient                 off
-TLSRenegotiate                  none
 TLSRSACertificateFile           ${tls_cert}
 TLSRSACertificateKeyFile        ${tls_key}
 TLSLog                          ${PROFTPD_LOG_DIR}/tls.log
@@ -3418,6 +3412,10 @@ EOPROFTPD
   chmod 0600 "$PROFTPD_CONFIG"
   "$PROFTPD_BIN" -t -c "$PROFTPD_CONFIG" >/dev/null 2>&1 || {
     "$PROFTPD_BIN" -t -c "$PROFTPD_CONFIG" >&2 || true
+    printf '%s\n' '--- ProFTPD compiled modules ---' >&2
+    "$PROFTPD_BIN" -l >&2 2>/dev/null || true
+    printf '%s\n' '--- Generated config ---' >&2
+    nl -ba "$PROFTPD_CONFIG" >&2 2>/dev/null || true
     err "Конфиг ProFTPD не прошёл проверку"
   }
 }
