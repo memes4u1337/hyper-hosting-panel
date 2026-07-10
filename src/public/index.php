@@ -61,14 +61,9 @@ function default_ftp_password(): string { return 'Hh-' . bin2hex(random_bytes(5)
 function default_db_password(): string { return 'Db-' . bin2hex(random_bytes(6)) . '!'; }
 function current_public_ipv4(): string
 {
-    $info = runtime_ip_info();
-    $detected = trim((string)($info['external_ip'] ?? ''));
-    if ($detected !== '' && filter_var($detected, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) return $detected;
-    $ip = trim(setting_get('public_ip_override', (string)app_config('public_ip', '')));
-    if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) return $ip;
-    $host = host_name();
-    return filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) ? $host : '';
+    return '90.189.208.25';
 }
+
 function dns_panel_label(string $value): string
 {
     $value = strtolower(trim($value));
@@ -242,17 +237,17 @@ function handle_post(string $action): void
             case 'backup_run': { $target=(string)($_POST['target']??'all'); $res=run_ctl(['backup-run',$target],600); if($res['code']!==0) throw new RuntimeException($res['output']); add_event('backup',$res['output']); flash($res['output'],'success'); redirect('/?page=backups'); }
             case 'backup_job': { $name=trim((string)($_POST['name']??'')); $schedule=trim((string)($_POST['schedule']??'')); $target=(string)($_POST['target']??'all'); if(!is_valid_name($name)||$schedule==='') throw new RuntimeException('Неверные данные backup'); db()->prepare('INSERT INTO backup_jobs(name,target,schedule,enabled) VALUES(?,?,?,1) ON CONFLICT(name) DO UPDATE SET target=excluded.target,schedule=excluded.schedule,enabled=1')->execute([$name,$target,$schedule]); $res=run_ctl(['backup-schedule',$name,$schedule,$target],120); if($res['code']!==0) throw new RuntimeException($res['output']); redirect('/?page=backups'); }
             case 'delete_backup_job': { $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM backup_jobs WHERE id=?'); $st->execute([$id]); $j=$st->fetch(); if($j){ run_ctl(['backup-delete-schedule',$j['name']],60); db()->prepare('DELETE FROM backup_jobs WHERE id=?')->execute([$id]); } redirect('/?page=backups'); }
-            case 'network_fix': { $domain=strtolower(trim((string)($_POST['domain']??''))); $ip=trim((string)($_POST['public_ip']??'')); if($domain!=='' && !is_valid_domain($domain)) throw new RuntimeException('Неверный домен'); if($ip!=='' && !filter_var($ip,FILTER_VALIDATE_IP,FILTER_FLAG_IPV4)) throw new RuntimeException('Неверный IP'); hh_clear_cache(); $res=run_ctl(['network-fix',$domain,$ip],180); if($res['code']!==0) throw new RuntimeException($res['output']); if($ip!=='') setting_set('public_ip_override',$ip); flash('Сеть исправлена: nginx слушает все IP, firewall открыт, DNS/ACME подготовлены','success'); redirect('/?page=network'); }
-            case 'detect_ip': { hh_clear_cache(); $res=run_ctl(['ip-detect','--apply'],180); if($res['code']!==0) throw new RuntimeException($res['output']); hh_clear_cache(); flash('IP автоматически определены и применены к FTP, MySQL и phpMyAdmin','success'); redirect('/?page=network'); }
+            case 'network_fix': { $domain=strtolower(trim((string)($_POST['domain']??''))); $ip='90.189.208.25'; if($domain!=='' && !is_valid_domain($domain)) throw new RuntimeException('Неверный домен'); hh_clear_cache(); $res=run_ctl(['network-fix',$domain,$ip],180); if($res['code']!==0) throw new RuntimeException($res['output']); setting_set('public_ip_override',$ip); flash('Сеть исправлена: LAN 192.168.0.179, WAN 90.189.208.25','success'); redirect('/?page=network'); }
+            case 'detect_ip': { hh_clear_cache(); $res=run_ctl(['ip-detect','--apply'],180); if($res['code']!==0) throw new RuntimeException($res['output']); hh_clear_cache(); setting_set('public_ip_override','90.189.208.25'); flash('Фиксированные IP применены: LAN 192.168.0.179, WAN 90.189.208.25','success'); redirect('/?page=network'); }
             case 'access_fix': { hh_clear_cache(); $res=run_ctl(['access-fix'],180); if($res['code']!==0) throw new RuntimeException($res['output']); flash('Доступ с других ПК включён на Ubuntu. Роутер всё равно нужно пробросить вручную.','success'); redirect('/?page=access'); }
             case 'disk_expand': { hh_clear_cache(); $res=run_ctl(['disk-expand'],600); if($res['code']!==0) throw new RuntimeException($res['output']); flash('Диск расширен. Проверь новый размер root-раздела.','success'); redirect('/?page=disk'); }
                         case 'save_panel_domain': { $domain=strtolower(trim((string)($_POST['panel_domain']??''))); if(!is_valid_domain($domain)) throw new RuntimeException('Неверный домен панели'); $res=run_ctl(['panel-domain','set',$domain],120); if($res['code']!==0) throw new RuntimeException($res['output']); setting_set('panel_domain_override',$domain); hh_clear_cache(); flash('Домен панели сохранён: '.$domain,'success'); redirect('/?page=network'); }
             case 'dns_wizard': {
                 $domain=strtolower(trim((string)($_POST['domain']??'')));
-                $ip=trim((string)($_POST['public_ip']??''));
+                $ip='90.189.208.25';
                 $panel=dns_panel_label((string)($_POST['panel_subdomain']??'panel'));
                 if(!is_valid_domain($domain)) throw new RuntimeException('Неверный домен');
-                if($ip==='' ) $ip=current_public_ipv4();
+                
                 if($ip==='' || !filter_var($ip,FILTER_VALIDATE_IP,FILTER_FLAG_IPV4)) throw new RuntimeException('Укажи публичный IPv4 для DNS');
                 // v46: используем общие NS-серверы панели (ns1/ns2.<домен панели>) для любого
                 // нового домена, если домен панели настроен и отличается от переносимого домена.
@@ -275,7 +270,7 @@ function handle_post(string $action): void
             case 'delete_dns_record': { $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT z.domain FROM dns_records r JOIN dns_zones z ON z.id=r.zone_id WHERE r.id=?'); $st->execute([$id]); $z=$st->fetch(); db()->prepare('DELETE FROM dns_records WHERE id=?')->execute([$id]); if($z) dns_apply_zone((string)$z['domain']); redirect('/?page=dns'); }
             case 'delete_dns_zone': { $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM dns_zones WHERE id=?'); $st->execute([$id]); $z=$st->fetch(); if($z){ run_ctl(['dns-delete',$z['domain']],60); db()->prepare('DELETE FROM dns_zones WHERE id=?')->execute([$id]); } redirect('/?page=dns'); }
             case 'ssl_renew_all': { hh_clear_cache(); $res=run_ctl(['ssl-renew-all'],300); if($res['code']!==0) throw new RuntimeException($res['output']); hh_clear_cache(); flash('SSL автопродление проверено','success'); redirect('/?page=ssl'); }
-            case 'save_public_ip': { $ip=trim((string)($_POST['public_ip']??'')); if($ip!=='' && !filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) throw new RuntimeException('Неверный публичный IPv4'); $res=$ip===''?run_ctl(['public-ip','clear'],60):run_ctl(['public-ip','set',$ip],60); if($res['code']!==0) throw new RuntimeException($res['output']); setting_set('public_ip_override',$ip); hh_clear_cache(); flash($ip===''?'Публичный IP сброшен':'Публичный IP сохранён: '.$ip,'success'); redirect('/?page=ssl'); }
+            case 'save_public_ip': { $ip='90.189.208.25'; $res=run_ctl(['public-ip','set',$ip],60); if($res['code']!==0) throw new RuntimeException($res['output']); setting_set('public_ip_override',$ip); hh_clear_cache(); flash('Зафиксирован публичный IP: '.$ip,'success'); redirect('/?page=ssl'); }
             case 'set_site_php': { $id=(int)($_POST['id']??0); $ver=(string)($_POST['php_version']??''); $st=db()->prepare('SELECT * FROM sites WHERE id=?'); $st->execute([$id]); $s=$st->fetch(); if(!$s) throw new RuntimeException('Сайт не найден'); $res=run_ctl(['site-php',$s['domain'],$ver],180); if($res['code']!==0) throw new RuntimeException($res['output']); db()->prepare('UPDATE sites SET php_version=? WHERE id=?')->execute([$ver,$id]); hh_clear_cache(); flash('PHP для '.$s['domain'].' сохранён: '.$ver, 'success'); redirect('/?page=php'); }
             case 'create_cron': { $name=trim((string)($_POST['name']??'')); $schedule=trim((string)($_POST['schedule']??'')); $cmd=trim((string)($_POST['command']??'')); if(!is_valid_name($name)||$schedule===''||$cmd==='') throw new RuntimeException('Неверные данные cron'); db()->prepare('INSERT INTO cron_tasks(name,schedule,command,enabled) VALUES(?,?,?,1) ON CONFLICT(name) DO UPDATE SET schedule=excluded.schedule,command=excluded.command,enabled=1')->execute([$name,$schedule,$cmd]); $res=run_ctl(['cron-set',$name,$schedule,$cmd],60); if($res['code']!==0) throw new RuntimeException($res['output']); redirect('/?page=cron'); }
             case 'delete_cron': { $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM cron_tasks WHERE id=?'); $st->execute([$id]); $c=$st->fetch(); if($c){ run_ctl(['cron-delete',$c['name']],60); db()->prepare('DELETE FROM cron_tasks WHERE id=?')->execute([$id]); } redirect('/?page=cron'); }
@@ -642,6 +637,8 @@ function view_databases(): void
     $gen=default_db_password();
     $external=setting_get('mysql_external','0')==='1' || (($mysql['bind_address']??'')==='0.0.0.0');
     $pma=phpmyadmin_url();
+    $pmaLan='http://192.168.0.179/phpmyadmin/';
+    $pmaWan='http://90.189.208.25/phpmyadmin/';
     $mysqlExternalHost=(string)($mysql['external_host']??mysql_external_host());
     $mysqlLocalHost=mysql_local_host();
     $mysqlLanHost=(string)($mysql['lan_host']??mysql_lan_host());
@@ -671,7 +668,7 @@ function view_databases(): void
       <div><span>Импорт</span><b><?= e((string)($pmaStatus['upload_max_filesize']??'1024M')) ?></b></div>
       <div><span>Экспорт</span><b><?= e((string)($pmaStatus['memory_limit']??'1024M')) ?></b></div>
     </div>
-    <div class="alert alert-info mt-3 mb-0"><i class="fa-solid fa-circle-info me-2"></i>phpMyAdmin открывается по адресу <b><?= e($pma) ?></b>, а для внешней программы SQL host: <b><?= e($mysqlExternalHost) ?>:3306</b>. Внутри сервера используется <b>127.0.0.1:3306</b>.</div>
+    <div class="alert alert-info mt-3 mb-0"><i class="fa-solid fa-circle-info me-2"></i>phpMyAdmin LAN: <b><?= e($pmaLan) ?></b> · phpMyAdmin Internet: <b><?= e($pmaWan) ?></b> · внешний SQL: <b><?= e($mysqlExternalHost) ?>:3306</b> · локальный SQL: <b>127.0.0.1:3306</b>.</div>
     <?php if(!empty($doctor['problem'])): ?><div class="alert alert-warning mt-3 mb-0"><i class="fa-solid fa-triangle-exclamation me-2"></i><?= e((string)$doctor['problem']) ?></div><?php endif; ?>
   </section>
 
@@ -1016,7 +1013,7 @@ function view_dns(): void {
     </div>
     <form method="post" class="dns-create-form"><?= csrf_field() ?><input type="hidden" name="action" value="dns_wizard">
       <input class="form-control" name="domain" placeholder="mystockbot.xyz" required>
-      <input class="form-control" name="public_ip" value="<?= e($pub) ?>" placeholder="90.189.208.25">
+      <input class="form-control" name="public_ip" value="<?= e($pub) ?>" readonly>
       <input class="form-control" name="panel_subdomain" value="panel" placeholder="panel">
       <button class="btn btn-primary"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Создать зону</button>
     </form>
@@ -1087,8 +1084,8 @@ function view_network(): void {
 ?>
 <div class="row g-4 network-page-v40">
   <div class="col-xxl-4"><div class="panel-card hero-mini"><div class="kicker"><i class="fa-solid fa-tower-broadcast me-2"></i>Сеть</div><h2>Доступ и домен</h2>
-    <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="network_fix"><input class="form-control" name="domain" value="<?= e($domain) ?>" placeholder="mystockbot.xyz"><input class="form-control" name="public_ip" value="<?= e($pub) ?>" placeholder="определяется автоматически"><button class="btn btn-primary btn-lg"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Исправить сеть</button></form>
-    <form method="post" class="mt-2"><?= csrf_field() ?><input type="hidden" name="action" value="detect_ip"><button class="btn btn-soft w-100"><i class="fa-solid fa-arrows-rotate me-2"></i>Автоопределить IP и применить</button></form>
+    <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="network_fix"><input class="form-control" name="domain" value="<?= e($domain) ?>" placeholder="mystockbot.xyz"><input class="form-control" name="public_ip" value="<?= e($pub) ?>" readonly><button class="btn btn-primary btn-lg"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Исправить сеть</button></form>
+    <form method="post" class="mt-2"><?= csrf_field() ?><input type="hidden" name="action" value="detect_ip"><button class="btn btn-soft w-100"><i class="fa-solid fa-thumbtack me-2"></i>Применить фиксированные IP</button></form>
     <form method="post" class="vstack gap-2 mt-4"><?= csrf_field() ?><input type="hidden" name="action" value="save_panel_domain"><label class="form-label">Домен панели</label><input class="form-control" name="panel_domain" value="<?= e(setting_get('panel_domain_override', (string)app_config('panel_domain', ''))) ?>" placeholder="panel.hyper-host.pw"><button class="btn btn-soft"><i class="fa-solid fa-link me-2"></i>Сохранить</button></form>
   </div></div>
   <div class="col-xxl-8"><div class="panel-card"><h2>Диагностика</h2>
@@ -1127,7 +1124,7 @@ function view_ssl(): void {
   <div class="ssl-hero-actions">
     <form method="post" class="d-flex gap-2 flex-wrap">
       <?= csrf_field() ?><input type="hidden" name="action" value="save_public_ip">
-      <input class="form-control public-ip-input" name="public_ip" value="<?= e($savedPublicIp) ?>" placeholder="90.189.208.25">
+      <input class="form-control public-ip-input" name="public_ip" value="<?= e($savedPublicIp) ?>" readonly>
       <button class="btn btn-soft"><i class="fa-solid fa-floppy-disk me-2"></i>IP</button>
     </form>
     <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_renew_all"><button class="btn btn-primary"><i class="fa-solid fa-arrows-rotate me-2"></i>Автопродление</button></form>
@@ -1224,5 +1221,5 @@ function view_disk(): void
 <div class="row g-4"><div class="col-xl-5"><div class="panel-card"><h2><i class="fa-solid fa-hard-drive me-2"></i>Диск и LVM</h2><div class="network-check-grid mb-3"><div class="network-check"><span>Root</span><b><?= e((string)($j['root_total']??'')) ?></b></div><div class="network-check"><span>Свободно</span><b><?= e((string)($j['root_free']??'')) ?></b></div><div class="network-check"><span>VG</span><b><?= e((string)($j['root_vg']??'—')) ?></b></div></div><form method="post" onsubmit="return confirm('Расширить root LVM на всё свободное место диска?')"><?= csrf_field() ?><input type="hidden" name="action" value="disk_expand"><button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-up-right-and-down-left-from-center me-2"></i>Расширить диск автоматически</button></form><div class="mt-3 vstack gap-2"><button class="cmd-copy" type="button" data-copy="sudo hyper disk doctor"><i class="fa-regular fa-copy"></i><code>sudo hyper disk doctor</code></button><button class="cmd-copy" type="button" data-copy="sudo hyper disk expand"><i class="fa-regular fa-copy"></i><code>sudo hyper disk expand</code></button></div></div></div><div class="col-xl-7"><div class="panel-card"><h2>Диагностика</h2><pre class="logs"><?= e(json_encode($j, JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT)) ?></pre></div></div></div><?php }
 
 function view_settings(): void { $dbStatus=db_writable_status(); ?>
-<div class="row g-4"><div class="col-lg-6"><div class="panel-card"><h2>Ремонт панели</h2><form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="repair_panel"><button class="btn btn-primary">Починить права и сервисы</button></form><form method="post" class="d-inline ms-2"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft">Синхронизировать</button></form><hr><form method="post" class="row g-2"><?= csrf_field() ?><input type="hidden" name="action" value="save_public_ip"><div class="col-8"><input class="form-control" name="public_ip" value="<?= e(setting_get('public_ip_override', (string)app_config('public_ip',''))) ?>" placeholder="Публичный IP"></div><div class="col-4"><button class="btn btn-soft w-100">Сохранить IP</button></div></form></div></div><div class="col-lg-6"><div class="panel-card"><h2>Сменить пароль</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="change_password"><input class="form-control" type="password" name="current_password" placeholder="Текущий пароль" required><input class="form-control" type="password" name="new_password" placeholder="Новый пароль" minlength="10" required><button class="btn btn-primary">Сменить пароль</button></form></div></div><div class="col-12"><div class="panel-card"><h2>Системные пути</h2><div class="hardware-grid"><div><span>SQLite</span><b><?= e($dbStatus['file_writable']?'writable':'not writable') ?></b></div><div><span>Панель</span><b><?= e((string)app_config('panel_dir')) ?></b></div><div><span>Сайты</span><b><?= e((string)app_config('sites_dir')) ?></b></div><div><span>FTP</span><b><?= e((string)app_config('ftp_dir','/var/www/hyper-host-ftp')) ?></b></div><div><span>Боты</span><b><?= e((string)app_config('bots_dir')) ?></b></div></div></div></div></div><?php }
+<div class="row g-4"><div class="col-lg-6"><div class="panel-card"><h2>Ремонт панели</h2><form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="repair_panel"><button class="btn btn-primary">Починить права и сервисы</button></form><form method="post" class="d-inline ms-2"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft">Синхронизировать</button></form><hr><form method="post" class="row g-2"><?= csrf_field() ?><input type="hidden" name="action" value="save_public_ip"><div class="col-8"><input class="form-control" name="public_ip" value="90.189.208.25" readonly></div><div class="col-4"><button class="btn btn-soft w-100">Сохранить IP</button></div></form></div></div><div class="col-lg-6"><div class="panel-card"><h2>Сменить пароль</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="change_password"><input class="form-control" type="password" name="current_password" placeholder="Текущий пароль" required><input class="form-control" type="password" name="new_password" placeholder="Новый пароль" minlength="10" required><button class="btn btn-primary">Сменить пароль</button></form></div></div><div class="col-12"><div class="panel-card"><h2>Системные пути</h2><div class="hardware-grid"><div><span>SQLite</span><b><?= e($dbStatus['file_writable']?'writable':'not writable') ?></b></div><div><span>Панель</span><b><?= e((string)app_config('panel_dir')) ?></b></div><div><span>Сайты</span><b><?= e((string)app_config('sites_dir')) ?></b></div><div><span>FTP</span><b><?= e((string)app_config('ftp_dir','/var/www/hyper-host-ftp')) ?></b></div><div><span>Боты</span><b><?= e((string)app_config('bots_dir')) ?></b></div></div></div></div></div><?php }
 

@@ -444,25 +444,15 @@ function panel_host_for_connections(): string
 
 function mysql_external_host(): string
 {
-    $info = runtime_ip_info();
-    $external = trim((string)($info['external_ip'] ?? ''));
-    if ($external !== '') {
-        return $external;
-    }
-    $public = trim((string)app_config('public_ip', ''));
-    if ($public !== '') {
-        return $public;
-    }
-    $domain = trim((string)app_config('panel_domain', ''));
-    return ($domain !== '' && $domain !== '_') ? $domain : panel_host_for_connections();
+    return '90.189.208.25';
 }
+
 
 function mysql_lan_host(): string
 {
-    $info = runtime_ip_info();
-    $internal = trim((string)($info['internal_ip'] ?? ''));
-    return $internal !== '' ? $internal : (string)app_config('server_ip', '127.0.0.1');
+    return '192.168.0.179';
 }
+
 
 function mysql_local_host(): string
 {

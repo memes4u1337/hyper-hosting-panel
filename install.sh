@@ -16,6 +16,8 @@ CONTROL_BIN="/usr/local/sbin/hyper-host-ctl"
 HYPER_BIN="/usr/local/bin/hyper"
 HYPER_FTP_BIN="/usr/local/sbin/hyper-host-ftp-server"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FIXED_SERVER_IP="192.168.0.179"
+FIXED_PUBLIC_IP="90.189.208.25"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "[HYPER-HOST] Запусти установщик от root: sudo bash install.sh"
@@ -42,14 +44,10 @@ wait_for_dpkg_lock() {
 wait_for_dpkg_lock
 
 get_server_ip() {
-  local ip=""
-  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}' || true)"
-  if [[ -z "$ip" ]]; then
-    ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -Ev '^(127\.|169\.254\.)' | head -n1 || true)"
-  fi
-  [[ -n "$ip" ]] || ip="127.0.0.1"
-  echo "$ip"
+  # HYPER-HOST v52: сервер закреплён за постоянным LAN-IP.
+  echo "192.168.0.179"
 }
+
 
 valid_public_ipv4() {
   python3 - "$1" <<'PYIPVALID' >/dev/null 2>&1
@@ -63,21 +61,10 @@ PYIPVALID
 }
 
 get_public_ip() {
-  local ip="" url
-  for url in \
-    https://api.ipify.org \
-    https://checkip.amazonaws.com \
-    https://ipv4.icanhazip.com \
-    https://ifconfig.me/ip; do
-    ip="$(curl -4fsS --max-time 4 "$url" 2>/dev/null | tr -d '[:space:]' || true)"
-    valid_public_ipv4 "$ip" && { echo "$ip"; return 0; }
-  done
-  if command -v dig >/dev/null 2>&1; then
-    ip="$(dig +short -4 myip.opendns.com @resolver1.opendns.com 2>/dev/null | tail -n1 | tr -d '[:space:]' || true)"
-    valid_public_ipv4 "$ip" && { echo "$ip"; return 0; }
-  fi
-  return 1
+  # HYPER-HOST v52: статический белый IP, без сторонних сервисов определения.
+  echo "90.189.208.25"
 }
+
 
 # Preserve existing settings on updates. Older installers overwrote PANEL_DOMAIN/PUBLIC_IP
 # and panel.hyper-host.pw could become a normal site again after every update.
@@ -85,17 +72,12 @@ if [[ -f "$CONF_DIR/hyper-host.conf" ]]; then
   # shellcheck disable=SC1090
   source "$CONF_DIR/hyper-host.conf" || true
 fi
-CONFIGURED_SERVER_IP="${SERVER_IP:-}"
-CONFIGURED_PUBLIC_IP="${PUBLIC_IP:-${SERVER_PUBLIC_IP:-}}"
-PUBLIC_IP_MODE="${PUBLIC_IP_MODE:-auto}"
-SERVER_IP="${SERVER_IP_OVERRIDE:-$(get_server_ip)}"
-if [[ "$PUBLIC_IP_MODE" == "manual" ]] && valid_public_ipv4 "$CONFIGURED_PUBLIC_IP"; then
-  PUBLIC_IP="$CONFIGURED_PUBLIC_IP"
-else
-  PUBLIC_IP="$(get_public_ip 2>/dev/null || true)"
-  [[ -n "$PUBLIC_IP" ]] || PUBLIC_IP="$CONFIGURED_PUBLIC_IP"
-  PUBLIC_IP_MODE="auto"
-fi
+CONFIGURED_SERVER_IP="192.168.0.179"
+CONFIGURED_PUBLIC_IP="90.189.208.25"
+# v52: эти два адреса являются единственным источником правды.
+SERVER_IP="$FIXED_SERVER_IP"
+PUBLIC_IP="$FIXED_PUBLIC_IP"
+PUBLIC_IP_MODE="manual"
 PANEL_DOMAIN="${PANEL_DOMAIN:-_}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-$(openssl rand -base64 18 | tr -d '\n')}"
@@ -317,6 +299,9 @@ PHP_FPM_SOCK="${PHP_FPM_SOCK}"
 PHPMYADMIN_PATH="/usr/share/phpmyadmin"
 EOCONF
 chmod 0644 "$CONF_DIR/hyper-host.conf"
+printf '%s\n' "192.168.0.179" > "$CONF_DIR/internal_ip"
+printf '%s\n' "90.189.208.25" > "$CONF_DIR/public_ip"
+rm -f /run/hyper-host-public-ip.cache 2>/dev/null || true
 
 cat > "$PANEL_DIR/app/config.php" <<EOPHP
 <?php

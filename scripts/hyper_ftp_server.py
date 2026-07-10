@@ -41,6 +41,8 @@ AUTH_TXT = Path(os.environ.get("FTP_AUTH_TXT", str(BASE_DIR / "data" / "vsftpd_v
 USER_CONF_DIR = Path(os.environ.get("FTP_USER_CONF_DIR", str(BASE_DIR / "ftp" / "user_conf")))
 LOG_FILE = Path(os.environ.get("HYPER_FTP_LOG", "/var/log/hyper-host-ftp.log"))
 PUBLIC_IP_FILE = Path(os.environ.get("HYPER_HOST_PUBLIC_IP_FILE", "/etc/hyper-host/public_ip"))
+FIXED_INTERNAL_IP = "192.168.0.179"
+FIXED_PUBLIC_IP = "90.189.208.25"
 
 
 def is_private_ipv4(ip: str) -> bool:
@@ -64,21 +66,8 @@ def is_private_ipv4(ip: str) -> bool:
 
 
 def configured_public_ip() -> str:
-    # Файл /etc/hyper-host/public_ip обновляется panel'ю "на лету" (hyper public-ip set),
-    # а переменные окружения читаются один раз при старте процесса. Поэтому сначала
-    # смотрим файл (даёт эффект без перезапуска FTP), и только потом - окружение.
-    try:
-        ip = PUBLIC_IP_FILE.read_text(encoding="utf-8", errors="ignore").strip()
-        if ip and not is_private_ipv4(ip):
-            return ip
-    except Exception:
-        pass
-    for key in ("PUBLIC_IP", "SERVER_PUBLIC_IP"):
-        ip = (os.environ.get(key) or "").strip()
-        if ip and not is_private_ipv4(ip):
-            return ip
-    return ""
-
+    # Статический белый IP сервера. Никаких внешних определителей.
+    return FIXED_PUBLIC_IP
 
 
 
@@ -90,34 +79,19 @@ def valid_ipv4(ip: str) -> bool:
 
 
 def server_internal_ip() -> str:
-    for key in ("SERVER_IP", "DETECTED_INTERNAL_IP"):
-        ip = (os.environ.get(key) or "").strip()
-        if valid_ipv4(ip) and not ip.startswith("127."):
-            return ip
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.connect(("1.1.1.1", 53))
-            ip = sock.getsockname()[0]
-            if valid_ipv4(ip):
-                return ip
-    except OSError:
-        pass
-    return ""
+    return FIXED_INTERNAL_IP
+
 
 
 def passive_advertised_ip(peer_ip: str, control_local_ip: str) -> str:
-    # LAN-клиенту отдаём LAN-IP сервера, интернет-клиенту — реальный внешний IP.
-    # Это устраняет зависание LIST/STOR в FileZilla при отсутствии NAT loopback.
+    # LAN-клиенту всегда 192.168.0.179, внешнему клиенту всегда 90.189.208.25.
     try:
         peer = ipaddress.ip_address(peer_ip)
         peer_is_lan = peer.is_private or peer.is_loopback or peer.is_link_local
     except ValueError:
         peer_is_lan = False
-    if peer_is_lan:
-        if valid_ipv4(control_local_ip) and control_local_ip not in ("0.0.0.0", "127.0.0.1"):
-            return control_local_ip
-        return server_internal_ip() or control_local_ip or "127.0.0.1"
-    return configured_public_ip() or server_internal_ip() or control_local_ip or "127.0.0.1"
+    return FIXED_INTERNAL_IP if peer_is_lan else FIXED_PUBLIC_IP
+
 
 def log(msg: str) -> None:
     ts = time.strftime("%Y-%m-%d %H:%M:%S")

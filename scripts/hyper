@@ -307,9 +307,10 @@ print(f"  FTP из интернета: {j.get('ftp_external_endpoint') or '-'}")
 print(f"  SQL локально:     {j.get('mysql_local_endpoint') or '127.0.0.1:3306'}")
 print(f"  SQL из LAN:       {j.get('mysql_lan_endpoint') or '-'}")
 print(f"  SQL из интернета: {j.get('mysql_external_endpoint') or '-'}")
-print(f"  phpMyAdmin:       {j.get('phpmyadmin_url') or '-'}")
+print(f"  phpMyAdmin LAN:   {j.get('phpmyadmin_url') or '-'}")
+print(f"  phpMyAdmin WAN:   {j.get('phpmyadmin_external') or '-'}")
 print('')
-print('Обновить и применить IP: sudo hyper ip fix')
+print('Повторно применить фиксированные IP: sudo hyper ip fix')
 PYIP
 }
 
