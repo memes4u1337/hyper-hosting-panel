@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import os
 import posixpath
 import signal
@@ -78,6 +79,45 @@ def configured_public_ip() -> str:
             return ip
     return ""
 
+
+
+
+def valid_ipv4(ip: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip).version == 4
+    except ValueError:
+        return False
+
+
+def server_internal_ip() -> str:
+    for key in ("SERVER_IP", "DETECTED_INTERNAL_IP"):
+        ip = (os.environ.get(key) or "").strip()
+        if valid_ipv4(ip) and not ip.startswith("127."):
+            return ip
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("1.1.1.1", 53))
+            ip = sock.getsockname()[0]
+            if valid_ipv4(ip):
+                return ip
+    except OSError:
+        pass
+    return ""
+
+
+def passive_advertised_ip(peer_ip: str, control_local_ip: str) -> str:
+    # LAN-клиенту отдаём LAN-IP сервера, интернет-клиенту — реальный внешний IP.
+    # Это устраняет зависание LIST/STOR в FileZilla при отсутствии NAT loopback.
+    try:
+        peer = ipaddress.ip_address(peer_ip)
+        peer_is_lan = peer.is_private or peer.is_loopback or peer.is_link_local
+    except ValueError:
+        peer_is_lan = False
+    if peer_is_lan:
+        if valid_ipv4(control_local_ip) and control_local_ip not in ("0.0.0.0", "127.0.0.1"):
+            return control_local_ip
+        return server_internal_ip() or control_local_ip or "127.0.0.1"
+    return configured_public_ip() or server_internal_ip() or control_local_ip or "127.0.0.1"
 
 def log(msg: str) -> None:
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -207,6 +247,8 @@ class FTPSession(threading.Thread):
         self.cwd = "/"
         self.rename_from: Optional[Path] = None
         self.pasv: Optional[PassiveListener] = None
+        self.active_target: Optional[Tuple[str, int]] = None
+        self.restart_offset = 0
         self.ctrl_file = self.ctrl.makefile("rwb", buffering=0)
 
     def send(self, code: int, text: str) -> None:
@@ -245,6 +287,7 @@ class FTPSession(threading.Thread):
             try:
                 if self.pasv:
                     self.pasv.close()
+                self.active_target = None
                 self.ctrl_file.close()
                 self.ctrl.close()
             except Exception:
@@ -316,6 +359,10 @@ class FTPSession(threading.Thread):
             self.open_pasv(False)
         elif cmd == "EPSV":
             self.open_pasv(True)
+        elif cmd == "PORT":
+            self.open_active_port(arg)
+        elif cmd == "EPRT":
+            self.open_active_eprt(arg)
         elif cmd in {"LIST", "NLST", "MLSD"}:
             self.listing(cmd, arg)
         elif cmd == "SIZE":
@@ -365,35 +412,85 @@ class FTPSession(threading.Thread):
                 self.rename_from = None
                 self.send(250, "Renamed")
         elif cmd == "REST":
-            self.send(350, "Restart not implemented, send RETR/STOR")
+            try:
+                self.restart_offset = max(0, int(arg))
+                self.send(350, f"Restart position accepted ({self.restart_offset})")
+            except ValueError:
+                self.send(501, "Invalid restart position")
         else:
             self.send(502, "Command not implemented")
         return True
 
     def open_pasv(self, epsv: bool) -> None:
-        # v44 fix: раньше тут всегда был self.ctrl.getsockname()[0] - локальный адрес,
-        # недоступный снаружи через роутер/NAT. Сначала пробуем настроенный публичный IP
-        # (PUBLIC_IP из hyper-host.conf/панели), и только если он не задан - старое поведение.
-        local_ip = configured_public_ip() or self.ctrl.getsockname()[0]
-        bind_host = "0.0.0.0"
-        self.pasv = PassiveListener(bind_host, self.passive_min, self.passive_max)
+        if self.pasv:
+            self.pasv.close()
+        self.active_target = None
+        advertised_ip = passive_advertised_ip(self.addr[0], self.ctrl.getsockname()[0])
+        self.pasv = PassiveListener("0.0.0.0", self.passive_min, self.passive_max)
         port = self.pasv.open()
         if epsv:
             self.send(229, f"Entering Extended Passive Mode (|||{port}|)")
         else:
-            if local_ip in ("0.0.0.0", "::"):
-                local_ip = "127.0.0.1"
-            nums = local_ip.split(".")
+            nums = advertised_ip.split(".")
             if len(nums) != 4:
                 nums = ["127", "0", "0", "1"]
             p1, p2 = port // 256, port % 256
             self.send(227, "Entering Passive Mode (%s,%s,%s)" % (",".join(nums), p1, p2))
 
+    def _validate_active_target(self, host: str, port: int) -> None:
+        if not valid_ipv4(host) or not 1 <= port <= 65535:
+            raise ValueError("Invalid active FTP endpoint")
+        # Защита от FTP bounce: data-host обязан совпадать с control-клиентом.
+        if host != self.addr[0]:
+            raise PermissionError("Active FTP host must match control connection")
+
+    def open_active_port(self, arg: str) -> None:
+        parts = arg.split(",")
+        if len(parts) != 6 or not all(x.isdigit() for x in parts):
+            self.send(501, "Invalid PORT")
+            return
+        host = ".".join(parts[:4])
+        port = int(parts[4]) * 256 + int(parts[5])
+        try:
+            self._validate_active_target(host, port)
+        except Exception as exc:
+            self.send(501, str(exc))
+            return
+        if self.pasv:
+            self.pasv.close()
+        self.pasv = None
+        self.active_target = (host, port)
+        self.send(200, "PORT command successful")
+
+    def open_active_eprt(self, arg: str) -> None:
+        try:
+            delim = arg[0]
+            fields = arg.split(delim)
+            af, host, port_s = fields[1], fields[2], fields[3]
+            if af != "1":
+                raise ValueError("Only IPv4 EPRT is supported")
+            port = int(port_s)
+            self._validate_active_target(host, port)
+        except Exception as exc:
+            self.send(501, f"Invalid EPRT: {exc}")
+            return
+        if self.pasv:
+            self.pasv.close()
+        self.pasv = None
+        self.active_target = (host, port)
+        self.send(200, "EPRT command successful")
+
     def data_conn(self) -> socket.socket:
-        if not self.pasv:
-            raise OSError("Use PASV/EPSV first")
         self.send(150, "Opening data connection")
-        return self.pasv.accept()
+        if self.pasv:
+            return self.pasv.accept()
+        if self.active_target:
+            host, port = self.active_target
+            self.active_target = None
+            conn = socket.create_connection((host, port), timeout=20)
+            conn.settimeout(60)
+            return conn
+        raise OSError("Use PASV/EPSV or PORT/EPRT first")
 
     def vpath(self, arg: str) -> str:
         arg = (arg or "").strip()
@@ -506,6 +603,9 @@ class FTPSession(threading.Thread):
             return
         conn = self.data_conn()
         with conn, rp.open("rb") as f:
+            if self.restart_offset:
+                f.seek(self.restart_offset)
+            self.restart_offset = 0
             while True:
                 chunk = f.read(1024 * 128)
                 if not chunk:
@@ -517,8 +617,16 @@ class FTPSession(threading.Thread):
         rp = self.real_for_create(self.vpath(arg))
         rp.parent.mkdir(parents=True, exist_ok=True)
         conn = self.data_conn()
-        mode = "ab" if append else "wb"
+        if append:
+            mode = "ab"
+        elif self.restart_offset and rp.exists():
+            mode = "r+b"
+        else:
+            mode = "wb"
         with conn, rp.open(mode) as f:
+            if self.restart_offset and mode == "r+b":
+                f.seek(self.restart_offset)
+            self.restart_offset = 0
             while True:
                 data = conn.recv(1024 * 128)
                 if not data:

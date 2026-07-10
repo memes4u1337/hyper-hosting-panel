@@ -61,6 +61,9 @@ function default_ftp_password(): string { return 'Hh-' . bin2hex(random_bytes(5)
 function default_db_password(): string { return 'Db-' . bin2hex(random_bytes(6)) . '!'; }
 function current_public_ipv4(): string
 {
+    $info = runtime_ip_info();
+    $detected = trim((string)($info['external_ip'] ?? ''));
+    if ($detected !== '' && filter_var($detected, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) return $detected;
     $ip = trim(setting_get('public_ip_override', (string)app_config('public_ip', '')));
     if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) return $ip;
     $host = host_name();
@@ -240,6 +243,7 @@ function handle_post(string $action): void
             case 'backup_job': { $name=trim((string)($_POST['name']??'')); $schedule=trim((string)($_POST['schedule']??'')); $target=(string)($_POST['target']??'all'); if(!is_valid_name($name)||$schedule==='') throw new RuntimeException('Неверные данные backup'); db()->prepare('INSERT INTO backup_jobs(name,target,schedule,enabled) VALUES(?,?,?,1) ON CONFLICT(name) DO UPDATE SET target=excluded.target,schedule=excluded.schedule,enabled=1')->execute([$name,$target,$schedule]); $res=run_ctl(['backup-schedule',$name,$schedule,$target],120); if($res['code']!==0) throw new RuntimeException($res['output']); redirect('/?page=backups'); }
             case 'delete_backup_job': { $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM backup_jobs WHERE id=?'); $st->execute([$id]); $j=$st->fetch(); if($j){ run_ctl(['backup-delete-schedule',$j['name']],60); db()->prepare('DELETE FROM backup_jobs WHERE id=?')->execute([$id]); } redirect('/?page=backups'); }
             case 'network_fix': { $domain=strtolower(trim((string)($_POST['domain']??''))); $ip=trim((string)($_POST['public_ip']??'')); if($domain!=='' && !is_valid_domain($domain)) throw new RuntimeException('Неверный домен'); if($ip!=='' && !filter_var($ip,FILTER_VALIDATE_IP,FILTER_FLAG_IPV4)) throw new RuntimeException('Неверный IP'); hh_clear_cache(); $res=run_ctl(['network-fix',$domain,$ip],180); if($res['code']!==0) throw new RuntimeException($res['output']); if($ip!=='') setting_set('public_ip_override',$ip); flash('Сеть исправлена: nginx слушает все IP, firewall открыт, DNS/ACME подготовлены','success'); redirect('/?page=network'); }
+            case 'detect_ip': { hh_clear_cache(); $res=run_ctl(['ip-detect','--apply'],180); if($res['code']!==0) throw new RuntimeException($res['output']); hh_clear_cache(); flash('IP автоматически определены и применены к FTP, MySQL и phpMyAdmin','success'); redirect('/?page=network'); }
             case 'access_fix': { hh_clear_cache(); $res=run_ctl(['access-fix'],180); if($res['code']!==0) throw new RuntimeException($res['output']); flash('Доступ с других ПК включён на Ubuntu. Роутер всё равно нужно пробросить вручную.','success'); redirect('/?page=access'); }
             case 'disk_expand': { hh_clear_cache(); $res=run_ctl(['disk-expand'],600); if($res['code']!==0) throw new RuntimeException($res['output']); flash('Диск расширен. Проверь новый размер root-раздела.','success'); redirect('/?page=disk'); }
                         case 'save_panel_domain': { $domain=strtolower(trim((string)($_POST['panel_domain']??''))); if(!is_valid_domain($domain)) throw new RuntimeException('Неверный домен панели'); $res=run_ctl(['panel-domain','set',$domain],120); if($res['code']!==0) throw new RuntimeException($res['output']); setting_set('panel_domain_override',$domain); hh_clear_cache(); flash('Домен панели сохранён: '.$domain,'success'); redirect('/?page=network'); }
@@ -378,7 +382,7 @@ function fm_delete(): void
 function rrmdir(string $path): void { if(is_dir($path)&&!is_link($path)){ foreach(scandir($path)?:[] as $i){ if($i==='.'||$i==='..') continue; rrmdir($path.'/'.$i);} if(!@rmdir($path)){ run_ctl(['repair'],180); @rmdir($path); } } else { if(!@unlink($path)){ run_ctl(['repair'],180); @unlink($path); } } }
 
 
-function hh_app_version(): string { return '1.6-v50'; }
+function hh_app_version(): string { return '1.7-v51'; }
 
 function hh_nav_config(): array
 {
@@ -638,9 +642,9 @@ function view_databases(): void
     $gen=default_db_password();
     $external=setting_get('mysql_external','0')==='1' || (($mysql['bind_address']??'')==='0.0.0.0');
     $pma=phpmyadmin_url();
-    $mysqlExternalHost=mysql_external_host();
+    $mysqlExternalHost=(string)($mysql['external_host']??mysql_external_host());
     $mysqlLocalHost=mysql_local_host();
-    $mysqlLanHost=(string)app_config('server_ip','192.168.0.179');
+    $mysqlLanHost=(string)($mysql['lan_host']??mysql_lan_host());
     $listen=!empty($mysql['listen_3306']);
     $accountByUser=[]; foreach($accounts as $a){ $accountByUser[$a['username']]=$a; }
     ?>
@@ -667,6 +671,7 @@ function view_databases(): void
       <div><span>Импорт</span><b><?= e((string)($pmaStatus['upload_max_filesize']??'1024M')) ?></b></div>
       <div><span>Экспорт</span><b><?= e((string)($pmaStatus['memory_limit']??'1024M')) ?></b></div>
     </div>
+    <div class="alert alert-info mt-3 mb-0"><i class="fa-solid fa-circle-info me-2"></i>phpMyAdmin открывается по адресу <b><?= e($pma) ?></b>, а для внешней программы SQL host: <b><?= e($mysqlExternalHost) ?>:3306</b>. Внутри сервера используется <b>127.0.0.1:3306</b>.</div>
     <?php if(!empty($doctor['problem'])): ?><div class="alert alert-warning mt-3 mb-0"><i class="fa-solid fa-triangle-exclamation me-2"></i><?= e((string)$doctor['problem']) ?></div><?php endif; ?>
   </section>
 
@@ -722,7 +727,7 @@ function view_databases(): void
       <div class="panel-card">
         <div class="card-title-row"><h2><i class="fa-solid fa-table me-2"></i>Базы</h2><div class="d-flex gap-2"><button class="btn btn-sm btn-soft" onclick="copyText('<?= e($mysqlExternalHost) ?>')">SQL host</button><button class="btn btn-sm btn-soft" onclick="copyText('<?= e($pma) ?>')">phpMyAdmin</button></div></div>
         <div class="db-cards-list">
-        <?php foreach($rows as $r): $a=$accountByUser[$r['db_user']]??null; $hostPattern=(string)($a['host_pattern']??($r['remote_allowed']?'%':'localhost')); $connHost=(int)$r['remote_allowed']?$mysqlLanHost:$mysqlLocalHost; ?>
+        <?php foreach($rows as $r): $a=$accountByUser[$r['db_user']]??null; $hostPattern=(string)($a['host_pattern']??($r['remote_allowed']?'%':'localhost')); $connHost=(int)$r['remote_allowed']?$mysqlExternalHost:$mysqlLocalHost; ?>
           <div class="db-row-card">
             <div><span>База</span><b><?= e($r['db_name']) ?></b><small><?= (int)$r['remote_allowed']?'Внешний вход':'Локально' ?></small></div>
             <div><span>Пользователь</span><code><?= e($r['db_user']) ?></code><small><?= e(mysql_host_label($hostPattern)) ?></small></div>
@@ -740,7 +745,7 @@ function view_databases(): void
       <div class="panel-card mt-4">
         <h2><i class="fa-solid fa-users-gear me-2"></i>Аккаунты MySQL / phpMyAdmin</h2>
         <div class="db-cards-list">
-        <?php foreach($accounts as $a): $connHost=((int)$a['remote_allowed']?$mysqlExternalHost:$mysqlLanHost); ?>
+        <?php foreach($accounts as $a): $connHost=((int)$a['remote_allowed']?$mysqlExternalHost:$mysqlLocalHost); ?>
           <div class="db-row-card compact">
             <div><span>Логин</span><code><?= e($a['username']) ?></code><small><?= e(mysql_host_label((string)$a['host_pattern'])) ?></small></div>
             <div><span>Доступ</span><b><?= e($a['db_name']?:'без базы') ?></b><small><?= e($a['privileges']) ?></small></div>
@@ -962,7 +967,7 @@ function view_backups(): void { $jobs=db()->query('SELECT * FROM backup_jobs ORD
 
 function view_dns(): void {
     $zones=db()->query('SELECT * FROM dns_zones ORDER BY id DESC')->fetchAll();
-    $pub=setting_get('public_ip_override',(string)app_config('public_ip','90.189.208.25'));
+    $pub=current_public_ipv4();
     $inspectDomain=strtolower(trim((string)($_GET['inspect']??($zones[0]['domain']??''))));
     $inspect=null;
     if($inspectDomain!=='' && is_valid_domain($inspectDomain)) $inspect=run_ctl_json_cached(['dns-inspect-json',$inspectDomain],30,300);
@@ -1075,17 +1080,23 @@ function view_dns(): void {
 function view_network(): void {
     $sites=db()->query('SELECT * FROM sites ORDER BY domain')->fetchAll();
     $domain=(string)($_GET['domain']??($sites[0]['domain']??'hyper-host.pw'));
-    $pub=setting_get('public_ip_override',(string)app_config('public_ip','90.189.208.25'));
+    $ipInfo=runtime_ip_info();
+    $pub=(string)($ipInfo['external_ip']??setting_get('public_ip_override',(string)app_config('public_ip','')));
+    $lan=(string)($ipInfo['internal_ip']??mysql_lan_host());
     $doctor=run_ctl_json_cached(['network-doctor-json',$domain],8,180);
 ?>
 <div class="row g-4 network-page-v40">
   <div class="col-xxl-4"><div class="panel-card hero-mini"><div class="kicker"><i class="fa-solid fa-tower-broadcast me-2"></i>Сеть</div><h2>Доступ и домен</h2>
-    <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="network_fix"><input class="form-control" name="domain" value="<?= e($domain) ?>" placeholder="mystockbot.xyz"><input class="form-control" name="public_ip" value="<?= e($pub) ?>" placeholder="90.189.208.25"><button class="btn btn-primary btn-lg"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Исправить</button></form>
+    <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="network_fix"><input class="form-control" name="domain" value="<?= e($domain) ?>" placeholder="mystockbot.xyz"><input class="form-control" name="public_ip" value="<?= e($pub) ?>" placeholder="определяется автоматически"><button class="btn btn-primary btn-lg"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Исправить сеть</button></form>
+    <form method="post" class="mt-2"><?= csrf_field() ?><input type="hidden" name="action" value="detect_ip"><button class="btn btn-soft w-100"><i class="fa-solid fa-arrows-rotate me-2"></i>Автоопределить IP и применить</button></form>
     <form method="post" class="vstack gap-2 mt-4"><?= csrf_field() ?><input type="hidden" name="action" value="save_panel_domain"><label class="form-label">Домен панели</label><input class="form-control" name="panel_domain" value="<?= e(setting_get('panel_domain_override', (string)app_config('panel_domain', ''))) ?>" placeholder="panel.hyper-host.pw"><button class="btn btn-soft"><i class="fa-solid fa-link me-2"></i>Сохранить</button></form>
   </div></div>
   <div class="col-xxl-8"><div class="panel-card"><h2>Диагностика</h2>
     <div class="network-check-grid network-check-grid-v40">
-      <div class="network-check"><span>Публичный IP</span><b><?= e((string)($doctor['public_ip'] ?? $pub)) ?></b></div>
+      <div class="network-check"><span>Внешний IP</span><b><?= e((string)($ipInfo['external_ip'] ?? $doctor['public_ip'] ?? $pub)) ?></b></div>
+      <div class="network-check"><span>Внутренний IP</span><b><?= e($lan) ?></b></div>
+      <div class="network-check"><span>Интерфейс</span><b><?= e((string)($ipInfo['interface'] ?? '—')) ?></b></div>
+      <div class="network-check"><span>Шлюз</span><b><?= e((string)($ipInfo['gateway'] ?? '—')) ?></b></div>
       <div class="network-check"><span>DNS A</span><b class="<?= (($doctor['dns_status']??'')==='ok')?'hh-ok':'hh-warn' ?>"><?= e(implode(', ', $doctor['dns_a'] ?? [])) ?: 'нет' ?></b></div>
       <div class="network-check"><span>Локальный DNS</span><b><?= e(implode(', ', $doctor['dns_a_local'] ?? [])) ?: 'нет' ?></b></div>
       <div class="network-check"><span>Nginx</span><b class="<?= !empty($doctor['nginx_ok'])?'hh-ok':'hh-bad' ?>"><?= !empty($doctor['nginx_ok'])?'ok':'bad' ?></b></div>
@@ -1101,7 +1112,11 @@ function view_network(): void {
 function view_ssl(): void {
     $sites=db()->query('SELECT * FROM sites ORDER BY domain')->fetchAll();
     $certs=run_ctl_json_cached(['ssl-status-json'],8,300); $map=[]; if(!isset($certs['_error'])) foreach($certs as $c) $map[$c['domain']]=$c;
-    $savedPublicIp = setting_get('public_ip_override', (string)app_config('public_ip',''));
+    $ipInfo = runtime_ip_info();
+    $sslLanIp = (string)($ipInfo['internal_ip'] ?? mysql_lan_host());
+    $sslPanelDomain = trim((string)app_config('panel_domain','panel.hyper-host.pw'));
+    if ($sslPanelDomain === '' || $sslPanelDomain === '_') $sslPanelDomain = 'panel.hyper-host.pw';
+    $savedPublicIp = current_public_ipv4();
     $modals = [];
 ?>
 <div class="ssl-hero mb-4">
@@ -1165,19 +1180,19 @@ function view_ssl(): void {
   <div class="col-lg-6">
     <div class="panel-card h-100">
       <h2><i class="fa-solid fa-gauge-high me-2"></i>SSL для панели</h2>
-      <p class="muted">Домен <code>panel.hyper-host.pw</code> должен открывать именно панель, а не обычный сайт.</p>
+      <p class="muted">Домен <code><?= e($sslPanelDomain) ?></code> должен открывать именно панель, а не обычный сайт.</p>
       <div class="cmd-stack">
-        <button type="button" class="cmd-copy" onclick="copyText('sudo hyper panel domain panel.hyper-host.pw')"><i class="fa-solid fa-copy"></i><code>sudo hyper panel domain panel.hyper-host.pw</code></button>
-        <button type="button" class="cmd-copy" onclick="copyText('sudo hyper ssl panel panel.hyper-host.pw memes4u1337@mail.ru')"><i class="fa-solid fa-copy"></i><code>sudo hyper ssl panel panel.hyper-host.pw memes4u1337@mail.ru</code></button>
+        <button type="button" class="cmd-copy" onclick="copyText('sudo hyper panel domain <?= e($sslPanelDomain) ?>')"><i class="fa-solid fa-copy"></i><code>sudo hyper panel domain <?= e($sslPanelDomain) ?></code></button>
+        <button type="button" class="cmd-copy" onclick="copyText('sudo hyper ssl panel <?= e($sslPanelDomain) ?> memes4u1337@mail.ru')"><i class="fa-solid fa-copy"></i><code>sudo hyper ssl panel <?= e($sslPanelDomain) ?> memes4u1337@mail.ru</code></button>
       </div>
     </div>
   </div>
   <div class="col-lg-6">
     <div class="panel-card h-100">
       <h2><i class="fa-solid fa-network-wired me-2"></i>SSL на внутренний IP</h2>
-      <p class="muted">Для IP нельзя получить обычный зелёный Let’s Encrypt. Панель поставит локальный self-signed SSL на <code>192.168.0.179</code>.</p>
+      <p class="muted">Для IP нельзя получить обычный зелёный Let’s Encrypt. Панель поставит локальный self-signed SSL на <code><?= e($sslLanIp) ?></code>.</p>
       <div class="cmd-stack">
-        <button type="button" class="cmd-copy" onclick="copyText('sudo hyper ssl ip 192.168.0.179')"><i class="fa-solid fa-copy"></i><code>sudo hyper ssl ip 192.168.0.179</code></button>
+        <button type="button" class="cmd-copy" onclick="copyText('sudo hyper ssl ip <?= e($sslLanIp) ?>')"><i class="fa-solid fa-copy"></i><code>sudo hyper ssl ip <?= e($sslLanIp) ?></code></button>
       </div>
     </div>
   </div>

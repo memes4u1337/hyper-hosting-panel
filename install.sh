@@ -45,12 +45,38 @@ get_server_ip() {
   local ip=""
   ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}' || true)"
   if [[ -z "$ip" ]]; then
-    ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -Ev '^(127\.|169\.254\.)' | head -n1 || true)"
   fi
-  if [[ -z "$ip" ]]; then
-    ip="127.0.0.1"
-  fi
+  [[ -n "$ip" ]] || ip="127.0.0.1"
   echo "$ip"
+}
+
+valid_public_ipv4() {
+  python3 - "$1" <<'PYIPVALID' >/dev/null 2>&1
+import ipaddress, sys
+try:
+    ip=ipaddress.ip_address(sys.argv[1])
+    raise SystemExit(0 if ip.version == 4 and ip.is_global else 1)
+except Exception:
+    raise SystemExit(1)
+PYIPVALID
+}
+
+get_public_ip() {
+  local ip="" url
+  for url in \
+    https://api.ipify.org \
+    https://checkip.amazonaws.com \
+    https://ipv4.icanhazip.com \
+    https://ifconfig.me/ip; do
+    ip="$(curl -4fsS --max-time 4 "$url" 2>/dev/null | tr -d '[:space:]' || true)"
+    valid_public_ipv4 "$ip" && { echo "$ip"; return 0; }
+  done
+  if command -v dig >/dev/null 2>&1; then
+    ip="$(dig +short -4 myip.opendns.com @resolver1.opendns.com 2>/dev/null | tail -n1 | tr -d '[:space:]' || true)"
+    valid_public_ipv4 "$ip" && { echo "$ip"; return 0; }
+  fi
+  return 1
 }
 
 # Preserve existing settings on updates. Older installers overwrote PANEL_DOMAIN/PUBLIC_IP
@@ -59,8 +85,17 @@ if [[ -f "$CONF_DIR/hyper-host.conf" ]]; then
   # shellcheck disable=SC1090
   source "$CONF_DIR/hyper-host.conf" || true
 fi
-SERVER_IP="${SERVER_IP:-$(get_server_ip)}"
-PUBLIC_IP="${PUBLIC_IP:-${SERVER_PUBLIC_IP:-}}"
+CONFIGURED_SERVER_IP="${SERVER_IP:-}"
+CONFIGURED_PUBLIC_IP="${PUBLIC_IP:-${SERVER_PUBLIC_IP:-}}"
+PUBLIC_IP_MODE="${PUBLIC_IP_MODE:-auto}"
+SERVER_IP="${SERVER_IP_OVERRIDE:-$(get_server_ip)}"
+if [[ "$PUBLIC_IP_MODE" == "manual" ]] && valid_public_ipv4 "$CONFIGURED_PUBLIC_IP"; then
+  PUBLIC_IP="$CONFIGURED_PUBLIC_IP"
+else
+  PUBLIC_IP="$(get_public_ip 2>/dev/null || true)"
+  [[ -n "$PUBLIC_IP" ]] || PUBLIC_IP="$CONFIGURED_PUBLIC_IP"
+  PUBLIC_IP_MODE="auto"
+fi
 PANEL_DOMAIN="${PANEL_DOMAIN:-_}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-$(openssl rand -base64 18 | tr -d '\n')}"
@@ -269,6 +304,7 @@ POWERED_BY="${POWERED_BY}"
 SERVER_IP="${SERVER_IP}"
 PANEL_DOMAIN="${PANEL_DOMAIN}"
 PUBLIC_IP="${PUBLIC_IP}"
+PUBLIC_IP_MODE="${PUBLIC_IP_MODE}"
 BASE_DIR="${BASE_DIR}"
 PANEL_DIR="${PANEL_DIR}"
 SITES_DIR="${SITES_DIR}"
@@ -308,16 +344,13 @@ chmod 0640 "$PANEL_DIR/app/config.php"
 
 log "Настройка phpMyAdmin host label..."
 mkdir -p /etc/phpmyadmin/conf.d
-PMA_VERBOSE_HOST="${PANEL_DOMAIN}"
-if [[ -z "$PMA_VERBOSE_HOST" || "$PMA_VERBOSE_HOST" == "_" ]]; then
-  PMA_VERBOSE_HOST="${PUBLIC_IP:-${SERVER_IP}}"
-fi
+PMA_VERBOSE_HOST="HYPER-HOST SQL | Internet ${PUBLIC_IP:-not-detected}:3306 | LAN ${SERVER_IP}:3306"
 {
 cat > /etc/phpmyadmin/conf.d/hyper-host-server.php <<EOPMA
 <?php
 // HYPER-HOST: phpMyAdmin показывает понятное имя сервера вместо localhost:3306.
 if (isset(\$i)) {
-    \$cfg['Servers'][\$i]['verbose'] = '${PMA_VERBOSE_HOST}:3306';
+    \$cfg['Servers'][\$i]['verbose'] = '${PMA_VERBOSE_HOST}';
     \$cfg['Servers'][\$i]['host'] = '127.0.0.1';
     \$cfg['Servers'][\$i]['port'] = '3306';
 }
@@ -593,10 +626,16 @@ if command -v nft >/dev/null 2>&1; then
   nft add rule inet hyper_host input tcp dport 40000-40100 accept 2>/dev/null || true
   nft add rule inet hyper_host input udp dport 53 accept 2>/dev/null || true
 fi
-# 3306 открывается через настройки панели, когда включаешь внешние подключения.
+# В этой сборке внешний SQL включён по запросу пользователя; доступ всё равно ограничивается MySQL-аккаунтами и паролями.
+ufw allow 3306/tcp >/dev/null 2>&1 || true
+iptables -C INPUT -p tcp --dport 3306 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 3306 -j ACCEPT 2>/dev/null || true
 
 log "Финальный ремонт прав и сервисов..."
 /usr/local/sbin/hyper-host-ctl repair >/dev/null || warn "Repair-команда не выполнилась, проверь вручную: sudo hyper-host-ctl repair"
+/usr/local/sbin/hyper-host-ctl ip-detect --apply >/dev/null 2>&1 || true
+/usr/local/sbin/hyper-host-ctl mysql-external enable >/dev/null 2>&1 || warn "Внешний MySQL не включился автоматически: sudo hyper db external enable"
+/usr/local/sbin/hyper-host-ctl phpmyadmin-fix >/dev/null 2>&1 || true
+/usr/local/sbin/hyper-host-ctl ftp-fix >/dev/null 2>&1 || true
 /usr/local/sbin/hyper-host-ctl network-fix "${PANEL_DOMAIN}" "${PUBLIC_IP}" >/dev/null 2>&1 || true
 
 log "Проверка панели..."
@@ -612,14 +651,20 @@ cat <<EOF_DONE
  URL:      http://${SERVER_IP}/
  Login:    ${ADMIN_USER}
  Password: ${ADMIN_PASS}
- IP:       ${SERVER_IP}
+ LAN IP:   ${SERVER_IP}
+ WAN IP:   ${PUBLIC_IP:-не определён}
 
  Файлы сайтов: ${SITES_DIR}
  Файлы ботов:  ${BOTS_DIR}
  FTP папки:     ${FTP_DIR}
  Backup:       ${BACKUP_DIR}
  phpMyAdmin:   http://${SERVER_IP}/phpmyadmin
+ SQL LAN:      ${SERVER_IP}:3306
+ SQL Internet: ${PUBLIC_IP:-не определён}:3306
+ FTP LAN:      ${SERVER_IP}:21
+ FTP Internet: ${PUBLIC_IP:-не определён}:21
 
+ Проверка: sudo hyper ip
  ВАЖНО: сохрани пароль сейчас.
 ============================================================
 EOF_DONE

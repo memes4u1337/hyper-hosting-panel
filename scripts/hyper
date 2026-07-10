@@ -274,6 +274,45 @@ cmd_update() {
 }
 
 
+cmd_ip() {
+  local action="${1:-show}"
+  case "$action" in
+    fix|apply|detect|refresh)
+      $CTL ip-detect --apply >/dev/null
+      ;;
+    show|status|info|'')
+      ;;
+    *) err "Используй: sudo hyper ip [show|fix]" ;;
+  esac
+  local json
+  json="$($CTL ip-info-json 2>/dev/null || echo '{}')"
+  JSON="$json" python3 - <<'PYIP'
+import json, os
+try:
+    j=json.loads(os.environ.get('JSON','{}') or '{}')
+except Exception:
+    j={}
+print('🌐 HYPER-HOST — IP И ПОДКЛЮЧЕНИЯ')
+print('────────────────────────────────')
+print(f"Внутренний IP:  {j.get('internal_ip') or 'не определён'}")
+print(f"Внешний IP:     {j.get('external_ip') or 'не определён'}")
+print(f"Интерфейс:      {j.get('interface') or 'не определён'}")
+print(f"Шлюз:           {j.get('gateway') or 'не определён'}")
+print(f"NAT:            {'да' if j.get('nat') else 'нет/не определён'}")
+print(f"Домен панели:   {j.get('panel_domain') or 'не задан'}")
+print('')
+print('Готовые адреса:')
+print(f"  FTP из LAN:       {j.get('ftp_lan_endpoint') or '-'}")
+print(f"  FTP из интернета: {j.get('ftp_external_endpoint') or '-'}")
+print(f"  SQL локально:     {j.get('mysql_local_endpoint') or '127.0.0.1:3306'}")
+print(f"  SQL из LAN:       {j.get('mysql_lan_endpoint') or '-'}")
+print(f"  SQL из интернета: {j.get('mysql_external_endpoint') or '-'}")
+print(f"  phpMyAdmin:       {j.get('phpmyadmin_url') or '-'}")
+print('')
+print('Обновить и применить IP: sudo hyper ip fix')
+PYIP
+}
+
 cmd_network() {
   local sub="${1:-doctor}"; shift || true
   case "$sub" in
@@ -287,14 +326,17 @@ cmd_network() {
       local act="${1:-get}"; shift || true
       $CTL public-ip "$act" "$@"
       ;;
-    ip-fix|ip-watch)
-      $CTL ip-autofix
+    ip|info|detect)
+      cmd_ip show
+      ;;
+    apply|auto|ip-fix|ip-watch)
+      cmd_ip fix
       ;;
     panel-domain)
       local act="${1:-get}"; shift || true
       $CTL panel-domain "$act" "$@"
       ;;
-    *) err "Network команды: sudo hyper network doctor [DOMAIN] | fix DOMAIN PUBLIC_IP | open DOMAIN PUBLIC_IP | public-ip set IP | ip-fix | panel-domain set DOMAIN" ;;
+    *) err "Network команды: sudo hyper network ip | apply | doctor [DOMAIN] | fix DOMAIN PUBLIC_IP | public-ip set IP | panel-domain set DOMAIN" ;;
   esac
 }
 
@@ -387,6 +429,8 @@ cmd_help() {
 Основные команды:
   sudo hyper dev                     кто разработчик
   sudo hyper stats                   вся информация о сервере
+  sudo hyper ip                      реальные внутренний/внешний IP и адреса сервисов
+  sudo hyper ip fix                  переопределить IP и применить к FTP/MySQL/phpMyAdmin
   sudo hyper status                  dev + stats + bots
   sudo hyper bots                    список ботов и статус
   sudo hyper sites                   список сайтов
@@ -520,7 +564,11 @@ cmd_db_user() {
   local user="${1:-}" pass="${2:-}" db="${3:-}" host="${4:-%}"
   [[ -n "$user" && -n "$pass" ]] || err "Используй: sudo hyper db user USER PASS [DB] [HOST]"
   $CTL create-mysql-account "$user" "$pass" "$host" "$db" ALL
-  say "Готово. Для внешнего бота host=${host}. В .env используй MYSQL_HOST=panel.hyper-host.pw или 192.168.0.179 если бот в локальной сети."
+  local info external internal
+  info="$($CTL ip-info-json 2>/dev/null || echo '{}')"
+  external="$(JSON="$info" python3 -c "import json,os; print(json.loads(os.environ.get('JSON','{}')).get('external_ip',''))" 2>/dev/null || true)"
+  internal="$(JSON="$info" python3 -c "import json,os; print(json.loads(os.environ.get('JSON','{}')).get('internal_ip',''))" 2>/dev/null || true)"
+  say "Готово. SQL из интернета: ${external:-не определён}:3306; из LAN: ${internal:-не определён}:3306; локально: 127.0.0.1:3306."
 }
 cmd_db_test() {
   local host="${1:-127.0.0.1}" user="${2:-}" pass="${3:-}" db="${4:-}"
@@ -540,6 +588,7 @@ case "${1:-help}" in
   db|dbs|databases) shift; cmd_dbs "$@" ;;
   ssl) shift; cmd_ssl "$@" ;;
   panel) shift; cmd_panel "$@" ;;
+  ip) shift; cmd_ip "$@" ;;
   network|net) shift; cmd_network "$@" ;;
   dns) shift; cmd_dns "$@" ;;
   backup|backups) shift; cmd_backup "$@" ;;

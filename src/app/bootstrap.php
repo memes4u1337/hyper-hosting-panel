@@ -421,26 +421,47 @@ function upsert_ftp_row(string $username, string $target, string $passwordPlain 
     }
 }
 
+function runtime_ip_info(): array
+{
+    static $info = null;
+    if (is_array($info)) {
+        return $info;
+    }
+    $info = run_ctl_json_cached(['ip-info-json'], 6, 30);
+    return is_array($info) ? $info : [];
+}
+
 function panel_host_for_connections(): string
 {
     $domain = trim((string)app_config('panel_domain', ''));
     if ($domain !== '' && $domain !== '_') {
         return $domain;
     }
-    return (string)app_config('server_ip');
+    $info = runtime_ip_info();
+    $internal = trim((string)($info['internal_ip'] ?? ''));
+    return $internal !== '' ? $internal : (string)app_config('server_ip');
 }
 
 function mysql_external_host(): string
 {
-    $domain = trim((string)app_config('panel_domain', ''));
-    if ($domain !== '' && $domain !== '_') {
-        return $domain;
+    $info = runtime_ip_info();
+    $external = trim((string)($info['external_ip'] ?? ''));
+    if ($external !== '') {
+        return $external;
     }
     $public = trim((string)app_config('public_ip', ''));
     if ($public !== '') {
         return $public;
     }
-    return panel_host_for_connections();
+    $domain = trim((string)app_config('panel_domain', ''));
+    return ($domain !== '' && $domain !== '_') ? $domain : panel_host_for_connections();
+}
+
+function mysql_lan_host(): string
+{
+    $info = runtime_ip_info();
+    $internal = trim((string)($info['internal_ip'] ?? ''));
+    return $internal !== '' ? $internal : (string)app_config('server_ip', '127.0.0.1');
 }
 
 function mysql_local_host(): string
