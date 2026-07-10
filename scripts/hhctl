@@ -3289,28 +3289,38 @@ WantedBy=multi-user.target
 EOSVC
 }
 
+ftp_runtime_python_ok() {
+  local py="$1"
+  [[ -x "$py" ]] || return 1
+  "$py" - <<'PYFTPVERSION' >/dev/null 2>&1
+from importlib.metadata import version
+from packaging.version import Version
+import OpenSSL, pyftpdlib
+raise SystemExit(0 if Version(version("pyftpdlib")) >= Version("2.2.0") else 1)
+PYFTPVERSION
+}
+
 ftp_runtime_python() {
-  if [[ -x "$FTP_RUNTIME_VENV/bin/python3" ]] && "$FTP_RUNTIME_VENV/bin/python3" -c 'import pyftpdlib, OpenSSL' >/dev/null 2>&1; then
+  if ftp_runtime_python_ok "$FTP_RUNTIME_VENV/bin/python3"; then
     printf '%s\n' "$FTP_RUNTIME_VENV/bin/python3"
-  elif /usr/bin/python3 -c 'import pyftpdlib, OpenSSL' >/dev/null 2>&1; then
-    printf '%s\n' /usr/bin/python3
   else
     return 1
   fi
 }
 
 ftp_runtime_install_dependency() {
-  local py
-  if py="$(ftp_runtime_python 2>/dev/null)"; then return 0; fi
   mkdir -p "$FTP_RUNTIME_VENV" "$BASE_DIR/bin" "$FTP_RUNTIME_LOG_DIR" "$FTP_RUNTIME_RUN_DIR"
-  if /usr/bin/python3 -m venv "$FTP_RUNTIME_VENV" >/dev/null 2>&1; then
-    "$FTP_RUNTIME_VENV/bin/python3" -m pip install --disable-pip-version-check --no-cache-dir 'pyftpdlib>=1.5.9,<2.0' 'pyOpenSSL>=21' >/dev/null 2>&1 || true
+  if [[ ! -x "$FTP_RUNTIME_VENV/bin/python3" ]]; then
+    /usr/bin/python3 -m venv "$FTP_RUNTIME_VENV" >/dev/null 2>&1 \
+      || err "Не удалось создать FTP venv в $FTP_RUNTIME_VENV"
   fi
-  if ! ftp_runtime_python >/dev/null 2>&1; then
-    apt-get update -y >/dev/null 2>&1 || true
-    apt-get install -y python3-pyftpdlib python3-openssl python3-venv python3-pip >/dev/null 2>&1 || true
+  if ! ftp_runtime_python_ok "$FTP_RUNTIME_VENV/bin/python3"; then
+    "$FTP_RUNTIME_VENV/bin/python3" -m pip install --disable-pip-version-check --no-cache-dir --upgrade \
+      'pip>=23' 'packaging>=23' 'pyftpdlib==2.2.0' 'pyOpenSSL>=24.2,<26' \
+      || err "Не удалось установить pyftpdlib 2.2.0 для стабильного FTPS"
   fi
-  ftp_runtime_python >/dev/null 2>&1 || err "Не удалось установить pyftpdlib для FTP runtime"
+  ftp_runtime_python >/dev/null 2>&1 \
+    || err "FTP runtime требует pyftpdlib 2.2.0+ в $FTP_RUNTIME_VENV"
 }
 
 ftp_tls_generate_fallback() {
@@ -3493,7 +3503,7 @@ PYFTPROWS
   fi
   ftp_auth_rebuild_db
   assert_hyper_ftp_ready
-  log "FTP исправлен: один pyftpdlib FTPS-сервис, explicit TLS на TCP 21, PASV ${FTP_PASV_MIN}-${FTP_PASV_MAX}"
+  log "FTP исправлен: pyftpdlib 2.2.0, explicit FTPS TLS 1.2 на TCP 21, PASV ${FTP_PASV_MIN}-${FTP_PASV_MAX}"
 }
 
 cmd_ftp_doctor_json() {
@@ -3516,12 +3526,15 @@ PYBANNER
   pasv="dynamic LAN=${FIXED_INTERNAL_IP}, WAN=${FIXED_PUBLIC_IP}, ports=${FTP_PASV_MIN}-${FTP_PASV_MAX}"
   tls_source="$(cat "$FTP_TLS_DIR/active-source" 2>/dev/null || true)"
   tls_ok=0
-  python3 - <<'PYFTPTLS' >/dev/null 2>&1 && tls_ok=1 || true
+  "$(ftp_runtime_python 2>/dev/null || printf /usr/bin/python3)" - <<'PYFTPTLS' >/dev/null 2>&1 && tls_ok=1 || true
 import ftplib, ssl
 ctx=ssl._create_unverified_context()
-f=ftplib.FTP_TLS(context=ctx, timeout=3)
+ctx.minimum_version=ssl.TLSVersion.TLSv1_2
+ctx.maximum_version=ssl.TLSVersion.TLSv1_2
+f=ftplib.FTP_TLS(context=ctx, timeout=5)
 f.connect('127.0.0.1',21)
-f.auth()
+f.auth(); f.login('anonymous','doctor@example.invalid') if False else None
+assert f.sock.version() == 'TLSv1.2'
 f.close()
 PYFTPTLS
   if [[ "$listening" != 1 || ( "$service" != active && "$service" != runtime ) ]]; then
@@ -3541,7 +3554,7 @@ print(json.dumps({
  'listen_21':os.environ.get('LISTENING')=='1', 'port_owner':os.environ.get('OWNER',''),
  'banner':os.environ.get('BANNER',''), 'ftp_users':int(os.environ.get('USERS_COUNT') or 0),
  'passive_range':'40000-40100', 'pasv_config':os.environ.get('PASV',''),
- 'tls':os.environ.get('TLS_OK')=='1', 'tls_mode':'explicit', 'tls_optional':True,
+ 'tls':os.environ.get('TLS_OK')=='1', 'tls_mode':'explicit', 'tls_protocol':'TLSv1.2', 'tls_optional':True,
  'tls_certificate_source':os.environ.get('TLS_SOURCE',''),
  'lan_endpoint':'192.168.0.179:21', 'internet_endpoint':'90.189.208.25:21',
  'router_rules':['TCP 21 -> 192.168.0.179:21','TCP 40000-40100 -> 192.168.0.179:40000-40100'],

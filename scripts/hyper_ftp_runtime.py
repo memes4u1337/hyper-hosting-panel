@@ -13,6 +13,7 @@ import ipaddress
 import logging
 import signal
 import sys
+from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -20,6 +21,7 @@ try:
     from pyftpdlib.authorizers import AuthenticationFailed, DummyAuthorizer
     from pyftpdlib.handlers import FTPHandler, TLS_FTPHandler
     from pyftpdlib.servers import FTPServer
+    from OpenSSL import SSL
 except Exception as exc:  # pragma: no cover
     print(f"pyftpdlib import failed: {exc}", file=sys.stderr)
     raise
@@ -173,7 +175,8 @@ class ReloadingAuthorizer(DummyAuthorizer):
 class HyperHandlerMixin:
     permit_foreign_addresses = False
     permit_privileged_ports = False
-    use_sendfile = True
+    # sendfile must stay disabled for encrypted data channels.
+    use_sendfile = False
     lan_ip = "192.168.0.179"
     wan_ip = "90.189.208.25"
 
@@ -207,6 +210,37 @@ class HyperFTPHandler(HyperHandlerMixin, FTPHandler):
 
 class HyperTLSFTPHandler(HyperHandlerMixin, TLS_FTPHandler):
     pass
+
+
+def installed_version(distribution: str) -> str:
+    try:
+        return package_version(distribution)
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def configure_tls_handler(handler) -> tuple[str, int]:
+    """Use TLS 1.2 for stable FileZilla/GnuTLS data-channel shutdown.
+
+    pyftpdlib releases prior to 2.x and TLS 1.3 combinations are known to
+    produce abrupt FTPS data-channel EOFs.  Keeping explicit FTPS on TLS 1.2
+    avoids the GnuTLS -110 error while retaining encrypted control and data.
+    """
+    handler.ssl_protocol = getattr(SSL, "TLS_SERVER_METHOD", handler.ssl_protocol)
+    options = 0
+    for name in (
+        "OP_NO_SSLv2",
+        "OP_NO_SSLv3",
+        "OP_NO_TLSv1",
+        "OP_NO_TLSv1_1",
+        "OP_NO_TLSv1_3",
+        "OP_NO_COMPRESSION",
+        "OP_NO_RENEGOTIATION",
+    ):
+        options |= int(getattr(SSL, name, 0))
+    handler.ssl_options = options
+    handler.use_sendfile = False
+    return "TLSv1.2", options
 
 
 def parse_args() -> argparse.Namespace:
@@ -264,11 +298,13 @@ def main() -> int:
         handler = HyperTLSFTPHandler
         handler.certfile = str(cert)
         handler.keyfile = str(key)
+        tls_protocol, tls_options = configure_tls_handler(handler)
         # Explicit FTPS is available while plain FTP remains compatible.
         handler.tls_control_required = bool(args.tls_control_required)
         handler.tls_data_required = bool(args.tls_data_required)
     else:
         handler = HyperFTPHandler
+        tls_protocol, tls_options = "disabled", 0
     handler.authorizer = authorizer
     handler.banner = args.banner
     handler.lan_ip = args.lan_ip
@@ -288,7 +324,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     logging.info(
-        "starting HYPER-HOST FTP listen=%s:%d lan_ip=%s wan_ip=%s passive=%d-%d tls=%s control_required=%s data_required=%s",
+        "starting HYPER-HOST FTP listen=%s:%d lan_ip=%s wan_ip=%s passive=%d-%d tls=%s protocol=%s options=%s pyftpdlib=%s pyOpenSSL=%s control_required=%s data_required=%s",
         args.listen,
         args.port,
         args.lan_ip,
@@ -296,6 +332,10 @@ def main() -> int:
         args.passive_min,
         args.passive_max,
         tls_enabled,
+        tls_protocol,
+        tls_options,
+        installed_version("pyftpdlib"),
+        installed_version("pyOpenSSL"),
         bool(args.tls_control_required),
         bool(args.tls_data_required),
     )
