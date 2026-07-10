@@ -261,7 +261,7 @@ fi
 [[ -n "$PHP_FPM_SOCK" ]] || fail "Не найден PHP-FPM socket. Проверь установку php-fpm."
 
 log "Создание папок..."
-mkdir -p "$BASE_DIR/data" "$BASE_DIR/templates" "$BACKUP_DIR" "$CACHE_DIR" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$DNS_DIR" "$CONF_DIR"
+mkdir -p "$BASE_DIR/data" "$BASE_DIR/templates" "$BASE_DIR/bin" "$BASE_DIR/logs" "$BASE_DIR/run" "$BACKUP_DIR" "$CACHE_DIR" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$DNS_DIR" "$CONF_DIR"
 
 log "Очистка старых сломанных FTP bind-mount'ов..."
 cleanup_hyper_host_mounts
@@ -270,6 +270,7 @@ log "Копирование файлов панели..."
 rsync -a --delete "$PROJECT_DIR/src/" "$PANEL_DIR/"
 rsync -a --delete "$PROJECT_DIR/templates/" "$BASE_DIR/templates/"
 install -m 0755 "$PROJECT_DIR/scripts/hhctl" "$CONTROL_BIN"
+install -m 0755 "$PROJECT_DIR/scripts/hyper_ftp_runtime.py" "$BASE_DIR/bin/hyper_ftp_runtime.py"
 install -m 0755 "$PROJECT_DIR/scripts/hyper" "$HYPER_BIN"
 # v23: делаем CLI доступным для панели, PM2-ботов и обычной shell-среды.
 # Некоторые окружения/боты ищут hyper в /usr/local/bin или /usr/bin.

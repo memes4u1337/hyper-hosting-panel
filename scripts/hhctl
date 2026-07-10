@@ -47,8 +47,12 @@ FTP_LAN_PASV_MIN="${FTP_LAN_PASV_MIN:-40000}"
 FTP_LAN_PASV_MAX="${FTP_LAN_PASV_MAX:-40020}"
 FTP_WAN_PASV_MIN="${FTP_WAN_PASV_MIN:-40100}"
 FTP_WAN_PASV_MAX="${FTP_WAN_PASV_MAX:-40120}"
+FTP_RUNTIME_SCRIPT="${FTP_RUNTIME_SCRIPT:-$BASE_DIR/bin/hyper_ftp_runtime.py}"
+FTP_RUNTIME_VENV="${FTP_RUNTIME_VENV:-$BASE_DIR/venv-ftp}"
+FTP_RUNTIME_RUN_DIR="${FTP_RUNTIME_RUN_DIR:-$BASE_DIR/run}"
+FTP_RUNTIME_LOG_DIR="${FTP_RUNTIME_LOG_DIR:-$BASE_DIR/logs}"
 
-export PANEL_NAME POWERED_BY CONFIGURED_SERVER_IP DETECTED_INTERNAL_IP SERVER_IP PUBLIC_IP PUBLIC_IP_MODE PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB FTP_LAN_PORT FTP_WAN_PORT FTP_LAN_PASV_MIN FTP_LAN_PASV_MAX FTP_WAN_PASV_MIN FTP_WAN_PASV_MAX
+export PANEL_NAME POWERED_BY CONFIGURED_SERVER_IP DETECTED_INTERNAL_IP SERVER_IP PUBLIC_IP PUBLIC_IP_MODE PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB FTP_LAN_PORT FTP_WAN_PORT FTP_LAN_PASV_MIN FTP_LAN_PASV_MAX FTP_WAN_PASV_MIN FTP_WAN_PASV_MAX FTP_RUNTIME_SCRIPT FTP_RUNTIME_VENV FTP_RUNTIME_RUN_DIR FTP_RUNTIME_LOG_DIR
 BOT_USER="${BOT_USER:-hyperbot}"
 PM2_HOME_DIR="${PM2_HOME_DIR:-$BOTS_DIR/.pm2}"
 NODE_MAJOR_MIN="${NODE_MAJOR_MIN:-18}"
@@ -456,23 +460,14 @@ safe_fstab_remove_ftp_paths() {
 }
 
 safe_fstab_append_bind() {
-  local src="${1:-}" dst="${2:-}" tmp
-  [[ -n "$src" && -n "$dst" ]] || return 1
-  [[ -f /etc/fstab ]] || touch /etc/fstab
-  tmp="$(mktemp)"
-  awk -v d="$dst" '!(($2==d) && /HYPER-HOST-FTP/)' /etc/fstab > "$tmp" || true
-  printf '%s %s none bind,nofail 0 0 # HYPER-HOST-FTP\n' "$src" "$dst" >> "$tmp"
-  cat "$tmp" > /etc/fstab
-  rm -f "$tmp"
+  # v55: FTP bind-mounts are runtime-only. /etc/fstab is intentionally never
+  # touched because /etc may be mounted read-only on this server.
+  return 0
 }
 
 ftp_remove_fstab_target() {
-  local dst="${1:-}" tmp
-  [[ -n "$dst" && -f /etc/fstab ]] || return 0
-  tmp="$(mktemp)"
-  awk -v d="$dst" '!(($2==d) && /HYPER-HOST-FTP/)' /etc/fstab > "$tmp" || true
-  cat "$tmp" > /etc/fstab
-  rm -f "$tmp"
+  # v55: there are no persistent FTP entries in /etc/fstab.
+  return 0
 }
 
 ftp_make_path_visible() {
@@ -1301,18 +1296,13 @@ ensure_ftp_virtual_dirs() {
 }
 
 ftp_auth_rebuild_db() {
+  # v55: pyftpdlib reads the normalized text file directly. Berkeley DB is
+  # optional compatibility output only and can never block create/delete.
   ensure_ftp_virtual_dirs
-  command -v db_load >/dev/null 2>&1 || err "db_load не найден: apt-get install -y db-util"
   local normalized newdb
   normalized="$(mktemp)"
-  newdb="${FTP_AUTH_DB}.new.$$"
-
-  # Нормализуем файл авторизации перед db_load.
-  # v53 ошибочно записывал символы "\\n" вместо настоящих переводов строк,
-  # из-за чего db_load завершался с BDB5090 unexpected end of input.
   python3 - "$FTP_AUTH_TXT" "$normalized" <<'PYFTPAUTHNORMALIZE'
 from pathlib import Path
-import secrets
 import sys
 
 auth_path = Path(sys.argv[1])
@@ -1321,46 +1311,71 @@ try:
     raw = auth_path.read_text(encoding='utf-8', errors='surrogateescape')
 except FileNotFoundError:
     raw = ''
-
-# Автоматически лечим файл, испорченный v53: user\\npassword\\n...
 if '\\n' in raw and raw.count('\n') <= 1:
     raw = raw.replace('\\r\\n', '\n').replace('\\n', '\n')
-
 lines = raw.splitlines()
 pairs = []
 seen = set()
-i = 0
-while i + 1 < len(lines):
+for i in range(0, len(lines) - 1, 2):
     username = lines[i].strip()
     password = lines[i + 1]
-    i += 2
     if not username or not password or username in seen:
         continue
     seen.add(username)
     pairs.append((username, password))
-
-# Исходный TXT храним в нормальном построчном формате без фиктивной записи.
+text = ''.join(f'{u}\n{pw}\n' for u, pw in pairs)
 auth_path.parent.mkdir(parents=True, exist_ok=True)
-auth_text = ''.join(f'{u}\n{pw}\n' for u, pw in pairs)
-auth_path.write_text(auth_text, encoding='utf-8', errors='surrogateescape')
+auth_path.write_text(text, encoding='utf-8', errors='surrogateescape')
+normalized_path.write_text(text, encoding='utf-8', errors='surrogateescape')
+PYFTPAUTHNORMALIZE'
+from pathlib import Path
+import sys
 
-# Пустой вход db_load на некоторых сборках Berkeley DB считается ошибкой.
-# Безопасная фиктивная запись не имеет user_config и не может войти в FTP.
-load_pairs = pairs or [('__hyper_host_disabled__', secrets.token_urlsafe(32))]
-normalized_text = ''.join(f'{u}\n{pw}\n' for u, pw in load_pairs)
-normalized_path.write_text(normalized_text, encoding='utf-8', errors='surrogateescape')
+auth_path = Path(sys.argv[1])
+normalized_path = Path(sys.argv[2])
+try:
+    raw = auth_path.read_text(encoding='utf-8', errors='surrogateescape')
+except FileNotFoundError:
+    raw = ''
+if '\n' in raw and raw.count('
+') <= 1:
+    raw = raw.replace('\r\n', '
+').replace('\n', '
+')
+lines = raw.splitlines()
+pairs = []
+seen = set()
+for i in range(0, len(lines) - 1, 2):
+    username = lines[i].strip()
+    password = lines[i + 1]
+    if not username or not password or username in seen:
+        continue
+    seen.add(username)
+    pairs.append((username, password))
+text = ''.join(f'{u}
+{pw}
+' for u, pw in pairs)
+auth_path.parent.mkdir(parents=True, exist_ok=True)
+auth_path.write_text(text, encoding='utf-8', errors='surrogateescape')
+normalized_path.write_text(text, encoding='utf-8', errors='surrogateescape')
 PYFTPAUTHNORMALIZE
+  chmod 0600 "$FTP_AUTH_TXT" 2>/dev/null || true
+  chown root:root "$FTP_AUTH_TXT" 2>/dev/null || true
 
-  rm -f "$newdb" 2>/dev/null || true
-  if ! db_load -T -t hash -f "$normalized" "$newdb"; then
-    rm -f "$normalized" "$newdb" 2>/dev/null || true
-    err "Не удалось собрать Berkeley DB для FTP из $FTP_AUTH_TXT"
+  if command -v db_load >/dev/null 2>&1 && [[ -s "$normalized" ]]; then
+    newdb="${FTP_AUTH_DB}.new.$$"
+    rm -f "$newdb" 2>/dev/null || true
+    if db_load -T -t hash -f "$normalized" "$newdb" >/dev/null 2>&1 && [[ -s "$newdb" ]]; then
+      mv -f "$newdb" "$FTP_AUTH_DB"
+      chmod 0600 "$FTP_AUTH_DB" 2>/dev/null || true
+      chown root:root "$FTP_AUTH_DB" 2>/dev/null || true
+    else
+      rm -f "$newdb" 2>/dev/null || true
+      warn "Berkeley DB не собрана, но FTP runtime продолжает работать через TXT"
+    fi
   fi
-  rm -f "$normalized"
-  [[ -s "$newdb" ]] || { rm -f "$newdb"; err "Berkeley DB для FTP получилась пустой"; }
-  mv -f "$newdb" "$FTP_AUTH_DB"
-  chmod 0600 "$FTP_AUTH_TXT" "$FTP_AUTH_DB" 2>/dev/null || true
-  chown root:root "$FTP_AUTH_TXT" "$FTP_AUTH_DB" 2>/dev/null || true
+  rm -f "$normalized" 2>/dev/null || true
+  return 0
 }
 
 ftp_auth_set_password_for_variants() {
@@ -3090,89 +3105,115 @@ WantedBy=multi-user.target
 EOSVC
 }
 
+ftp_runtime_python() {
+  if [[ -x "$FTP_RUNTIME_VENV/bin/python3" ]] && "$FTP_RUNTIME_VENV/bin/python3" -c 'import pyftpdlib' >/dev/null 2>&1; then
+    printf '%s\n' "$FTP_RUNTIME_VENV/bin/python3"
+  elif /usr/bin/python3 -c 'import pyftpdlib' >/dev/null 2>&1; then
+    printf '%s\n' /usr/bin/python3
+  else
+    return 1
+  fi
+}
+
+ftp_runtime_install_dependency() {
+  local py
+  if py="$(ftp_runtime_python 2>/dev/null)"; then return 0; fi
+  mkdir -p "$FTP_RUNTIME_VENV" "$BASE_DIR/bin" "$FTP_RUNTIME_LOG_DIR" "$FTP_RUNTIME_RUN_DIR"
+  if /usr/bin/python3 -m venv "$FTP_RUNTIME_VENV" >/dev/null 2>&1; then
+    "$FTP_RUNTIME_VENV/bin/python3" -m pip install --disable-pip-version-check --no-cache-dir 'pyftpdlib>=1.5.9,<2.0' >/dev/null 2>&1 || true
+  fi
+  if ! ftp_runtime_python >/dev/null 2>&1; then
+    apt-get update -y >/dev/null 2>&1 || true
+    apt-get install -y python3-pyftpdlib python3-venv python3-pip >/dev/null 2>&1 || true
+  fi
+  ftp_runtime_python >/dev/null 2>&1 || err "Не удалось установить pyftpdlib для FTP runtime"
+}
+
+ftp_runtime_stop() {
+  systemctl stop hyper-host-ftp-lan.service hyper-host-ftp-wan.service hyper-host-vsftpd-lan.service hyper-host-vsftpd-wan.service vsftpd.service hyper-host-ftp.service >/dev/null 2>&1 || true
+  pkill -f 'hyper_ftp_runtime.py' >/dev/null 2>&1 || true
+  local pidfile pid
+  for pidfile in "$FTP_RUNTIME_RUN_DIR"/ftp-*.pid; do
+    [[ -f "$pidfile" ]] || continue
+    pid="$(cat "$pidfile" 2>/dev/null || true)"
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill "$pid" >/dev/null 2>&1 || true
+    rm -f "$pidfile"
+  done
+}
+
+write_ftp_runtime_unit() {
+  local name="$1" port="$2" masq="$3" pmin="$4" pmax="$5" logfile="$6" py="$7"
+  mkdir -p /run/systemd/system "$FTP_RUNTIME_LOG_DIR" "$FTP_RUNTIME_RUN_DIR"
+  cat > "/run/systemd/system/${name}.service" <<EOFTPUNIT
+[Unit]
+Description=HYPER-HOST FTP runtime ${name}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${py} ${FTP_RUNTIME_SCRIPT} --listen 0.0.0.0 --port ${port} --masquerade ${masq} --passive-min ${pmin} --passive-max ${pmax} --auth-file ${FTP_AUTH_TXT} --user-conf-dir ${FTP_USER_CONF_DIR} --ftp-dir ${FTP_DIR} --banner HYPER-HOST-FTP-${name} --log-file ${logfile}
+Restart=always
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOFTPUNIT
+}
+
+ftp_runtime_start_no_systemd() {
+  local py="$1"
+  nohup "$py" "$FTP_RUNTIME_SCRIPT" --listen 0.0.0.0 --port "$FTP_LAN_PORT" --masquerade "$FIXED_INTERNAL_IP" --passive-min "$FTP_LAN_PASV_MIN" --passive-max "$FTP_LAN_PASV_MAX" --auth-file "$FTP_AUTH_TXT" --user-conf-dir "$FTP_USER_CONF_DIR" --ftp-dir "$FTP_DIR" --banner HYPER-HOST-FTP-LAN --log-file "$FTP_RUNTIME_LOG_DIR/ftp-lan.log" >/dev/null 2>&1 & echo $! > "$FTP_RUNTIME_RUN_DIR/ftp-lan.pid"
+  nohup "$py" "$FTP_RUNTIME_SCRIPT" --listen 0.0.0.0 --port "$FTP_WAN_PORT" --masquerade "$FIXED_PUBLIC_IP" --passive-min "$FTP_WAN_PASV_MIN" --passive-max "$FTP_WAN_PASV_MAX" --auth-file "$FTP_AUTH_TXT" --user-conf-dir "$FTP_USER_CONF_DIR" --ftp-dir "$FTP_DIR" --banner HYPER-HOST-FTP-WAN --log-file "$FTP_RUNTIME_LOG_DIR/ftp-wan.log" >/dev/null 2>&1 & echo $! > "$FTP_RUNTIME_RUN_DIR/ftp-wan.pid"
+}
+
+install_ftp_runtime_boot_hook() {
+  command -v crontab >/dev/null 2>&1 || return 0
+  local tmp
+  tmp="$(mktemp)"
+  crontab -l 2>/dev/null | grep -v 'HYPER-HOST-FTP-RUNTIME' > "$tmp" || true
+  printf '%s\n' '@reboot sleep 20 && /usr/local/sbin/hyper-host-ctl ftp-fix >> /opt/hyper-host/logs/ftp-boot.log 2>&1 # HYPER-HOST-FTP-RUNTIME' >> "$tmp"
+  crontab "$tmp" >/dev/null 2>&1 || true
+  rm -f "$tmp"
+}
+
 configure_vsftpd_backend() {
-  export DEBIAN_FRONTEND=noninteractive
-  if ! command -v vsftpd >/dev/null 2>&1 || ! command -v db_load >/dev/null 2>&1; then
-    apt-get install -y vsftpd db-util libpam-modules openssl binutils >/dev/null
-  fi
-  command -v strings >/dev/null 2>&1 || apt-get install -y binutils >/dev/null
+  # v55: proven pyftpdlib runtime backend. It does not use /etc/fstab, PAM,
+  # /etc/passwd or writable /etc, therefore account create/delete works even
+  # when /etc is mounted read-only.
   ensure_ftp_virtual_dirs
-  ftp_auth_rebuild_db
-  vsftpd_certificate_ensure
-  mkdir -p /var/run/vsftpd/empty /etc/pam.d /var/log
-  chmod 0555 /var/run/vsftpd/empty
-
-  cat > /etc/pam.d/vsftpd-hyper-host <<EOPAM
-auth required pam_userdb.so db=${FTP_AUTH_DB_BASE} crypt=none
-account required pam_userdb.so db=${FTP_AUTH_DB_BASE}
-EOPAM
-
-  if ! strings "$(command -v vsftpd)" 2>/dev/null | grep -q 'allow_writeable_chroot'; then
-    err "Установленный vsftpd не поддерживает allow_writeable_chroot. Обнови пакет vsftpd и повтори: sudo hyper connectivity fix"
+  ftp_runtime_install_dependency
+  [[ -x "$FTP_RUNTIME_SCRIPT" ]] || err "FTP runtime script not found: $FTP_RUNTIME_SCRIPT"
+  mkdir -p "$FTP_RUNTIME_LOG_DIR" "$FTP_RUNTIME_RUN_DIR" "$BASE_DIR/bin"
+  local py
+  py="$(ftp_runtime_python)"
+  ftp_runtime_stop
+  if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+    write_ftp_runtime_unit hyper-host-ftp-lan "$FTP_LAN_PORT" "$FIXED_INTERNAL_IP" "$FTP_LAN_PASV_MIN" "$FTP_LAN_PASV_MAX" "$FTP_RUNTIME_LOG_DIR/ftp-lan.log" "$py"
+    write_ftp_runtime_unit hyper-host-ftp-wan "$FTP_WAN_PORT" "$FIXED_PUBLIC_IP" "$FTP_WAN_PASV_MIN" "$FTP_WAN_PASV_MAX" "$FTP_RUNTIME_LOG_DIR/ftp-wan.log" "$py"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl start hyper-host-ftp-lan.service hyper-host-ftp-wan.service
+  else
+    ftp_runtime_start_no_systemd "$py"
   fi
-
-  # Два отдельных экземпляра решают конфликт PASV-адресов:
-  # LAN отвечает 192.168.0.179 и использует 40000-40020;
-  # Internet отвечает 90.189.208.25 и использует 40100-40120.
-  write_vsftpd_instance_config /etc/vsftpd-hyper-lan.conf "$FTP_LAN_PORT" "$FIXED_INTERNAL_IP" "$FTP_LAN_PASV_MIN" "$FTP_LAN_PASV_MAX" /var/log/vsftpd-lan.log
-  write_vsftpd_instance_config /etc/vsftpd-hyper-wan.conf "$FTP_WAN_PORT" "$FIXED_PUBLIC_IP" "$FTP_WAN_PASV_MIN" "$FTP_WAN_PASV_MAX" /var/log/vsftpd-wan.log
-  cat > /etc/vsftpd.conf <<'EOCOMPAT'
-# HYPER-HOST uses two managed instances:
-# /etc/vsftpd-hyper-lan.conf -> TCP 21
-# /etc/vsftpd-hyper-wan.conf -> TCP 2121
-# Do not start the distribution vsftpd.service.
-EOCOMPAT
-
-  if [[ -d /etc/apparmor.d/local ]]; then
-    cat > /etc/apparmor.d/local/usr.sbin.vsftpd <<'EOAA'
-/var/www/hyper-host-ftp/ r,
-/var/www/hyper-host-ftp/** rwkl,
-/var/www/hyper-host-sites/ r,
-/var/www/hyper-host-sites/** rwkl,
-/var/www/hyper-host-bots/ r,
-/var/www/hyper-host-bots/** rwkl,
-/opt/hyper-host/backups/ r,
-/opt/hyper-host/backups/** rwkl,
-/opt/hyper-host/data/vsftpd_virtual_users.db r,
-/opt/hyper-host/ftp/user_conf/ r,
-/opt/hyper-host/ftp/user_conf/** r,
-/etc/vsftpd-hyper-lan.conf r,
-/etc/vsftpd-hyper-wan.conf r,
-/var/log/vsftpd-lan.log rw,
-/var/log/vsftpd-wan.log rw,
-EOAA
-    apparmor_parser -r /etc/apparmor.d/usr.sbin.vsftpd >/dev/null 2>&1 || true
-  fi
-
-  systemctl stop hyper-host-ftp.service vsftpd.service >/dev/null 2>&1 || true
-  systemctl disable hyper-host-ftp.service vsftpd.service >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/hyper-host-ftp.service
-  pkill -f 'hyper_ftp_server.py|hyper-host-ftp-server' >/dev/null 2>&1 || true
-  systemctl unmask vsftpd.service >/dev/null 2>&1 || true
-
-  write_vsftpd_instance_unit hyper-host-vsftpd-lan /etc/vsftpd-hyper-lan.conf "HYPER-HOST FTP LAN 192.168.0.179:21"
-  write_vsftpd_instance_unit hyper-host-vsftpd-wan /etc/vsftpd-hyper-wan.conf "HYPER-HOST FTP WAN backend 0.0.0.0:2121"
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  systemctl enable hyper-host-vsftpd-lan.service hyper-host-vsftpd-wan.service >/dev/null 2>&1 || true
-  systemctl restart hyper-host-vsftpd-lan.service
-  systemctl restart hyper-host-vsftpd-wan.service
+  install_ftp_runtime_boot_hook
 }
 
 hyper_ftp_is_active() {
-  systemctl is-active --quiet hyper-host-vsftpd-lan.service && \
-  systemctl is-active --quiet hyper-host-vsftpd-wan.service && \
   listen_port_tcp "$FTP_LAN_PORT" && listen_port_tcp "$FTP_WAN_PORT"
 }
 
 assert_hyper_ftp_ready() {
   local i
-  for i in 1 2 3 4 5; do
+  for i in 1 2 3 4 5 6 7 8; do
     hyper_ftp_is_active && return 0
     sleep 1
   done
-  journalctl -u hyper-host-vsftpd-lan.service -u hyper-host-vsftpd-wan.service -n 160 --no-pager >&2 2>/dev/null || true
-  tail -n 80 /var/log/vsftpd-lan.log /var/log/vsftpd-wan.log >&2 2>/dev/null || true
-  err "FTP не поднялся на портах 21/2121. Проверь: sudo journalctl -u hyper-host-vsftpd-lan -u hyper-host-vsftpd-wan -n 160 --no-pager"
+  journalctl -u hyper-host-ftp-lan.service -u hyper-host-ftp-wan.service -n 160 --no-pager >&2 2>/dev/null || true
+  tail -n 100 "$FTP_RUNTIME_LOG_DIR/ftp-lan.log" "$FTP_RUNTIME_LOG_DIR/ftp-wan.log" >&2 2>/dev/null || true
+  err "FTP runtime не поднялся на портах 21/2121. Проверь логи: $FTP_RUNTIME_LOG_DIR/ftp-lan.log и ftp-wan.log"
 }
 
 ensure_vsftpd_external_access() {
@@ -3219,25 +3260,27 @@ cmd_ftp_doctor_json() {
   pub="$(public_ip)"; internal="$(detect_internal_ipv4)"; listen21=0; listen2121=0
   listen_port_tcp 21 && listen21=1
   listen_port_tcp 2121 && listen2121=1
-  lan_service="$(systemctl is-active hyper-host-vsftpd-lan.service 2>/dev/null || true)"
-  wan_service="$(systemctl is-active hyper-host-vsftpd-wan.service 2>/dev/null || true)"
+  lan_service="$(systemctl is-active hyper-host-ftp-lan.service 2>/dev/null || true)"
+  wan_service="$(systemctl is-active hyper-host-ftp-wan.service 2>/dev/null || true)"
+  [[ "$listen21" == 1 && "$lan_service" != active ]] && lan_service="runtime"
+  [[ "$listen2121" == 1 && "$wan_service" != active ]] && wan_service="runtime"
   owner21="$(ss -H -ltnp 'sport = :21' 2>/dev/null | grep -oE 'users:\(\("[^"]+' | head -n1 | sed -E 's/users:\(\("//;s/"//' || true)"
   owner2121="$(ss -H -ltnp 'sport = :2121' 2>/dev/null | grep -oE 'users:\(\("[^"]+' | head -n1 | sed -E 's/users:\(\("//;s/"//' || true)"
   lan_banner="$(timeout 3 bash -c 'head -c 120 < /dev/tcp/127.0.0.1/21' 2>/dev/null | tr -d '\r' | head -n1 || true)"
   wan_banner="$(timeout 3 bash -c 'head -c 120 < /dev/tcp/127.0.0.1/2121' 2>/dev/null | tr -d '\r' | head -n1 || true)"
   users_count="$(awk 'NF{c++} END{print int(c/2)}' "$FTP_AUTH_TXT" 2>/dev/null || echo 0)"
-  lan_pasv="$(grep -E '^pasv_(address|min_port|max_port)=' /etc/vsftpd-hyper-lan.conf 2>/dev/null | paste -sd, - || true)"
-  wan_pasv="$(grep -E '^pasv_(address|min_port|max_port)=' /etc/vsftpd-hyper-wan.conf 2>/dev/null | paste -sd, - || true)"
+  lan_pasv="address=${FIXED_INTERNAL_IP},min_port=${FTP_LAN_PASV_MIN},max_port=${FTP_LAN_PASV_MAX}"
+  wan_pasv="address=${FIXED_PUBLIC_IP},min_port=${FTP_WAN_PASV_MIN},max_port=${FTP_WAN_PASV_MAX}"
   issue=""; hint=""
   if [[ "$lan_service" != active || "$listen21" != 1 ]]; then
     issue="LAN FTP не слушает TCP 21"
-    hint="sudo hyper ftp fix; sudo journalctl -u hyper-host-vsftpd-lan -n 120 --no-pager"
+    hint="sudo hyper ftp fix; tail -n 120 /opt/hyper-host/logs/ftp-lan.log"
   elif [[ "$wan_service" != active || "$listen2121" != 1 ]]; then
     issue="WAN FTP backend не слушает TCP 2121"
-    hint="sudo hyper ftp fix; sudo journalctl -u hyper-host-vsftpd-wan -n 120 --no-pager"
+    hint="sudo hyper ftp fix; tail -n 120 /opt/hyper-host/logs/ftp-wan.log"
   elif [[ -z "$lan_banner" || -z "$wan_banner" ]]; then
     issue="Один из FTP-экземпляров не отдаёт banner"
-    hint="sudo journalctl -u hyper-host-vsftpd-lan -u hyper-host-vsftpd-wan -n 160 --no-pager"
+    hint="tail -n 160 /opt/hyper-host/logs/ftp-lan.log /opt/hyper-host/logs/ftp-wan.log"
   elif [[ "${users_count:-0}" == 0 ]]; then
     issue="FTP работает, но нет пользователей"
     hint="sudo hyper ftp user LOGIN PASSWORD all"
@@ -3249,7 +3292,7 @@ cmd_ftp_doctor_json() {
 import os,json
 print(json.dumps({
  'server_ip':os.environ.get('SERVER_IP',''), 'public_ip':os.environ.get('PUBLIC_IP',''),
- 'ftp_backend':'vsftpd dual-instance',
+ 'ftp_backend':'pyftpdlib dual-instance (read-only /etc safe)',
  'services':{'lan':os.environ.get('LAN_SERVICE',''),'wan':os.environ.get('WAN_SERVICE','')},
  'listen_21':os.environ.get('LISTEN21')=='1','listen_2121':os.environ.get('LISTEN2121')=='1',
  'port_owners':{'21':os.environ.get('OWNER21',''),'2121':os.environ.get('OWNER2121','')},
@@ -3257,7 +3300,7 @@ print(json.dumps({
  'ftp_users':int(os.environ.get('USERS_COUNT') or 0),
  'passive_ranges':{'lan':'40000-40020','internet':'40100-40120'},
  'pasv_config':{'lan':os.environ.get('LAN_PASV',''),'wan':os.environ.get('WAN_PASV','')},
- 'tls_optional':True,
+ 'tls_optional':False,
  'lan_endpoint':'192.168.0.179:21','internet_endpoint':'90.189.208.25:2121',
  'router_rules':['TCP 2121 -> 192.168.0.179:2121','TCP 40100-40120 -> 192.168.0.179:40100-40120'],
  'optional_standard_port_alias':'TCP external 21 -> 192.168.0.179:2121',
@@ -3294,7 +3337,7 @@ cmd_access_doctor_json() {
   dns_udp=0; listen_port_udp 53 && dns_udp=1
   nginx="$(systemctl is-active nginx 2>/dev/null || true)"
   mariadb="$(systemctl is-active mariadb 2>/dev/null || systemctl is-active mysql 2>/dev/null || true)"
-  ftp_service="lan=$(systemctl is-active hyper-host-vsftpd-lan.service 2>/dev/null || true),wan=$(systemctl is-active hyper-host-vsftpd-wan.service 2>/dev/null || true)"
+  ftp_service="lan=$(systemctl is-active hyper-host-ftp-lan.service 2>/dev/null || true),wan=$(systemctl is-active hyper-host-ftp-wan.service 2>/dev/null || true)"
   sshsvc="$(systemctl is-active ssh 2>/dev/null || systemctl is-active sshd 2>/dev/null || true)"
   bind9="$(systemctl is-active bind9 2>/dev/null || true)"
   SERVER_IP="$server" PUBLIC_IP="$pub" CONFIGURED_PUBLIC_IP="$cfg" OUTBOUND_PUBLIC_IP="$out" UFW="$ufw" SSH="$ssh" FTP="$ftp" FTP_WAN="$ftp_wan" HTTP="$http" HTTPS="$https" MYSQL="$mysql" DNS_TCP="$dns_tcp" DNS_UDP="$dns_udp" NGINX="$nginx" MARIADB="$mariadb" FTP_SERVICE="$ftp_service" SSHSVC="$sshsvc" BIND9="$bind9" python3 - <<'PYACCESS'
