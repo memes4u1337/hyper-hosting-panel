@@ -34,7 +34,7 @@ DNS_DIR="${DNS_DIR:-/etc/bind/hyper-host-zones}"
 CRON_DIR="/etc/cron.d"
 NGINX_AVAILABLE="/etc/nginx/sites-available"
 NGINX_ENABLED="/etc/nginx/sites-enabled"
-# v58: если /etc/nginx доступен только для чтения, рабочая копия конфигов
+# v59: если /etc/nginx доступен только для чтения, рабочая копия конфигов
 # хранится в /opt и bind-mount'ится поверх /etc/nginx.
 # Никаких записей в /usr/lib/systemd или /etc/systemd: текущий unit живёт в /run,
 # а восстановление после reboot выполняет root crontab из writable /var.
@@ -298,8 +298,65 @@ ensure_nginx_runtime_overlay() {
   log "Nginx runtime ready: $NGINX_RUNTIME_DIR -> /etc/nginx"
 }
 
+nginx_repair_duplicate_panel_name() {
+  # v59: старый panel-конфиг при PANEL_DOMAIN=_ содержал два server_name _.
+  # Меняем только первое вхождение; default server с _ остаётся без изменений.
+  local conf="$NGINX_AVAILABLE/hyper-host-panel.conf"
+  [[ -f "$conf" ]] || return 0
+  python3 - "$conf" <<'PYNGINXPANEL'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding='utf-8', errors='ignore')
+needle = 'server_name _;'
+if text.count(needle) >= 2:
+    text = text.replace(needle, 'server_name hyper-host-panel.invalid;', 1)
+    path.write_text(text, encoding='utf-8')
+PYNGINXPANEL
+}
+
+nginx_repair_log_paths() {
+  # v59: nginx открывает access_log/error_log уже на этапе `nginx -t`.
+  # Если каталог сайта был создан не полностью или остался старый конфиг,
+  # отсутствующий logs/ ронял создание всех следующих сайтов.
+  local conf kind path dir
+  shopt -s nullglob
+  for conf in "$NGINX_ENABLED"/*.conf "$NGINX_ENABLED"/*; do
+    [[ -f "$conf" || -L "$conf" ]] || continue
+    while IFS=$'\t' read -r kind path; do
+      [[ -n "$path" && "$path" == /* ]] || continue
+      dir="$(dirname "$path")"
+      mkdir -p "$dir" || err "Не удалось создать каталог логов Nginx: $dir"
+      touch "$path" || err "Не удалось создать файл лога Nginx: $path"
+      chown www-data:adm "$path" 2>/dev/null || chown www-data:www-data "$path" 2>/dev/null || true
+      chmod 0755 "$dir" 2>/dev/null || true
+      chmod 0640 "$path" 2>/dev/null || true
+    done < <(
+      awk '
+        /^[[:space:]]*(access_log|error_log)[[:space:]]+/ {
+          kind=$1; path=$2; gsub(/;/, "", path);
+          if (path ~ /^\//) print kind "\t" path
+        }
+      ' "$conf" 2>/dev/null || true
+    )
+  done
+  shopt -u nullglob
+}
+
+prepare_site_runtime_dirs() {
+  local domain="$1" site_dir="$SITES_DIR/$domain" log_dir="$SITES_DIR/$domain/logs"
+  mkdir -p "$site_dir/public_html" "$log_dir" || err "Не удалось создать каталоги сайта: $site_dir"
+  touch "$log_dir/access.log" "$log_dir/error.log" || err "Не удалось создать логи сайта: $log_dir"
+  chown -R www-data:www-data "$site_dir" 2>/dev/null || true
+  chmod 2775 "$log_dir" 2>/dev/null || true
+  chmod 0664 "$log_dir/access.log" "$log_dir/error.log" 2>/dev/null || true
+  [[ -d "$log_dir" && -f "$log_dir/access.log" && -f "$log_dir/error.log" ]] \
+    || err "Каталог логов сайта не готов: $log_dir"
+}
+
 cmd_nginx_runtime_fix() {
   ensure_nginx_runtime_overlay
+  nginx_repair_duplicate_panel_name
+  nginx_repair_log_paths
   nginx -t >/dev/null
   systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1
   log "Nginx writable config OK: /etc/nginx -> $NGINX_RUNTIME_DIR"
@@ -307,6 +364,8 @@ cmd_nginx_runtime_fix() {
 
 nginx_reload() {
   ensure_nginx_runtime_overlay
+  nginx_repair_duplicate_panel_name
+  nginx_repair_log_paths
   nginx -t >/dev/null
   systemctl reload nginx
 }
@@ -413,8 +472,12 @@ ensure_acme_locations_all() {
 
 write_panel_nginx_conf() {
   ensure_nginx_runtime_overlay
-  local domain="${1:-$PANEL_DOMAIN}"
+  local domain="${1:-$PANEL_DOMAIN}" named_domain
   [[ -n "$domain" ]] || domain="_"
+  named_domain="$domain"
+  # Когда домен панели не задан, первый и default server раньше оба имели
+  # server_name _, из-за чего nginx писал conflicting server name "_".
+  [[ "$named_domain" == "_" ]] && named_domain="hyper-host-panel.invalid"
   mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled "$PANEL_DIR/public/.well-known/acme-challenge"
   chown -R www-data:www-data "$PANEL_DIR/public/.well-known" 2>/dev/null || true
   chmod -R a+rX "$PANEL_DIR/public/.well-known" 2>/dev/null || true
@@ -423,7 +486,7 @@ write_panel_nginx_conf() {
 server {
     listen 80;
     listen [::]:80;
-    server_name ${domain};
+    server_name ${named_domain};
 
     root ${PANEL_DIR}/public;
     index index.php index.html;
@@ -716,18 +779,25 @@ cmd_add_site() {
   if [[ -n "$PANEL_DOMAIN" && "$PANEL_DOMAIN" != "_" && "$domain" == "$PANEL_DOMAIN" ]]; then
     err "Этот домен закреплён за панелью: $domain. Используй другой домен для сайта или сначала смени panel-domain."
   fi
-  local root="$SITES_DIR/$domain/public_html" sock; sock="$(php_sock_for_version "$phpv")"
-  mkdir -p "$root" "$SITES_DIR/$domain/logs"
+  local root="$SITES_DIR/$domain/public_html" sock conf enabled
+  sock="$(php_sock_for_version "$phpv")"
+  conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
+  enabled="$NGINX_ENABLED/hyper-host-site-$domain.conf"
+
+  # ВАЖНО: сначала создаём public_html + logs + сами log-файлы,
+  # и только потом публикуем конфиг. Иначе nginx -t падает на open(access.log).
+  prepare_site_runtime_dirs "$domain"
   [[ -f "$root/index.php" || -f "$root/index.html" ]] || php_index_template_file "$domain работает" "$root/index.php"
   chown -R www-data:www-data "$SITES_DIR/$domain" 2>/dev/null || true
   fix_web_permissions "$SITES_DIR/$domain"
+  prepare_site_runtime_dirs "$domain"
   local server_names="$domain"
   if [[ -n "$aliases" ]]; then
     IFS=',' read -ra arr <<< "$aliases"
     for a in "${arr[@]}"; do a="$(echo "$a" | xargs)"; [[ -z "$a" ]] && continue; valid_domain "$a" || err "Invalid alias: $a"; server_names="$server_names $a"; done
   fi
   {
-  cat > "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" <<EONGINX
+  cat > "$conf" <<EONGINX
 server {
     listen 80;
     listen [::]:80;
@@ -750,8 +820,12 @@ server {
 }
 EONGINX
   } 2>/dev/null || err "Не удалось записать конфиг nginx для $domain (read-only /etc/nginx?) — сайт не создан."
-  ln -sf "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" "$NGINX_ENABLED/hyper-host-site-$domain.conf"
-  nginx_reload
+  ln -sf "$conf" "$enabled"
+  if ! nginx_reload; then
+    rm -f "$enabled" "$conf" 2>/dev/null || true
+    nginx_reload >/dev/null 2>&1 || true
+    err "Конфиг сайта $domain не прошёл nginx -t; конфиг откатан, файлы сайта сохранены"
+  fi
   log "Site created: $domain -> $root"
 }
 cmd_delete_site() { local domain="${1:-}" mode="${2:---keep-files}"; [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain"; ensure_nginx_runtime_overlay; rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"; nginx_reload; [[ "$mode" == "--delete-files" ]] && rm -rf "$SITES_DIR/$domain"; log "Site deleted: $domain / $mode"; }
