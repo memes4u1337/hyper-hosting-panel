@@ -1,7 +1,14 @@
-HYPER-HOST v61 — FTPS data-channel fix
+HYPER-HOST v62 — ProFTPD explicit FTPS
 
-Исправляет GnuTLS -110 / ECONNABORTED после PASV + MLSD.
-Меняет только FTP runtime и hhctl. Пароль admin не меняется.
+Этот патч меняет только FTP/FTPS backend:
+- убирает запущенный pyftpdlib;
+- ставит ProFTPD + mod_tls;
+- сохраняет существующие FTP-аккаунты, папки и пароли;
+- не меняет Nginx, SQL, сайты, ботов и пароль admin.
 
 Установка:
-sudo bash apply-v61-ftps-data-channel-fix.sh
+sudo bash apply-v62-proftpd-ftps-fix.sh
+
+После установки:
+sudo cat /root/hyper-host-v62-proftpd-report.txt
+sudo hyper-host-ctl ftp-doctor-json

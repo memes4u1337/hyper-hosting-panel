@@ -44,7 +44,7 @@ NGINX_RUNTIME_UNIT="${NGINX_RUNTIME_UNIT:-/run/systemd/system/hyper-host-nginx-r
 NGINX_REBOOT_MARKER="HYPER-HOST-NGINX-RUNTIME"
 NGINX_RUNTIME_LOG="${NGINX_RUNTIME_LOG:-$BASE_DIR/logs/nginx-runtime-boot.log}"
 
-# v53: FTP работает через стандартный vsftpd с виртуальными пользователями PAM/Berkeley DB.
+# v62: один FTP/FTPS-движок ProFTPD; учётные записи и конфиг хранятся в /opt.
 FTP_GUEST_USER="${FTP_GUEST_USER:-www-data}"
 FTP_USER_CONF_DIR="${FTP_USER_CONF_DIR:-$BASE_DIR/ftp/user_conf}"
 FTP_AUTH_TXT="${FTP_AUTH_TXT:-$BASE_DIR/data/vsftpd_virtual_users.txt}"
@@ -53,7 +53,7 @@ FTP_AUTH_DB="${FTP_AUTH_DB:-$FTP_AUTH_DB_BASE.db}"
 FTP_PORT="${FTP_PORT:-21}"
 FTP_PASV_MIN="${FTP_PASV_MIN:-40000}"
 FTP_PASV_MAX="${FTP_PASV_MAX:-40100}"
-# Compatibility aliases for older panel code. v56 runs one service on TCP 21.
+# Compatibility aliases for older panel code. v62 runs one ProFTPD service on TCP 21.
 FTP_LAN_PORT="$FTP_PORT"
 FTP_WAN_PORT="$FTP_PORT"
 FTP_LAN_PASV_MIN="$FTP_PASV_MIN"
@@ -65,6 +65,18 @@ FTP_RUNTIME_VENV="${FTP_RUNTIME_VENV:-$BASE_DIR/venv-ftp}"
 FTP_RUNTIME_RUN_DIR="${FTP_RUNTIME_RUN_DIR:-$BASE_DIR/run}"
 FTP_RUNTIME_LOG_DIR="${FTP_RUNTIME_LOG_DIR:-$BASE_DIR/logs}"
 
+# v62: один промышленный FTP/FTPS-движок ProFTPD. Конфиг, auth и runtime
+# находятся в /opt; PAM, Berkeley DB и запись конфигов FTP в /etc не нужны.
+PROFTPD_DIR="${PROFTPD_DIR:-$BASE_DIR/proftpd}"
+PROFTPD_CONFIG="${PROFTPD_CONFIG:-$PROFTPD_DIR/proftpd.conf}"
+PROFTPD_PASSWD="${PROFTPD_PASSWD:-$PROFTPD_DIR/auth/users.passwd}"
+PROFTPD_GROUP="${PROFTPD_GROUP:-$PROFTPD_DIR/auth/groups}"
+PROFTPD_RUN_DIR="${PROFTPD_RUN_DIR:-$PROFTPD_DIR/run}"
+PROFTPD_LOG_DIR="${PROFTPD_LOG_DIR:-$BASE_DIR/logs/proftpd}"
+PROFTPD_AUTH_BUILDER="${PROFTPD_AUTH_BUILDER:-$BASE_DIR/bin/proftpd_auth_sync.py}"
+PROFTPD_BIN="${PROFTPD_BIN:-/usr/sbin/proftpd}"
+PROFTPD_MODULE_DIR="${PROFTPD_MODULE_DIR:-/usr/lib/proftpd}"
+
 # v60: writable ACME/Certbot storage and FTPS certificate storage.
 # /etc on this server can be read-only, therefore Let's Encrypt state must live in /opt.
 ACME_WEBROOT="${ACME_WEBROOT:-$BASE_DIR/acme-webroot}"
@@ -75,7 +87,7 @@ FTP_TLS_DIR="${FTP_TLS_DIR:-$BASE_DIR/data/ftp-tls}"
 FTP_TLS_CERT_FALLBACK="${FTP_TLS_CERT_FALLBACK:-$FTP_TLS_DIR/fullchain.pem}"
 FTP_TLS_KEY_FALLBACK="${FTP_TLS_KEY_FALLBACK:-$FTP_TLS_DIR/privkey.pem}"
 
-export PANEL_NAME POWERED_BY CONFIGURED_SERVER_IP DETECTED_INTERNAL_IP SERVER_IP PUBLIC_IP PUBLIC_IP_MODE PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB FTP_PORT FTP_PASV_MIN FTP_PASV_MAX FTP_LAN_PORT FTP_WAN_PORT FTP_LAN_PASV_MIN FTP_LAN_PASV_MAX FTP_WAN_PASV_MIN FTP_WAN_PASV_MAX FTP_RUNTIME_SCRIPT FTP_RUNTIME_VENV FTP_RUNTIME_RUN_DIR FTP_RUNTIME_LOG_DIR NGINX_RUNTIME_DIR NGINX_BOOT_SCRIPT NGINX_RUNTIME_UNIT NGINX_REBOOT_MARKER NGINX_RUNTIME_LOG ACME_WEBROOT LE_CONFIG_DIR LE_WORK_DIR LE_LOGS_DIR FTP_TLS_DIR FTP_TLS_CERT_FALLBACK FTP_TLS_KEY_FALLBACK
+export PANEL_NAME POWERED_BY CONFIGURED_SERVER_IP DETECTED_INTERNAL_IP SERVER_IP PUBLIC_IP PUBLIC_IP_MODE PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB FTP_PORT FTP_PASV_MIN FTP_PASV_MAX FTP_LAN_PORT FTP_WAN_PORT FTP_LAN_PASV_MIN FTP_LAN_PASV_MAX FTP_WAN_PASV_MIN FTP_WAN_PASV_MAX FTP_RUNTIME_SCRIPT FTP_RUNTIME_VENV FTP_RUNTIME_RUN_DIR FTP_RUNTIME_LOG_DIR PROFTPD_DIR PROFTPD_CONFIG PROFTPD_PASSWD PROFTPD_GROUP PROFTPD_RUN_DIR PROFTPD_LOG_DIR PROFTPD_AUTH_BUILDER PROFTPD_BIN PROFTPD_MODULE_DIR NGINX_RUNTIME_DIR NGINX_BOOT_SCRIPT NGINX_RUNTIME_UNIT NGINX_REBOOT_MARKER NGINX_RUNTIME_LOG ACME_WEBROOT LE_CONFIG_DIR LE_WORK_DIR LE_LOGS_DIR FTP_TLS_DIR FTP_TLS_CERT_FALLBACK FTP_TLS_KEY_FALLBACK
 BOT_USER="${BOT_USER:-hyperbot}"
 PM2_HOME_DIR="${PM2_HOME_DIR:-$BOTS_DIR/.pm2}"
 NODE_MAJOR_MIN="${NODE_MAJOR_MIN:-18}"
@@ -95,7 +107,7 @@ ensure_nologin_shell() {
   if [[ -x /usr/sbin/nologin ]] && ! grep -qxF /usr/sbin/nologin /etc/shells 2>/dev/null; then echo /usr/sbin/nologin >> /etc/shells 2>/dev/null || true; fi
   if [[ -x /bin/false ]] && ! grep -qxF /bin/false /etc/shells 2>/dev/null; then echo /bin/false >> /etc/shells 2>/dev/null || true; fi
 }
-ensure_dirs() { mkdir -p "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$BACKUP_DIR" "$BASE_DIR/templates" "$BASE_DIR/data" "$BASE_DIR/ftp" "$FTP_USER_CONF_DIR" "$ACME_WEBROOT/.well-known/acme-challenge" "$LE_CONFIG_DIR" "$LE_WORK_DIR" "$LE_LOGS_DIR" "$FTP_TLS_DIR"; }
+ensure_dirs() { mkdir -p "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$BACKUP_DIR" "$BASE_DIR/templates" "$BASE_DIR/data" "$BASE_DIR/ftp" "$FTP_USER_CONF_DIR" "$ACME_WEBROOT/.well-known/acme-challenge" "$LE_CONFIG_DIR" "$LE_WORK_DIR" "$LE_LOGS_DIR" "$FTP_TLS_DIR" "$PROFTPD_DIR/auth" "$PROFTPD_RUN_DIR" "$PROFTPD_LOG_DIR"; }
 
 sql_quote() { sql_escape "$1"; }
 
@@ -1433,7 +1445,7 @@ ftp_scope_label() {
 }
 
 ftp_link_path() {
-  # v53: для chroot vsftpd нужны реальные bind-mount, symlink наружу chroot не работает.
+  # Для chroot ProFTPD нужны реальные bind-mount: symlink наружу chroot не работает.
   local src="${1:-}" dst="${2:-}"
   [[ -n "$src" && -n "$dst" ]] || return 1
   mkdir -p "$src" "$(dirname "$dst")"
@@ -1523,8 +1535,9 @@ ensure_ftp_virtual_dirs() {
 }
 
 ftp_auth_rebuild_db() {
-  # v56: pyftpdlib reads this canonical text file directly. No PAM and no
-  # Berkeley DB are required. The operation is atomic and never writes /etc.
+  # v62: this canonical text file remains the panel source of FTP credentials.
+  # ProFTPD receives an atomic SHA-512 AuthUserFile built under /opt; no PAM,
+  # Berkeley DB, /etc/fstab or writable /etc are required.
   ensure_ftp_virtual_dirs
   local tmp
   tmp="$(mktemp "${FTP_AUTH_TXT}.tmp.XXXXXX")"
@@ -1568,6 +1581,10 @@ PYFTPAUTHNORMALIZE
   chown root:root "$FTP_AUTH_TXT" 2>/dev/null || true
   # Remove obsolete PAM/Berkeley output from old versions. Failure is harmless.
   rm -f "$FTP_AUTH_DB" "$FTP_AUTH_DB_BASE" 2>/dev/null || true
+  if declare -F proftpd_auth_rebuild >/dev/null 2>&1 && [[ -x "$PROFTPD_AUTH_BUILDER" ]]; then
+    proftpd_auth_rebuild || return 1
+    proftpd_reload_quiet
+  fi
   return 0
 }
 
@@ -1622,8 +1639,8 @@ PYFTPAUTHRM
 }
 
 ensure_single_ftp_os_user() {
-  # v42: имя оставлено для совместимости, но Linux-пользователи больше НЕ создаются.
-  # FTP-пользователи живут в pam_userdb, поэтому не трогаем /etc/passwd и нет ошибки useradd lock/read-only.
+  # Имя функции оставлено для совместимости. Linux-пользователи не создаются:
+  # виртуальные учётные записи ProFTPD собираются в AuthUserFile под /opt.
   local username="${1:-}" password="${2:-}" home="${3:-}"
   [[ -n "$username" && -n "$password" && -n "$home" ]] || return 1
   valid_name "$username" || return 1
@@ -1703,7 +1720,7 @@ cmd_delete_ftp() {
   ftp_auth_remove_variants "${variants[@]}"
   for u in "${variants[@]}"; do rm -f "$FTP_USER_CONF_DIR/$u" 2>/dev/null || true; done
   [[ "$home" == "$FTP_DIR"/* ]] && rm -rf --one-file-system "$home" 2>/dev/null || true
-  # pam_userdb читает обновлённую Berkeley DB при следующем входе; restart не нужен.
+  # AuthUserFile уже пересобран; HUP применяет удаление к следующим входам.
   log "FTP user deleted: $username"
 }
 
@@ -1753,16 +1770,21 @@ cmd_ftp_test_login() {
   [[ -n "$username" && -n "$password" ]] || err "Используй: sudo hyper ftp test LOGIN PASSWORD [HOST] [PORT]"
   [[ "$port" =~ ^[0-9]{1,5}$ ]] || err "Некорректный FTP port: $port"
   python3 - "$host" "$username" "$password" "$port" <<'PYFTPTEST'
-import ftplib, io, secrets, sys
+import ftplib, io, secrets, ssl, sys
 host,user,pw,port=sys.argv[1],sys.argv[2],sys.argv[3],int(sys.argv[4])
 name='.hyper-host-ftp-test-' + secrets.token_hex(5) + '.txt'
 payload=('HYPER-HOST FTP OK ' + secrets.token_hex(12)).encode()
 ftp=None
 try:
-    ftp=ftplib.FTP()
+    ctx=ssl._create_unverified_context()
+    ctx.minimum_version=ssl.TLSVersion.TLSv1_2
+    ctx.maximum_version=ssl.TLSVersion.TLSv1_2
+    ftp=ftplib.FTP_TLS(context=ctx, timeout=10)
     ftp.connect(host,port,timeout=10)
     banner=getattr(ftp,'welcome','')
+    ftp.auth()
     ftp.login(user,pw)
+    ftp.prot_p()
     ftp.set_pasv(True)
     ftp.storbinary('STOR ' + name, io.BytesIO(payload))
     received=bytearray()
@@ -1792,7 +1814,7 @@ PYFTPTEST
 cmd_ftp_test_saved_json() {
   local dbfile="${BASE_DIR}/data/hyperhost.sqlite"
   DBFILE="$dbfile" python3 - <<'PYFTPSTORED'
-import ftplib, io, json, os, secrets, sqlite3
+import ftplib, io, json, os, secrets, sqlite3, ssl
 path=os.environ.get('DBFILE','')
 result={'accounts':[], 'tested':0, 'passed':0, 'failed':0, 'ok':True,
         'endpoints':[{'name':'FTP','host':'127.0.0.1','port':21}]}
@@ -1815,7 +1837,8 @@ for user,pw in rows:
     payload=('HYPER-HOST FTP STORED TEST '+secrets.token_hex(12)).encode()
     ftp=None; check={'name':'FTP','host':'127.0.0.1','port':21,'passive':True,'ok':False,'error':''}
     try:
-        ftp=ftplib.FTP(); ftp.connect('127.0.0.1',21,timeout=8); ftp.login(str(user),str(pw)); ftp.set_pasv(True)
+        ctx=ssl._create_unverified_context(); ctx.minimum_version=ssl.TLSVersion.TLSv1_2; ctx.maximum_version=ssl.TLSVersion.TLSv1_2
+        ftp=ftplib.FTP_TLS(context=ctx, timeout=8); ftp.connect('127.0.0.1',21,timeout=8); ftp.auth(); ftp.login(str(user),str(pw)); ftp.prot_p(); ftp.set_pasv(True)
         ftp.storbinary('STOR '+name, io.BytesIO(payload))
         got=bytearray(); ftp.retrbinary('RETR '+name, got.extend)
         if bytes(got)!=payload: raise RuntimeError('upload/download content mismatch')
@@ -3203,124 +3226,62 @@ ftp_passive_address() {
 }
 
 
-vsftpd_certificate_ensure() {
-  local pem="/etc/ssl/private/hyper-host-vsftpd.pem" tmpd
-  [[ -s "$pem" ]] && return 0
-  tmpd="$(mktemp -d)"
-  openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
-    -subj "/CN=${FIXED_PUBLIC_IP}" \
-    -keyout "$tmpd/key.pem" -out "$tmpd/cert.pem" >/dev/null 2>&1
-  cat "$tmpd/key.pem" "$tmpd/cert.pem" > "$pem"
-  chmod 0600 "$pem"
-  rm -rf "$tmpd"
-}
 
-write_vsftpd_instance_config() {
-  local file="$1" port="$2" pasv_address="$3" pasv_min="$4" pasv_max="$5" log_file="$6"
-  cat > "$file" <<EOVSFTPD
-listen=YES
-listen_ipv6=NO
-listen_address=0.0.0.0
-listen_port=${port}
-background=NO
-anonymous_enable=NO
-local_enable=YES
-write_enable=YES
-local_umask=002
-anon_umask=002
-virtual_use_local_privs=YES
-guest_enable=YES
-guest_username=${FTP_GUEST_USER}
-pam_service_name=vsftpd-hyper-host
-user_config_dir=${FTP_USER_CONF_DIR}
-chroot_local_user=YES
-allow_writeable_chroot=YES
-secure_chroot_dir=/var/run/vsftpd/empty
-hide_ids=YES
-use_localtime=YES
-dirlist_enable=YES
-download_enable=YES
-delete_failed_uploads=YES
-ls_recurse_enable=YES
-pasv_enable=YES
-pasv_min_port=${pasv_min}
-pasv_max_port=${pasv_max}
-pasv_address=${pasv_address}
-pasv_addr_resolve=NO
-port_enable=YES
-connect_from_port_20=NO
-xferlog_enable=YES
-xferlog_std_format=NO
-log_ftp_protocol=YES
-vsftpd_log_file=${log_file}
-dual_log_enable=YES
-ssl_enable=YES
-allow_anon_ssl=NO
-force_local_logins_ssl=NO
-force_local_data_ssl=NO
-ssl_tlsv1=YES
-ssl_sslv2=NO
-ssl_sslv3=NO
-require_ssl_reuse=NO
-rsa_cert_file=/etc/ssl/private/hyper-host-vsftpd.pem
-rsa_private_key_file=/etc/ssl/private/hyper-host-vsftpd.pem
-seccomp_sandbox=NO
-EOVSFTPD
-  chmod 0644 "$file"
-}
-
-write_vsftpd_instance_unit() {
-  local name="$1" config="$2" title="$3"
-  cat > "/etc/systemd/system/${name}.service" <<EOSVC
-[Unit]
-Description=${title}
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/sbin/vsftpd ${config}
-Restart=on-failure
-RestartSec=2
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-EOSVC
-}
-
-ftp_runtime_python_ok() {
-  local py="$1"
-  [[ -x "$py" ]] || return 1
-  "$py" - <<'PYFTPVERSION' >/dev/null 2>&1
-from importlib.metadata import version
-from packaging.version import Version
-import OpenSSL, pyftpdlib
-raise SystemExit(0 if Version(version("pyftpdlib")) >= Version("2.2.0") else 1)
-PYFTPVERSION
-}
-
-ftp_runtime_python() {
-  if ftp_runtime_python_ok "$FTP_RUNTIME_VENV/bin/python3"; then
-    printf '%s\n' "$FTP_RUNTIME_VENV/bin/python3"
-  else
-    return 1
+proftpd_install_dependency() {
+  if [[ ! -x "$PROFTPD_BIN" ]] || [[ ! -f "$PROFTPD_MODULE_DIR/mod_tls.so" ]]; then
+    systemctl stop hyper-host-ftp.service hyper-host-ftp-lan.service hyper-host-ftp-wan.service \
+      hyper-host-vsftpd-lan.service hyper-host-vsftpd-wan.service vsftpd.service proftpd.service \
+      >/dev/null 2>&1 || true
+    pkill -f 'hyper_ftp_runtime.py' >/dev/null 2>&1 || true
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y >/dev/null
+    apt-get install -y --no-install-recommends proftpd-core proftpd-mod-crypto lftp >/dev/null \
+      || err "Не удалось установить ProFTPD/mod_tls/lftp"
+  elif ! command -v lftp >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y --no-install-recommends lftp >/dev/null \
+      || err "Не удалось установить lftp для проверки FTPS"
+  fi
+  if ! command -v crontab >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y --no-install-recommends cron >/dev/null \
+      || err "Не удалось установить cron для автозапуска FTP после reboot"
+  fi
+  systemctl start cron.service >/dev/null 2>&1 || true
+  [[ -x "$PROFTPD_BIN" ]] || err "ProFTPD binary not found: $PROFTPD_BIN"
+  "$PROFTPD_BIN" -v >/dev/null 2>&1 || err "ProFTPD не запускается"
+  if ! "$PROFTPD_BIN" -l 2>/dev/null | grep -q 'mod_tls.c' && [[ ! -f "$PROFTPD_MODULE_DIR/mod_tls.so" ]]; then
+    err "ProFTPD установлен без mod_tls"
   fi
 }
 
-ftp_runtime_install_dependency() {
-  mkdir -p "$FTP_RUNTIME_VENV" "$BASE_DIR/bin" "$FTP_RUNTIME_LOG_DIR" "$FTP_RUNTIME_RUN_DIR"
-  if [[ ! -x "$FTP_RUNTIME_VENV/bin/python3" ]]; then
-    /usr/bin/python3 -m venv "$FTP_RUNTIME_VENV" >/dev/null 2>&1 \
-      || err "Не удалось создать FTP venv в $FTP_RUNTIME_VENV"
+proftpd_auth_rebuild() {
+  ensure_ftp_virtual_dirs
+  mkdir -p "$PROFTPD_DIR/auth" "$PROFTPD_RUN_DIR" "$PROFTPD_LOG_DIR"
+  [[ -x "$PROFTPD_AUTH_BUILDER" ]] || err "Не найден генератор ProFTPD AuthUserFile: $PROFTPD_AUTH_BUILDER"
+  local guest uid gid group
+  guest="$FTP_GUEST_USER"
+  id "$guest" >/dev/null 2>&1 || guest="www-data"
+  id "$guest" >/dev/null 2>&1 || err "Нет системного пользователя www-data для ProFTPD"
+  uid="$(id -u "$guest")"; gid="$(id -g "$guest")"; group="$(id -gn "$guest")"
+  "$PROFTPD_AUTH_BUILDER" \
+    --auth-text "$FTP_AUTH_TXT" \
+    --user-conf-dir "$FTP_USER_CONF_DIR" \
+    --ftp-dir "$FTP_DIR" \
+    --passwd-file "$PROFTPD_PASSWD" \
+    --group-file "$PROFTPD_GROUP" \
+    --uid "$uid" --gid "$gid" --group-name "$group" >/dev/null \
+    || err "Не удалось собрать AuthUserFile ProFTPD"
+  chown root:root "$PROFTPD_PASSWD" "$PROFTPD_GROUP" 2>/dev/null || true
+  chmod 0600 "$PROFTPD_PASSWD" "$PROFTPD_GROUP" 2>/dev/null || true
+}
+
+proftpd_reload_quiet() {
+  if systemctl is-active --quiet hyper-host-ftp.service 2>/dev/null; then
+    systemctl reload hyper-host-ftp.service >/dev/null 2>&1 || true
+  elif [[ -s "$PROFTPD_RUN_DIR/proftpd.pid" ]]; then
+    kill -HUP "$(cat "$PROFTPD_RUN_DIR/proftpd.pid" 2>/dev/null)" >/dev/null 2>&1 || true
   fi
-  if ! ftp_runtime_python_ok "$FTP_RUNTIME_VENV/bin/python3"; then
-    "$FTP_RUNTIME_VENV/bin/python3" -m pip install --disable-pip-version-check --no-cache-dir --upgrade \
-      'pip>=23' 'packaging>=23' 'pyftpdlib==2.2.0' 'pyOpenSSL>=24.2,<26' \
-      || err "Не удалось установить pyftpdlib 2.2.0 для стабильного FTPS"
-  fi
-  ftp_runtime_python >/dev/null 2>&1 \
-    || err "FTP runtime требует pyftpdlib 2.2.0+ в $FTP_RUNTIME_VENV"
 }
 
 ftp_tls_generate_fallback() {
@@ -3369,9 +3330,105 @@ ftp_tls_select_certificate() {
   printf '%s\t%s\t%s\n' "$FTP_TLS_CERT_FALLBACK" "$FTP_TLS_KEY_FALLBACK" "self-signed:$FTP_TLS_DIR"
 }
 
+proftpd_load_module_lines() {
+  local compiled
+  compiled="$("$PROFTPD_BIN" -l 2>/dev/null || true)"
+  if [[ -d "$PROFTPD_MODULE_DIR" ]]; then
+    printf 'ModulePath %s\n' "$PROFTPD_MODULE_DIR"
+  fi
+  if ! grep -q 'mod_auth_file.c' <<<"$compiled"; then
+    [[ -f "$PROFTPD_MODULE_DIR/mod_auth_file.so" ]] || err "Модуль mod_auth_file ProFTPD не найден"
+    printf 'LoadModule mod_auth_file.c\n'
+  fi
+  if ! grep -q 'mod_tls.c' <<<"$compiled"; then
+    [[ -f "$PROFTPD_MODULE_DIR/mod_tls.so" ]] || err "Модуль mod_tls ProFTPD не найден"
+    printf 'LoadModule mod_tls.c\n'
+  fi
+}
+
+write_proftpd_config() {
+  local tls_cert="$1" tls_key="$2" guest group module_lines
+  guest="$FTP_GUEST_USER"
+  id "$guest" >/dev/null 2>&1 || guest="www-data"
+  group="$(id -gn "$guest")"
+  module_lines="$(proftpd_load_module_lines)"
+  mkdir -p "$PROFTPD_DIR" "$PROFTPD_RUN_DIR" "$PROFTPD_LOG_DIR"
+  touch "$PROFTPD_LOG_DIR/proftpd.log" "$PROFTPD_LOG_DIR/tls.log" "$PROFTPD_LOG_DIR/xfer.log"
+  chown -R "$guest":"$group" "$PROFTPD_LOG_DIR" 2>/dev/null || true
+  chmod 0750 "$PROFTPD_LOG_DIR" 2>/dev/null || true
+  chmod 0640 "$PROFTPD_LOG_DIR"/*.log 2>/dev/null || true
+  cat > "$PROFTPD_CONFIG" <<EOPROFTPD
+${module_lines}
+ServerName                      "HYPER-HOST FTPS"
+ServerIdent                     on "HYPER-HOST FTPS"
+ServerType                      standalone
+DefaultServer                   on
+UseIPv6                         off
+Port                            ${FTP_PORT}
+User                            ${guest}
+Group                           ${group}
+Umask                           022
+MaxInstances                    128
+MaxClients                      100
+MaxClientsPerHost               16
+MaxLoginAttempts                5
+UseReverseDNS                   off
+IdentLookups                    off
+WtmpLog                         off
+RequireValidShell               off
+UseFtpUsers                     off
+RootLogin                       off
+PersistentPasswd                off
+AuthOrder                       mod_auth_file.c
+AuthUserFile                    ${PROFTPD_PASSWD}
+AuthGroupFile                   ${PROFTPD_GROUP}
+DefaultRoot                     ~
+DefaultChdir                    ~
+AllowOverwrite                  on
+AllowStoreRestart               on
+AllowRetrieveRestart            on
+DeleteAbortedStores             on
+UseSendfile                     off
+PassivePorts                    ${FTP_PASV_MIN} ${FTP_PASV_MAX}
+MasqueradeAddress               ${FIXED_PUBLIC_IP}
+AllowForeignAddress             off
+TimeoutLogin                    60
+TimeoutNoTransfer               300
+TimeoutStalled                  300
+TimeoutIdle                     600
+PidFile                         ${PROFTPD_RUN_DIR}/proftpd.pid
+ScoreboardFile                  ${PROFTPD_RUN_DIR}/proftpd.scoreboard
+SystemLog                       ${PROFTPD_LOG_DIR}/proftpd.log
+TransferLog                     ${PROFTPD_LOG_DIR}/xfer.log
+
+TLSEngine                       on
+TLSRequired                     on
+TLSProtocol                     TLSv1.2
+TLSOptions                      NoSessionReuseRequired
+TLSVerifyClient                 off
+TLSRenegotiate                  none
+TLSRSACertificateFile           ${tls_cert}
+TLSRSACertificateKeyFile        ${tls_key}
+TLSLog                          ${PROFTPD_LOG_DIR}/tls.log
+
+<Directory />
+  AllowOverwrite                on
+</Directory>
+EOPROFTPD
+  chmod 0600 "$PROFTPD_CONFIG"
+  "$PROFTPD_BIN" -t -c "$PROFTPD_CONFIG" >/dev/null 2>&1 || {
+    "$PROFTPD_BIN" -t -c "$PROFTPD_CONFIG" >&2 || true
+    err "Конфиг ProFTPD не прошёл проверку"
+  }
+}
+
 ftp_runtime_stop() {
-  systemctl stop hyper-host-ftp.service hyper-host-ftp-lan.service hyper-host-ftp-wan.service hyper-host-vsftpd-lan.service hyper-host-vsftpd-wan.service vsftpd.service >/dev/null 2>&1 || true
+  systemctl stop hyper-host-ftp.service hyper-host-ftp-lan.service hyper-host-ftp-wan.service hyper-host-vsftpd-lan.service hyper-host-vsftpd-wan.service vsftpd.service proftpd.service proftpd >/dev/null 2>&1 || true
   pkill -f 'hyper_ftp_runtime.py' >/dev/null 2>&1 || true
+  if [[ -s "$PROFTPD_RUN_DIR/proftpd.pid" ]]; then
+    kill "$(cat "$PROFTPD_RUN_DIR/proftpd.pid" 2>/dev/null)" >/dev/null 2>&1 || true
+  fi
+  pkill -x proftpd >/dev/null 2>&1 || true
   local pidfile pid
   for pidfile in "$FTP_RUNTIME_RUN_DIR"/ftp-*.pid; do
     [[ -f "$pidfile" ]] || continue
@@ -3383,21 +3440,23 @@ ftp_runtime_stop() {
 }
 
 write_ftp_runtime_unit() {
-  local py="$1" tls_cert="$2" tls_key="$3"
-  mkdir -p /run/systemd/system "$FTP_RUNTIME_LOG_DIR" "$FTP_RUNTIME_RUN_DIR"
+  mkdir -p /run/systemd/system "$PROFTPD_LOG_DIR" "$PROFTPD_RUN_DIR"
+  ln -sfn /dev/null /run/systemd/system/proftpd.service 2>/dev/null || true
   cat > /run/systemd/system/hyper-host-ftp.service <<EOFTPUNIT
 [Unit]
-Description=HYPER-HOST FTP/FTPS single engine
+Description=HYPER-HOST ProFTPD explicit FTPS
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${py} ${FTP_RUNTIME_SCRIPT} --listen 0.0.0.0 --port ${FTP_PORT} --lan-ip ${FIXED_INTERNAL_IP} --wan-ip ${FIXED_PUBLIC_IP} --passive-min ${FTP_PASV_MIN} --passive-max ${FTP_PASV_MAX} --auth-file ${FTP_AUTH_TXT} --user-conf-dir ${FTP_USER_CONF_DIR} --ftp-dir ${FTP_DIR} --banner HYPER-HOST-FTPS --log-file ${FTP_RUNTIME_LOG_DIR}/ftp.log --tls-cert ${tls_cert} --tls-key ${tls_key}
+ExecStart=${PROFTPD_BIN} -n -c ${PROFTPD_CONFIG}
+ExecReload=/bin/kill -HUP \$MAINPID
 Restart=always
 RestartSec=2
 KillSignal=SIGTERM
-TimeoutStopSec=10
+TimeoutStopSec=15
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
@@ -3405,8 +3464,7 @@ EOFTPUNIT
 }
 
 ftp_runtime_start_no_systemd() {
-  local py="$1" tls_cert="$2" tls_key="$3"
-  nohup "$py" "$FTP_RUNTIME_SCRIPT" --listen 0.0.0.0 --port "$FTP_PORT" --lan-ip "$FIXED_INTERNAL_IP" --wan-ip "$FIXED_PUBLIC_IP" --passive-min "$FTP_PASV_MIN" --passive-max "$FTP_PASV_MAX" --auth-file "$FTP_AUTH_TXT" --user-conf-dir "$FTP_USER_CONF_DIR" --ftp-dir "$FTP_DIR" --banner HYPER-HOST-FTPS --log-file "$FTP_RUNTIME_LOG_DIR/ftp.log" --tls-cert "$tls_cert" --tls-key "$tls_key" >/dev/null 2>&1 &
+  nohup "$PROFTPD_BIN" -n -c "$PROFTPD_CONFIG" >/dev/null 2>&1 &
   echo $! > "$FTP_RUNTIME_RUN_DIR/ftp-main.pid"
 }
 
@@ -3421,25 +3479,23 @@ install_ftp_runtime_boot_hook() {
 }
 
 configure_vsftpd_backend() {
-  # v56: one pyftpdlib process, one TCP port, virtual users from /opt.
+  # Имя функции оставлено для совместимости панели; реальный движок v62 — ProFTPD.
   ensure_ftp_virtual_dirs
-  ftp_auth_rebuild_db
-  ftp_runtime_install_dependency
-  [[ -x "$FTP_RUNTIME_SCRIPT" ]] || err "FTP runtime script not found: $FTP_RUNTIME_SCRIPT"
-  mkdir -p "$FTP_RUNTIME_LOG_DIR" "$FTP_RUNTIME_RUN_DIR" "$BASE_DIR/bin"
-  local py tls_line tls_cert tls_key tls_source
-  py="$(ftp_runtime_python)"
+  proftpd_install_dependency
+  proftpd_auth_rebuild
+  local tls_line tls_cert tls_key tls_source
   tls_line="$(ftp_tls_select_certificate)"
   IFS=$'\t' read -r tls_cert tls_key tls_source <<< "$tls_line"
   [[ -r "$tls_cert" && -r "$tls_key" ]] || err "Не удалось подготовить сертификат FTP TLS"
   printf '%s\n' "$tls_source" > "$FTP_TLS_DIR/active-source"
+  write_proftpd_config "$tls_cert" "$tls_key"
   ftp_runtime_stop
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
-    write_ftp_runtime_unit "$py" "$tls_cert" "$tls_key"
+    write_ftp_runtime_unit
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl start hyper-host-ftp.service
   else
-    ftp_runtime_start_no_systemd "$py" "$tls_cert" "$tls_key"
+    ftp_runtime_start_no_systemd
   fi
   install_ftp_runtime_boot_hook
 }
@@ -3450,7 +3506,7 @@ hyper_ftp_is_active() {
 
 assert_hyper_ftp_ready() {
   local i banner
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     if hyper_ftp_is_active; then
       banner="$(python3 - <<'PYBANNER'
 import socket
@@ -3465,9 +3521,9 @@ PYBANNER
     fi
     sleep 1
   done
-  journalctl -u hyper-host-ftp.service -n 160 --no-pager >&2 2>/dev/null || true
-  tail -n 160 "$FTP_RUNTIME_LOG_DIR/ftp.log" >&2 2>/dev/null || true
-  err "FTP runtime не поднялся на TCP 21. Лог: $FTP_RUNTIME_LOG_DIR/ftp.log"
+  journalctl -u hyper-host-ftp.service -n 200 --no-pager >&2 2>/dev/null || true
+  tail -n 200 "$PROFTPD_LOG_DIR/proftpd.log" "$PROFTPD_LOG_DIR/tls.log" >&2 2>/dev/null || true
+  err "ProFTPD не поднялся на TCP 21. Логи: $PROFTPD_LOG_DIR"
 }
 
 ensure_vsftpd_external_access() {
@@ -3502,12 +3558,13 @@ PYFTPROWS
 )
   fi
   ftp_auth_rebuild_db
+  proftpd_reload_quiet
   assert_hyper_ftp_ready
-  log "FTP исправлен: pyftpdlib 2.2.0, explicit FTPS TLS 1.2 на TCP 21, PASV ${FTP_PASV_MIN}-${FTP_PASV_MAX}"
+  log "FTP исправлен: ProFTPD explicit FTPS TLS 1.2, TCP 21, PASV ${FTP_PASV_MIN}-${FTP_PASV_MAX}"
 }
 
 cmd_ftp_doctor_json() {
-  local pub internal listening service users_count banner owner issue hint pasv tls_source tls_ok
+  local pub internal listening service users_count banner owner issue hint pasv tls_source tls_ok version
   pub="$(public_ip)"; internal="$(detect_internal_ipv4)"; listening=0
   listen_port_tcp "$FTP_PORT" && listening=1
   service="$(systemctl is-active hyper-host-ftp.service 2>/dev/null || true)"
@@ -3523,46 +3580,46 @@ except Exception:
 PYBANNER
 )"
   users_count="$(awk 'NF{c++} END{print int(c/2)}' "$FTP_AUTH_TXT" 2>/dev/null || echo 0)"
-  pasv="dynamic LAN=${FIXED_INTERNAL_IP}, WAN=${FIXED_PUBLIC_IP}, ports=${FTP_PASV_MIN}-${FTP_PASV_MAX}"
+  pasv="WAN=${FIXED_PUBLIC_IP}, ports=${FTP_PASV_MIN}-${FTP_PASV_MAX}"
   tls_source="$(cat "$FTP_TLS_DIR/active-source" 2>/dev/null || true)"
+  version="$("$PROFTPD_BIN" -v 2>/dev/null | head -n1 || true)"
   tls_ok=0
-  "$(ftp_runtime_python 2>/dev/null || printf /usr/bin/python3)" - <<'PYFTPTLS' >/dev/null 2>&1 && tls_ok=1 || true
+  python3 - <<'PYFTPTLS' >/dev/null 2>&1 && tls_ok=1 || true
 import ftplib, ssl
 ctx=ssl._create_unverified_context()
 ctx.minimum_version=ssl.TLSVersion.TLSv1_2
 ctx.maximum_version=ssl.TLSVersion.TLSv1_2
 f=ftplib.FTP_TLS(context=ctx, timeout=5)
 f.connect('127.0.0.1',21)
-f.auth(); f.login('anonymous','doctor@example.invalid') if False else None
+f.auth()
 assert f.sock.version() == 'TLSv1.2'
 f.close()
 PYFTPTLS
   if [[ "$listening" != 1 || ( "$service" != active && "$service" != runtime ) ]]; then
-    issue="FTP не слушает TCP 21"; hint="sudo hyper ftp fix; tail -n 160 /opt/hyper-host/logs/ftp.log"
+    issue="ProFTPD не слушает TCP 21"; hint="sudo hyper ftp fix; tail -n 200 /opt/hyper-host/logs/proftpd/*.log"
   elif [[ "$banner" != 220* ]]; then
-    issue="FTP порт открыт, но нет корректного banner"; hint="tail -n 160 /opt/hyper-host/logs/ftp.log"
+    issue="FTP порт открыт, но нет корректного banner"; hint="tail -n 200 /opt/hyper-host/logs/proftpd/*.log"
   elif [[ "${users_count:-0}" == 0 ]]; then
-    issue="FTP работает, но нет пользователей"; hint="Создай FTP-аккаунт в панели"
+    issue="ProFTPD/FTPS работает, но нет пользователей"; hint="Создай FTP-аккаунт в панели"
   else
-    issue="FTP локально исправен"; hint="LAN и Internet используют TCP 21. На роутере: TCP 21 и TCP ${FTP_PASV_MIN}-${FTP_PASV_MAX} -> ${FIXED_INTERNAL_IP}"
+    issue="ProFTPD/FTPS локально исправен"; hint="Из интернета используй 90.189.208.25:21; роутер: TCP 21 и TCP ${FTP_PASV_MIN}-${FTP_PASV_MAX}"
   fi
-  SERVER_IP="$internal" PUBLIC_IP="$pub" LISTENING="$listening" SERVICE="$service" OWNER="$owner" BANNER="$banner" USERS_COUNT="$users_count" PASV="$pasv" ISSUE="$issue" HINT="$hint" TLS_OK="$tls_ok" TLS_SOURCE="$tls_source" python3 - <<'PYFTP'
+  SERVER_IP="$internal" PUBLIC_IP="$pub" LISTENING="$listening" SERVICE="$service" OWNER="$owner" BANNER="$banner" USERS_COUNT="$users_count" PASV="$pasv" ISSUE="$issue" HINT="$hint" TLS_OK="$tls_ok" TLS_SOURCE="$tls_source" VERSION="$version" python3 - <<'PYFTP'
 import os,json
 print(json.dumps({
  'server_ip':os.environ.get('SERVER_IP',''), 'public_ip':os.environ.get('PUBLIC_IP',''),
- 'ftp_backend':'pyftpdlib single-engine', 'service':os.environ.get('SERVICE',''),
+ 'ftp_backend':'ProFTPD', 'ftp_version':os.environ.get('VERSION',''), 'service':os.environ.get('SERVICE',''),
  'listen_21':os.environ.get('LISTENING')=='1', 'port_owner':os.environ.get('OWNER',''),
  'banner':os.environ.get('BANNER',''), 'ftp_users':int(os.environ.get('USERS_COUNT') or 0),
  'passive_range':'40000-40100', 'pasv_config':os.environ.get('PASV',''),
- 'tls':os.environ.get('TLS_OK')=='1', 'tls_mode':'explicit', 'tls_protocol':'TLSv1.2', 'tls_optional':True,
- 'tls_certificate_source':os.environ.get('TLS_SOURCE',''),
+ 'tls':os.environ.get('TLS_OK')=='1', 'tls_mode':'explicit', 'tls_protocol':'TLSv1.2', 'tls_optional':False,
+ 'tls_session_reuse_required':False, 'tls_certificate_source':os.environ.get('TLS_SOURCE',''),
  'lan_endpoint':'192.168.0.179:21', 'internet_endpoint':'90.189.208.25:21',
  'router_rules':['TCP 21 -> 192.168.0.179:21','TCP 40000-40100 -> 192.168.0.179:40000-40100'],
  'issue':os.environ.get('ISSUE',''), 'hint':os.environ.get('HINT','')
 },ensure_ascii=False))
 PYFTP
 }
-
 
 
 cmd_access_fix() {
