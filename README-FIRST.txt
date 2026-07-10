@@ -1,36 +1,15 @@
-HYPER-HOST v53 — FTP + MySQL connectivity fix
+HYPER-HOST v54
 
-ЗАКРЕПЛЁННЫЕ IP:
-LAN: 192.168.0.179
-WAN: 90.189.208.25
+Запуск:
+  sudo bash apply-v54-ftp-auth-fix.sh
 
-УСТАНОВКА НА УЖЕ УСТАНОВЛЕННУЮ ПАНЕЛЬ:
-  sudo bash apply-v53-connectivity-fix.sh
-
-ПОСЛЕ УСТАНОВКИ:
+После установки:
   sudo hyper connectivity doctor
   sudo hyper connectivity test
+  cat /root/hyper-host-v54-ftp-auth-report.txt
 
-FTP — два отдельных экземпляра, чтобы LAN и WAN не конфликтовали по PASV:
-  LAN:      192.168.0.179, port 21, passive TCP 40000-40020
-  Internet: 90.189.208.25, port 2121, passive TCP 40100-40120
+FTP внутри LAN:
+  192.168.0.179:21
 
-MYSQL ДЛЯ БОТА:
-  бот на этом сервере:       127.0.0.1:3306
-  бот/ПК в домашней сети:    192.168.0.179:3306
-  бот на удалённом сервере:  90.189.208.25:3306
-
-phpMyAdmin — это браузерный интерфейс, а не адрес для подключения бота:
-  http://192.168.0.179/phpmyadmin/
-  http://90.189.208.25/phpmyadmin/
-
-ЕСЛИ UPnP НА РОУТЕРЕ ВЫКЛЮЧЕН, НУЖНЫ РУЧНЫЕ ПРОБРОСЫ:
-  TCP 2121        -> 192.168.0.179:2121
-  TCP 40100-40120 -> 192.168.0.179:40100-40120
-  TCP 3306        -> 192.168.0.179:3306
-
-Необязательный алиас стандартного FTP-порта:
-  внешний TCP 21  -> 192.168.0.179:2121
-
-ПОЛНЫЙ ОТЧЁТ ПОСЛЕ УСТАНОВКИ:
-  /root/hyper-host-v53-connectivity-report.txt
+FTP через интернет:
+  90.189.208.25:2121

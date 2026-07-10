@@ -1303,12 +1303,62 @@ ensure_ftp_virtual_dirs() {
 ftp_auth_rebuild_db() {
   ensure_ftp_virtual_dirs
   command -v db_load >/dev/null 2>&1 || err "db_load не найден: apt-get install -y db-util"
-  local tmp
-  tmp="$(mktemp)"
-  awk 'NF {print}' "$FTP_AUTH_TXT" > "$tmp"
-  rm -f "$FTP_AUTH_DB" 2>/dev/null || true
-  db_load -T -t hash -f "$tmp" "$FTP_AUTH_DB"
-  rm -f "$tmp"
+  local normalized newdb
+  normalized="$(mktemp)"
+  newdb="${FTP_AUTH_DB}.new.$$"
+
+  # Нормализуем файл авторизации перед db_load.
+  # v53 ошибочно записывал символы "\\n" вместо настоящих переводов строк,
+  # из-за чего db_load завершался с BDB5090 unexpected end of input.
+  python3 - "$FTP_AUTH_TXT" "$normalized" <<'PYFTPAUTHNORMALIZE'
+from pathlib import Path
+import secrets
+import sys
+
+auth_path = Path(sys.argv[1])
+normalized_path = Path(sys.argv[2])
+try:
+    raw = auth_path.read_text(encoding='utf-8', errors='surrogateescape')
+except FileNotFoundError:
+    raw = ''
+
+# Автоматически лечим файл, испорченный v53: user\\npassword\\n...
+if '\\n' in raw and raw.count('\n') <= 1:
+    raw = raw.replace('\\r\\n', '\n').replace('\\n', '\n')
+
+lines = raw.splitlines()
+pairs = []
+seen = set()
+i = 0
+while i + 1 < len(lines):
+    username = lines[i].strip()
+    password = lines[i + 1]
+    i += 2
+    if not username or not password or username in seen:
+        continue
+    seen.add(username)
+    pairs.append((username, password))
+
+# Исходный TXT храним в нормальном построчном формате без фиктивной записи.
+auth_path.parent.mkdir(parents=True, exist_ok=True)
+auth_text = ''.join(f'{u}\n{pw}\n' for u, pw in pairs)
+auth_path.write_text(auth_text, encoding='utf-8', errors='surrogateescape')
+
+# Пустой вход db_load на некоторых сборках Berkeley DB считается ошибкой.
+# Безопасная фиктивная запись не имеет user_config и не может войти в FTP.
+load_pairs = pairs or [('__hyper_host_disabled__', secrets.token_urlsafe(32))]
+normalized_text = ''.join(f'{u}\n{pw}\n' for u, pw in load_pairs)
+normalized_path.write_text(normalized_text, encoding='utf-8', errors='surrogateescape')
+PYFTPAUTHNORMALIZE
+
+  rm -f "$newdb" 2>/dev/null || true
+  if ! db_load -T -t hash -f "$normalized" "$newdb"; then
+    rm -f "$normalized" "$newdb" 2>/dev/null || true
+    err "Не удалось собрать Berkeley DB для FTP из $FTP_AUTH_TXT"
+  fi
+  rm -f "$normalized"
+  [[ -s "$newdb" ]] || { rm -f "$newdb"; err "Berkeley DB для FTP получилась пустой"; }
+  mv -f "$newdb" "$FTP_AUTH_DB"
   chmod 0600 "$FTP_AUTH_TXT" "$FTP_AUTH_DB" 2>/dev/null || true
   chown root:root "$FTP_AUTH_TXT" "$FTP_AUTH_DB" 2>/dev/null || true
 }
@@ -1335,9 +1385,9 @@ while i < len(lines):
 for u in users:
     items.extend([u,password])
 path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text('\\n'.join(items)+'\\n', encoding='utf-8')
+path.write_text('\n'.join(items)+'\n', encoding='utf-8')
 PYFTPAUTHSET
-  ftp_auth_rebuild_db || true
+  ftp_auth_rebuild_db
 }
 
 ftp_auth_remove_variants() {
@@ -1356,9 +1406,9 @@ while i < len(lines):
         out.extend([u,p])
     i += 2
 path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(('\\n'.join(out)+'\\n') if out else '', encoding='utf-8')
+path.write_text(('\n'.join(out)+'\n') if out else '', encoding='utf-8')
 PYFTPAUTHRM
-  ftp_auth_rebuild_db || true
+  ftp_auth_rebuild_db
 }
 
 ensure_single_ftp_os_user() {
