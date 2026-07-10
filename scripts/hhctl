@@ -34,11 +34,15 @@ DNS_DIR="${DNS_DIR:-/etc/bind/hyper-host-zones}"
 CRON_DIR="/etc/cron.d"
 NGINX_AVAILABLE="/etc/nginx/sites-available"
 NGINX_ENABLED="/etc/nginx/sites-enabled"
-# v57: если /etc/nginx доступен только для чтения, рабочая копия конфигов
+# v58: если /etc/nginx доступен только для чтения, рабочая копия конфигов
 # хранится в /opt и bind-mount'ится поверх /etc/nginx.
+# Никаких записей в /usr/lib/systemd или /etc/systemd: текущий unit живёт в /run,
+# а восстановление после reboot выполняет root crontab из writable /var.
 NGINX_RUNTIME_DIR="${NGINX_RUNTIME_DIR:-$BASE_DIR/runtime/nginx}"
-NGINX_MOUNT_UNIT="${NGINX_MOUNT_UNIT:-/usr/lib/systemd/system/etc-nginx.mount}"
-NGINX_SERVICE_DROPIN="${NGINX_SERVICE_DROPIN:-/usr/lib/systemd/system/nginx.service.d/20-hyper-host-runtime.conf}"
+NGINX_BOOT_SCRIPT="${NGINX_BOOT_SCRIPT:-$BASE_DIR/bin/hyper-host-nginx-runtime}"
+NGINX_RUNTIME_UNIT="${NGINX_RUNTIME_UNIT:-/run/systemd/system/hyper-host-nginx-runtime.service}"
+NGINX_REBOOT_MARKER="HYPER-HOST-NGINX-RUNTIME"
+NGINX_RUNTIME_LOG="${NGINX_RUNTIME_LOG:-$BASE_DIR/logs/nginx-runtime-boot.log}"
 
 # v53: FTP работает через стандартный vsftpd с виртуальными пользователями PAM/Berkeley DB.
 FTP_GUEST_USER="${FTP_GUEST_USER:-www-data}"
@@ -61,7 +65,7 @@ FTP_RUNTIME_VENV="${FTP_RUNTIME_VENV:-$BASE_DIR/venv-ftp}"
 FTP_RUNTIME_RUN_DIR="${FTP_RUNTIME_RUN_DIR:-$BASE_DIR/run}"
 FTP_RUNTIME_LOG_DIR="${FTP_RUNTIME_LOG_DIR:-$BASE_DIR/logs}"
 
-export PANEL_NAME POWERED_BY CONFIGURED_SERVER_IP DETECTED_INTERNAL_IP SERVER_IP PUBLIC_IP PUBLIC_IP_MODE PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB FTP_PORT FTP_PASV_MIN FTP_PASV_MAX FTP_LAN_PORT FTP_WAN_PORT FTP_LAN_PASV_MIN FTP_LAN_PASV_MAX FTP_WAN_PASV_MIN FTP_WAN_PASV_MAX FTP_RUNTIME_SCRIPT FTP_RUNTIME_VENV FTP_RUNTIME_RUN_DIR FTP_RUNTIME_LOG_DIR NGINX_RUNTIME_DIR NGINX_MOUNT_UNIT NGINX_SERVICE_DROPIN
+export PANEL_NAME POWERED_BY CONFIGURED_SERVER_IP DETECTED_INTERNAL_IP SERVER_IP PUBLIC_IP PUBLIC_IP_MODE PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB FTP_PORT FTP_PASV_MIN FTP_PASV_MAX FTP_LAN_PORT FTP_WAN_PORT FTP_LAN_PASV_MIN FTP_LAN_PASV_MAX FTP_WAN_PASV_MIN FTP_WAN_PASV_MAX FTP_RUNTIME_SCRIPT FTP_RUNTIME_VENV FTP_RUNTIME_RUN_DIR FTP_RUNTIME_LOG_DIR NGINX_RUNTIME_DIR NGINX_BOOT_SCRIPT NGINX_RUNTIME_UNIT NGINX_REBOOT_MARKER NGINX_RUNTIME_LOG
 BOT_USER="${BOT_USER:-hyperbot}"
 PM2_HOME_DIR="${PM2_HOME_DIR:-$BOTS_DIR/.pm2}"
 NODE_MAJOR_MIN="${NODE_MAJOR_MIN:-18}"
@@ -213,58 +217,84 @@ nginx_write_probe() {
   return 1
 }
 
-install_nginx_runtime_units() {
-  mkdir -p "$(dirname "$NGINX_MOUNT_UNIT")" "$(dirname "$NGINX_SERVICE_DROPIN")"
-  cat > "$NGINX_MOUNT_UNIT" <<'EOUNIT'
+install_nginx_runtime_bootstrap() {
+  mkdir -p "$BASE_DIR/bin" "$BASE_DIR/logs" /run/systemd/system
+
+  cat > "$NGINX_BOOT_SCRIPT" <<'EOSCRIPT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+RUNTIME="/opt/hyper-host/runtime/nginx"
+TARGET="/etc/nginx"
+LOG="/opt/hyper-host/logs/nginx-runtime-boot.log"
+mkdir -p "$RUNTIME/sites-available" "$RUNTIME/sites-enabled" "$(dirname "$LOG")"
+exec >>"$LOG" 2>&1
+printf '[%s] nginx runtime bootstrap start\n' "$(date -Is)"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>/run/hyper-host-nginx-runtime.lock
+  flock -x 9
+fi
+probe="$TARGET/.hyper-host-write-test-$$"
+if ( : > "$probe" ) 2>/dev/null; then
+  rm -f "$probe" 2>/dev/null || true
+else
+  mount --bind "$RUNTIME" "$TARGET"
+  mount -o remount,bind,rw "$TARGET" >/dev/null 2>&1 || true
+fi
+probe="$TARGET/.hyper-host-write-test-$$"
+( : > "$probe" ) 2>/dev/null || { echo 'ERROR: /etc/nginx remains read-only'; exit 1; }
+rm -f "$probe" 2>/dev/null || true
+nginx -t
+systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
+printf '[%s] nginx runtime bootstrap ready\n' "$(date -Is)"
+EOSCRIPT
+  chmod 0755 "$NGINX_BOOT_SCRIPT"
+
+  cat > "$NGINX_RUNTIME_UNIT" <<EOUNIT
 [Unit]
-Description=HYPER-HOST writable Nginx configuration
-Before=nginx.service
+Description=HYPER-HOST writable Nginx runtime
 After=local-fs.target
 
-[Mount]
-What=/opt/hyper-host/runtime/nginx
-Where=/etc/nginx
-Type=none
-Options=bind
+[Service]
+Type=oneshot
+ExecStart=$NGINX_BOOT_SCRIPT
+RemainAfterExit=yes
 EOUNIT
-  cat > "$NGINX_SERVICE_DROPIN" <<'EODROPIN'
-[Unit]
-Requires=etc-nginx.mount
-After=etc-nginx.mount
-EODROPIN
-  chmod 0644 "$NGINX_MOUNT_UNIT" "$NGINX_SERVICE_DROPIN"
+  chmod 0644 "$NGINX_RUNTIME_UNIT"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+
+  command -v crontab >/dev/null 2>&1 || err "crontab не найден — невозможно восстановить Nginx runtime после перезагрузки"
+  local cron_tmp
+  cron_tmp="$(mktemp /tmp/hyper-host-nginx-cron.XXXXXX)"
+  crontab -l 2>/dev/null | grep -v "$NGINX_REBOOT_MARKER" > "$cron_tmp" || true
+  printf '%s\n' "@reboot sleep 8 && $NGINX_BOOT_SCRIPT # $NGINX_REBOOT_MARKER" >> "$cron_tmp"
+  crontab "$cron_tmp" || { rm -f "$cron_tmp"; err "Не удалось сохранить root @reboot для Nginx runtime"; }
+  rm -f "$cron_tmp"
 }
 
 ensure_nginx_runtime_overlay() {
-  if nginx_write_probe; then
-    if [[ -f "$NGINX_RUNTIME_DIR/.hyper-host-runtime-ready" ]]; then
-      install_nginx_runtime_units
-      systemctl daemon-reload >/dev/null 2>&1 || true
-    fi
-    return 0
+  if command -v flock >/dev/null 2>&1; then
+    exec 8>/run/hyper-host-nginx-overlay.lock
+    flock -x 8
   fi
 
   command -v mount >/dev/null 2>&1 || err "Команда mount не найдена — невозможно подключить writable Nginx runtime"
   mkdir -p "$NGINX_RUNTIME_DIR"
 
-  # Первый запуск: сохраняем полный действующий /etc/nginx. Повторные запуски
-  # только добавляют отсутствующие системные файлы и не затирают сайты панели.
   if [[ ! -f "$NGINX_RUNTIME_DIR/.hyper-host-runtime-ready" ]]; then
     cp -a /etc/nginx/. "$NGINX_RUNTIME_DIR/" 2>/dev/null || err "Не удалось скопировать действующий /etc/nginx в $NGINX_RUNTIME_DIR"
     touch "$NGINX_RUNTIME_DIR/.hyper-host-runtime-ready"
   else
     cp -an /etc/nginx/. "$NGINX_RUNTIME_DIR/" 2>/dev/null || true
   fi
-  mkdir -p "$NGINX_RUNTIME_DIR/sites-available" "$NGINX_RUNTIME_DIR/sites-enabled"
+  mkdir -p "$NGINX_RUNTIME_DIR/sites-available" "$NGINX_RUNTIME_DIR/sites-enabled" "$BASE_DIR/logs"
 
-  # Bind mount не изменяет read-only /etc: writable-каталог из /opt просто
-  # становится содержимым /etc/nginx для Nginx и панели.
-  mount --bind "$NGINX_RUNTIME_DIR" /etc/nginx 2>/dev/null || err "Не удалось подключить $NGINX_RUNTIME_DIR поверх /etc/nginx"
-  mount -o remount,bind,rw /etc/nginx >/dev/null 2>&1 || true
+  if ! nginx_write_probe; then
+    mount --bind "$NGINX_RUNTIME_DIR" /etc/nginx 2>/dev/null || err "Не удалось подключить $NGINX_RUNTIME_DIR поверх /etc/nginx"
+    mount -o remount,bind,rw /etc/nginx >/dev/null 2>&1 || true
+  fi
   nginx_write_probe || err "Nginx runtime подключён, но /etc/nginx всё ещё read-only"
 
-  install_nginx_runtime_units
-  systemctl daemon-reload >/dev/null 2>&1 || true
+  install_nginx_runtime_bootstrap
   log "Nginx runtime ready: $NGINX_RUNTIME_DIR -> /etc/nginx"
 }
 
