@@ -1,17 +1,12 @@
-HYPER-HOST v63 — ProFTPD explicit FTPS
+HYPER-HOST v64 — точечное исправление теста установки ProFTPD/FTPS
 
-Этот патч меняет только FTP/FTPS backend:
-- убирает запущенный pyftpdlib;
-- ставит ProFTPD + mod_tls;
-- сохраняет существующие FTP-аккаунты, папки и пароли;
-- не меняет Nginx, SQL, сайты, ботов и пароль admin.
+Исправляет только ошибку v63:
+  get: ... File exists
+
+Причина: mktemp заранее создавал пустой файл назначения, а lftp отказывался его перезаписывать.
+В v64 назначение не существует до команды get, включён xfer:clobber и проверяется SHA-256.
 
 Установка:
-sudo bash apply-v63-proftpd-ubuntu-fix.sh
+  sudo bash apply-v64-proftpd-test-fix.sh
 
-После установки:
-sudo cat /root/hyper-host-v63-proftpd-report.txt
-sudo hyper-host-ctl ftp-doctor-json
-
-
-v63: удалены необязательные директивы mod_ident/mod_wtmp, из-за которых Ubuntu 22.04 отклоняла конфиг.
+Nginx, SQL, сайты, FTP-аккаунты и пароль admin не изменяются.
