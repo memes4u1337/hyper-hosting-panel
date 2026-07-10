@@ -65,7 +65,17 @@ FTP_RUNTIME_VENV="${FTP_RUNTIME_VENV:-$BASE_DIR/venv-ftp}"
 FTP_RUNTIME_RUN_DIR="${FTP_RUNTIME_RUN_DIR:-$BASE_DIR/run}"
 FTP_RUNTIME_LOG_DIR="${FTP_RUNTIME_LOG_DIR:-$BASE_DIR/logs}"
 
-export PANEL_NAME POWERED_BY CONFIGURED_SERVER_IP DETECTED_INTERNAL_IP SERVER_IP PUBLIC_IP PUBLIC_IP_MODE PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB FTP_PORT FTP_PASV_MIN FTP_PASV_MAX FTP_LAN_PORT FTP_WAN_PORT FTP_LAN_PASV_MIN FTP_LAN_PASV_MAX FTP_WAN_PASV_MIN FTP_WAN_PASV_MAX FTP_RUNTIME_SCRIPT FTP_RUNTIME_VENV FTP_RUNTIME_RUN_DIR FTP_RUNTIME_LOG_DIR NGINX_RUNTIME_DIR NGINX_BOOT_SCRIPT NGINX_RUNTIME_UNIT NGINX_REBOOT_MARKER NGINX_RUNTIME_LOG
+# v60: writable ACME/Certbot storage and FTPS certificate storage.
+# /etc on this server can be read-only, therefore Let's Encrypt state must live in /opt.
+ACME_WEBROOT="${ACME_WEBROOT:-$BASE_DIR/acme-webroot}"
+LE_CONFIG_DIR="${LE_CONFIG_DIR:-$BASE_DIR/letsencrypt}"
+LE_WORK_DIR="${LE_WORK_DIR:-$BASE_DIR/letsencrypt-work}"
+LE_LOGS_DIR="${LE_LOGS_DIR:-$BASE_DIR/logs/letsencrypt}"
+FTP_TLS_DIR="${FTP_TLS_DIR:-$BASE_DIR/data/ftp-tls}"
+FTP_TLS_CERT_FALLBACK="${FTP_TLS_CERT_FALLBACK:-$FTP_TLS_DIR/fullchain.pem}"
+FTP_TLS_KEY_FALLBACK="${FTP_TLS_KEY_FALLBACK:-$FTP_TLS_DIR/privkey.pem}"
+
+export PANEL_NAME POWERED_BY CONFIGURED_SERVER_IP DETECTED_INTERNAL_IP SERVER_IP PUBLIC_IP PUBLIC_IP_MODE PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB FTP_PORT FTP_PASV_MIN FTP_PASV_MAX FTP_LAN_PORT FTP_WAN_PORT FTP_LAN_PASV_MIN FTP_LAN_PASV_MAX FTP_WAN_PASV_MIN FTP_WAN_PASV_MAX FTP_RUNTIME_SCRIPT FTP_RUNTIME_VENV FTP_RUNTIME_RUN_DIR FTP_RUNTIME_LOG_DIR NGINX_RUNTIME_DIR NGINX_BOOT_SCRIPT NGINX_RUNTIME_UNIT NGINX_REBOOT_MARKER NGINX_RUNTIME_LOG ACME_WEBROOT LE_CONFIG_DIR LE_WORK_DIR LE_LOGS_DIR FTP_TLS_DIR FTP_TLS_CERT_FALLBACK FTP_TLS_KEY_FALLBACK
 BOT_USER="${BOT_USER:-hyperbot}"
 PM2_HOME_DIR="${PM2_HOME_DIR:-$BOTS_DIR/.pm2}"
 NODE_MAJOR_MIN="${NODE_MAJOR_MIN:-18}"
@@ -85,7 +95,7 @@ ensure_nologin_shell() {
   if [[ -x /usr/sbin/nologin ]] && ! grep -qxF /usr/sbin/nologin /etc/shells 2>/dev/null; then echo /usr/sbin/nologin >> /etc/shells 2>/dev/null || true; fi
   if [[ -x /bin/false ]] && ! grep -qxF /bin/false /etc/shells 2>/dev/null; then echo /bin/false >> /etc/shells 2>/dev/null || true; fi
 }
-ensure_dirs() { mkdir -p "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$BACKUP_DIR" "$BASE_DIR/templates" "$BASE_DIR/data" "$BASE_DIR/ftp" "$FTP_USER_CONF_DIR"; }
+ensure_dirs() { mkdir -p "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$BACKUP_DIR" "$BASE_DIR/templates" "$BASE_DIR/data" "$BASE_DIR/ftp" "$FTP_USER_CONF_DIR" "$ACME_WEBROOT/.well-known/acme-challenge" "$LE_CONFIG_DIR" "$LE_WORK_DIR" "$LE_LOGS_DIR" "$FTP_TLS_DIR"; }
 
 sql_quote() { sql_escape "$1"; }
 
@@ -417,55 +427,74 @@ safe_write_file_optional() {
 }
 
 
+ensure_acme_webroot() {
+  mkdir -p "$ACME_WEBROOT/.well-known/acme-challenge"
+  chown -R www-data:www-data "$ACME_WEBROOT" 2>/dev/null || true
+  chmod 0755 "$ACME_WEBROOT" "$ACME_WEBROOT/.well-known" "$ACME_WEBROOT/.well-known/acme-challenge" 2>/dev/null || true
+}
+
 ensure_acme_location_for_conf() {
-  # Всегда переписывает ACME-блок с правильным root.
-  # Старые конфиги могли содержать marker, но root был уже не тот — из-за этого SSL preflight писал,
-  # что nginx локально не отдаёт /.well-known/acme-challenge.
-  local conf="$1" root_path="$2"
+  # v60: challenge хранится в одном writable webroot под /opt.
+  local conf="$1" _site_root="${2:-}"
   [[ -f "$conf" ]] || return 0
-  python3 - "$conf" "$root_path" <<'PYACME'
+  ensure_acme_webroot
+  python3 - "$conf" "$ACME_WEBROOT" <<'PYACME'
 import sys, pathlib, re
 conf = pathlib.Path(sys.argv[1])
-root = sys.argv[2]
+webroot = sys.argv[2]
 text = conf.read_text(encoding='utf-8', errors='ignore')
 block = '\n'.join([
     '',
     '    # HYPER-HOST ACME CHALLENGE',
     '    location ^~ /.well-known/acme-challenge/ {',
-    '        root %s;' % root,
+    '        root %s;' % webroot,
     '        default_type "text/plain";',
     '        try_files $uri =404;',
     '        allow all;',
+    '        access_log off;',
+    '        log_not_found off;',
     '    }',
     ''
 ])
-text = re.sub(r'\n\s*# HYPER-HOST ACME CHALLENGE\n\s*location \^~ /\.well-known/acme-challenge/ \{.*?\n\s*\}\n', '\n', text, flags=re.S)
+text = re.sub(
+    r'\n\s*# HYPER-HOST ACME CHALLENGE\n\s*location \^~ /\.well-known/acme-challenge/ \{.*?\n\s*\}\n',
+    '\n', text, flags=re.S
+)
 needle = '    location ~ /\\. { deny all; }'
 if needle in text:
     text = text.replace(needle, block + '\n' + needle, 1)
 else:
-    m = re.search(r'\n\}', text)
-    if m:
-        text = text[:m.start()] + block + text[m.start():]
-    else:
-        text += block
+    pos = text.rfind('\n}')
+    if pos < 0:
+        raise SystemExit('cannot find closing server brace in %s' % conf)
+    text = text[:pos] + block + text[pos:]
 conf.write_text(text, encoding='utf-8')
 PYACME
 }
 
 ensure_acme_location_for_domain() {
-  local domain="$1" root="$2" conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
-  ensure_acme_location_for_conf "$conf" "$root"
+  local domain="$1" root="$2"
+  local conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
+  local enabled="$NGINX_ENABLED/hyper-host-site-$domain.conf"
+  ensure_nginx_runtime_overlay
+  ensure_acme_webroot
+  if [[ -f "$conf" ]]; then
+    ensure_acme_location_for_conf "$conf" "$root"
+    ln -sfn "$conf" "$enabled"
+  elif [[ -f "$enabled" ]]; then
+    ensure_acme_location_for_conf "$enabled" "$root"
+  fi
 }
 
 ensure_acme_locations_all() {
   local conf domain root
+  ensure_acme_webroot
   shopt -s nullglob
   for conf in "$NGINX_AVAILABLE"/hyper-host-site-*.conf; do
     domain="${conf##*/hyper-host-site-}"; domain="${domain%.conf}"
     root="$(awk '/^[[:space:]]*root[[:space:]]+/ {gsub(";", "", $2); print $2; exit}' "$conf" 2>/dev/null || true)"
     [[ -n "$root" ]] || root="$SITES_DIR/$domain/public_html"
-    ensure_acme_location_for_conf "$conf" "$root"
+    ensure_acme_location_for_domain "$domain" "$root"
   done
   shopt -u nullglob
 }
@@ -791,6 +820,7 @@ cmd_add_site() {
   chown -R www-data:www-data "$SITES_DIR/$domain" 2>/dev/null || true
   fix_web_permissions "$SITES_DIR/$domain"
   prepare_site_runtime_dirs "$domain"
+  ensure_acme_webroot
   local server_names="$domain"
   if [[ -n "$aliases" ]]; then
     IFS=',' read -ra arr <<< "$aliases"
@@ -810,10 +840,12 @@ server {
     location / { try_files \$uri \$uri/ /index.php?\$query_string; }
     # HYPER-HOST ACME CHALLENGE
     location ^~ /.well-known/acme-challenge/ {
-        root ${root};
+        root ${ACME_WEBROOT};
         default_type "text/plain";
         try_files \$uri =404;
         allow all;
+        access_log off;
+        log_not_found off;
     }
     location ~ \.php$ { include snippets/fastcgi-php.conf; fastcgi_read_timeout 600; fastcgi_send_timeout 600; fastcgi_connect_timeout 60; fastcgi_pass unix:${sock}; }
     location ~ /\. { deny all; }
@@ -1057,20 +1089,20 @@ nginx_domains_for_site() {
 }
 
 local_http_challenge_check() {
-  local domain="$1" root="$2" token body url
+  local domain="$1" root="$2" token body
   [[ -d "$root" ]] || return 2
   ensure_acme_location_for_domain "$domain" "$root"
-  nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
-  mkdir -p "$root/.well-known/acme-challenge"
+  ensure_acme_webroot
+  nginx_reload >/dev/null 2>&1 || return 1
   token="hyper-host-ssl-test-$(date +%s)-$$"
-  printf 'ok-%s' "$token" > "$root/.well-known/acme-challenge/$token"
-  chmod -R a+rX "$root/.well-known" 2>/dev/null || true
-  for url in "http://127.0.0.1/.well-known/acme-challenge/$token" "http://${SERVER_IP}/.well-known/acme-challenge/$token"; do
-    body="$(curl -fsS --connect-timeout 1 --max-time 2 -H "Host: $domain" "$url" 2>/dev/null || true)"
-    [[ "$body" == "ok-$token" ]] && { rm -f "$root/.well-known/acme-challenge/$token" 2>/dev/null || true; return 0; }
-  done
-  rm -f "$root/.well-known/acme-challenge/$token" 2>/dev/null || true
-  return 1
+  printf 'ok-%s' "$token" > "$ACME_WEBROOT/.well-known/acme-challenge/$token"
+  chown www-data:www-data "$ACME_WEBROOT/.well-known/acme-challenge/$token" 2>/dev/null || true
+  chmod 0644 "$ACME_WEBROOT/.well-known/acme-challenge/$token" 2>/dev/null || true
+  body="$(curl --noproxy '*' -fsS --connect-timeout 2 --max-time 5 \
+      --resolve "$domain:80:127.0.0.1" \
+      "http://$domain/.well-known/acme-challenge/$token" 2>/dev/null || true)"
+  rm -f "$ACME_WEBROOT/.well-known/acme-challenge/$token" 2>/dev/null || true
+  [[ "$body" == "ok-$token" ]]
 }
 
 ssl_preflight_json() {
@@ -1264,11 +1296,10 @@ cmd_ssl_fix_site() {
   valid_domain "$domain" || err "Invalid domain"
   local root="$(site_root_for_domain "$domain")"
   ensure_acme_location_for_domain "$domain" "$root"
-  mkdir -p "$root/.well-known/acme-challenge"
-  chown -R www-data:www-data "$root/.well-known" 2>/dev/null || true
-  chmod -R a+rX "$root/.well-known" 2>/dev/null || true
+  ensure_acme_webroot
   nginx_reload
-  log "SSL ACME location fixed for $domain -> $root"
+  local_http_challenge_check "$domain" "$root" || err "ACME local check failed for $domain"
+  log "SSL ACME location fixed for $domain -> $ACME_WEBROOT"
 }
 
 cmd_ssl_site() {
@@ -1304,9 +1335,10 @@ cmd_ssl_site() {
   mapfile -t cert_domains < <(printf '%s\n' "${candidates[@]}" | sed '/^$/d' | sort -u)
   [[ ${#cert_domains[@]} -gt 0 ]] || cert_domains=("$domain")
 
-  log_file="/var/log/letsencrypt/hyper-host-${domain}-$(date +%F-%H%M%S).log"
-  mkdir -p /var/log/letsencrypt
-  args=(certbot --nginx --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --expand --redirect --preferred-challenges http --cert-name "$domain")
+  ensure_acme_webroot
+  mkdir -p "$LE_CONFIG_DIR" "$LE_WORK_DIR" "$LE_LOGS_DIR"
+  log_file="$LE_LOGS_DIR/hyper-host-${domain}-$(date +%F-%H%M%S).log"
+  args=(certbot --config-dir "$LE_CONFIG_DIR" --work-dir "$LE_WORK_DIR" --logs-dir "$LE_LOGS_DIR" --nginx --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --expand --redirect --preferred-challenges http --cert-name "$domain")
   for d in "${cert_domains[@]}"; do args+=(-d "$d"); done
 
   log "SSL preflight OK: ${cert_domains[*]} -> $root"
@@ -1315,6 +1347,9 @@ cmd_ssl_site() {
     err "SSL не выпущен: Certbot вернул ошибку. Лог: $log_file. Проверь DNS, 80/443 порты и что домен доступен из интернета."
   fi
   nginx_reload
+  mkdir -p "$FTP_TLS_DIR"
+  printf '%s\n' "$domain" > "$FTP_TLS_DIR/preferred-domain"
+  cmd_ftp_fix_all >/dev/null 2>&1 || warn "SSL выпущен, но FTP TLS не удалось перезапустить автоматически"
   log "SSL issued for ${cert_domains[*]} / log: $log_file"
 }
 
@@ -2831,9 +2866,13 @@ cmd_site_logs() { local domain="${1:-}" kind="${2:-error}" lines="${3:-200}" fil
 
 cmd_ssl_status_json() { python3 - <<'PY'
 import os,glob,json,subprocess,datetime
-items=[]
-for cert in glob.glob('/etc/letsencrypt/live/*/fullchain.pem'):
-    domain=cert.split('/')[-2]
+items=[]; seen=set()
+roots=[os.path.join(os.environ.get('LE_CONFIG_DIR','/opt/hyper-host/letsencrypt'),'live'), '/etc/letsencrypt/live']
+for root in roots:
+  for cert in glob.glob(os.path.join(root,'*','fullchain.pem')):
+    real=os.path.realpath(cert)
+    if real in seen: continue
+    seen.add(real); domain=cert.split('/')[-2]
     try:
         out=subprocess.check_output(['openssl','x509','-in',cert,'-noout','-enddate'], text=True).strip().split('=',1)[1]
         exp=datetime.datetime.strptime(out, '%b %d %H:%M:%S %Y %Z')
@@ -2843,7 +2882,14 @@ for cert in glob.glob('/etc/letsencrypt/live/*/fullchain.pem'):
 print(json.dumps(items, ensure_ascii=False))
 PY
 }
-cmd_ssl_renew_all() { certbot renew --quiet; nginx_reload; log "SSL renew checked"; }
+cmd_ssl_renew_all() {
+  mkdir -p "$LE_CONFIG_DIR" "$LE_WORK_DIR" "$LE_LOGS_DIR"
+  certbot --config-dir "$LE_CONFIG_DIR" --work-dir "$LE_WORK_DIR" --logs-dir "$LE_LOGS_DIR" renew --quiet
+  nginx_reload
+  cmd_ftp_fix_all >/dev/null 2>&1 || true
+  log "SSL renew checked"
+}
+
 cmd_php_list_json() { python3 - <<'PY'
 import glob,os,json,re
 items=[]
@@ -2958,7 +3004,7 @@ for public_html in sorted(glob.glob(os.path.join(SITES_DIR,'*','public_html'))):
         text=open(conf,encoding='utf-8',errors='ignore').read(); aliases=[]; m=re.search(r'server_name\s+([^;]+);', text)
         if m:
             names=[x.strip() for x in m.group(1).split() if x.strip()]; aliases=[x for x in names if x != name]
-        ssl=1 if os.path.exists(f'/etc/letsencrypt/live/{name}/fullchain.pem') else 0
+        ssl=1 if (os.path.exists(os.path.join(os.environ.get('LE_CONFIG_DIR','/opt/hyper-host/letsencrypt'),'live',name,'fullchain.pem')) or os.path.exists(f'/etc/letsencrypt/live/{name}/fullchain.pem')) else 0
         phpm=re.search(r'/run/php/php([0-9.]+)-fpm\.sock', text); phpv=phpm.group(1) if phpm else ''
         sites.append({'domain':name,'aliases':','.join(aliases),'root_path':public_html,'ssl_enabled':ssl,'php_version':phpv})
     else: folders.append({'name':name,'path':public_html})
@@ -3244,9 +3290,9 @@ EOSVC
 }
 
 ftp_runtime_python() {
-  if [[ -x "$FTP_RUNTIME_VENV/bin/python3" ]] && "$FTP_RUNTIME_VENV/bin/python3" -c 'import pyftpdlib' >/dev/null 2>&1; then
+  if [[ -x "$FTP_RUNTIME_VENV/bin/python3" ]] && "$FTP_RUNTIME_VENV/bin/python3" -c 'import pyftpdlib, OpenSSL' >/dev/null 2>&1; then
     printf '%s\n' "$FTP_RUNTIME_VENV/bin/python3"
-  elif /usr/bin/python3 -c 'import pyftpdlib' >/dev/null 2>&1; then
+  elif /usr/bin/python3 -c 'import pyftpdlib, OpenSSL' >/dev/null 2>&1; then
     printf '%s\n' /usr/bin/python3
   else
     return 1
@@ -3258,13 +3304,59 @@ ftp_runtime_install_dependency() {
   if py="$(ftp_runtime_python 2>/dev/null)"; then return 0; fi
   mkdir -p "$FTP_RUNTIME_VENV" "$BASE_DIR/bin" "$FTP_RUNTIME_LOG_DIR" "$FTP_RUNTIME_RUN_DIR"
   if /usr/bin/python3 -m venv "$FTP_RUNTIME_VENV" >/dev/null 2>&1; then
-    "$FTP_RUNTIME_VENV/bin/python3" -m pip install --disable-pip-version-check --no-cache-dir 'pyftpdlib>=1.5.9,<2.0' >/dev/null 2>&1 || true
+    "$FTP_RUNTIME_VENV/bin/python3" -m pip install --disable-pip-version-check --no-cache-dir 'pyftpdlib>=1.5.9,<2.0' 'pyOpenSSL>=21' >/dev/null 2>&1 || true
   fi
   if ! ftp_runtime_python >/dev/null 2>&1; then
     apt-get update -y >/dev/null 2>&1 || true
-    apt-get install -y python3-pyftpdlib python3-venv python3-pip >/dev/null 2>&1 || true
+    apt-get install -y python3-pyftpdlib python3-openssl python3-venv python3-pip >/dev/null 2>&1 || true
   fi
   ftp_runtime_python >/dev/null 2>&1 || err "Не удалось установить pyftpdlib для FTP runtime"
+}
+
+ftp_tls_generate_fallback() {
+  mkdir -p "$FTP_TLS_DIR"
+  if [[ -s "$FTP_TLS_CERT_FALLBACK" && -s "$FTP_TLS_KEY_FALLBACK" ]]; then
+    return 0
+  fi
+  local cn="${PANEL_DOMAIN:-}"
+  [[ -n "$cn" && "$cn" != "_" ]] || cn="ftp.hyper-host.local"
+  local san="DNS:$cn,IP:${FIXED_INTERNAL_IP},IP:${FIXED_PUBLIC_IP}"
+  if ! openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 825 \
+      -keyout "$FTP_TLS_KEY_FALLBACK" -out "$FTP_TLS_CERT_FALLBACK" \
+      -subj "/CN=$cn" -addext "subjectAltName=$san" >/dev/null 2>&1; then
+    openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 825 \
+      -keyout "$FTP_TLS_KEY_FALLBACK" -out "$FTP_TLS_CERT_FALLBACK" \
+      -subj "/CN=$cn" >/dev/null 2>&1
+  fi
+  chmod 0600 "$FTP_TLS_KEY_FALLBACK" 2>/dev/null || true
+  chmod 0644 "$FTP_TLS_CERT_FALLBACK" 2>/dev/null || true
+}
+
+ftp_tls_select_certificate() {
+  local cert key candidate preferred
+  preferred="$(cat "$FTP_TLS_DIR/preferred-domain" 2>/dev/null || true)"
+  for candidate in \
+      "$LE_CONFIG_DIR/live/${preferred:-_}" \
+      /etc/letsencrypt/live/${preferred:-_} \
+      "$LE_CONFIG_DIR/live/${PANEL_DOMAIN:-_}" \
+      "$LE_CONFIG_DIR/live/hyper-host-panel-${PANEL_DOMAIN:-_}" \
+      /etc/letsencrypt/live/${PANEL_DOMAIN:-_} \
+      /etc/letsencrypt/live/hyper-host-panel-${PANEL_DOMAIN:-_}; do
+    cert="$candidate/fullchain.pem"; key="$candidate/privkey.pem"
+    if [[ -r "$cert" && -r "$key" ]]; then
+      printf '%s\t%s\t%s\n' "$cert" "$key" "$candidate"
+      return 0
+    fi
+  done
+  while IFS= read -r cert; do
+    key="$(dirname "$cert")/privkey.pem"
+    if [[ -r "$cert" && -r "$key" ]]; then
+      printf '%s\t%s\t%s\n' "$cert" "$key" "$(dirname "$cert")"
+      return 0
+    fi
+  done < <(find -L "$LE_CONFIG_DIR/live" /etc/letsencrypt/live -mindepth 2 -maxdepth 2 -name fullchain.pem -type f 2>/dev/null | sort)
+  ftp_tls_generate_fallback
+  printf '%s\t%s\t%s\n' "$FTP_TLS_CERT_FALLBACK" "$FTP_TLS_KEY_FALLBACK" "self-signed:$FTP_TLS_DIR"
 }
 
 ftp_runtime_stop() {
@@ -3281,17 +3373,17 @@ ftp_runtime_stop() {
 }
 
 write_ftp_runtime_unit() {
-  local py="$1"
+  local py="$1" tls_cert="$2" tls_key="$3"
   mkdir -p /run/systemd/system "$FTP_RUNTIME_LOG_DIR" "$FTP_RUNTIME_RUN_DIR"
   cat > /run/systemd/system/hyper-host-ftp.service <<EOFTPUNIT
 [Unit]
-Description=HYPER-HOST FTP single engine
+Description=HYPER-HOST FTP/FTPS single engine
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${py} ${FTP_RUNTIME_SCRIPT} --listen 0.0.0.0 --port ${FTP_PORT} --lan-ip ${FIXED_INTERNAL_IP} --wan-ip ${FIXED_PUBLIC_IP} --passive-min ${FTP_PASV_MIN} --passive-max ${FTP_PASV_MAX} --auth-file ${FTP_AUTH_TXT} --user-conf-dir ${FTP_USER_CONF_DIR} --ftp-dir ${FTP_DIR} --banner HYPER-HOST-FTP --log-file ${FTP_RUNTIME_LOG_DIR}/ftp.log
+ExecStart=${py} ${FTP_RUNTIME_SCRIPT} --listen 0.0.0.0 --port ${FTP_PORT} --lan-ip ${FIXED_INTERNAL_IP} --wan-ip ${FIXED_PUBLIC_IP} --passive-min ${FTP_PASV_MIN} --passive-max ${FTP_PASV_MAX} --auth-file ${FTP_AUTH_TXT} --user-conf-dir ${FTP_USER_CONF_DIR} --ftp-dir ${FTP_DIR} --banner HYPER-HOST-FTPS --log-file ${FTP_RUNTIME_LOG_DIR}/ftp.log --tls-cert ${tls_cert} --tls-key ${tls_key}
 Restart=always
 RestartSec=2
 KillSignal=SIGTERM
@@ -3303,8 +3395,8 @@ EOFTPUNIT
 }
 
 ftp_runtime_start_no_systemd() {
-  local py="$1"
-  nohup "$py" "$FTP_RUNTIME_SCRIPT" --listen 0.0.0.0 --port "$FTP_PORT" --lan-ip "$FIXED_INTERNAL_IP" --wan-ip "$FIXED_PUBLIC_IP" --passive-min "$FTP_PASV_MIN" --passive-max "$FTP_PASV_MAX" --auth-file "$FTP_AUTH_TXT" --user-conf-dir "$FTP_USER_CONF_DIR" --ftp-dir "$FTP_DIR" --banner HYPER-HOST-FTP --log-file "$FTP_RUNTIME_LOG_DIR/ftp.log" >/dev/null 2>&1 &
+  local py="$1" tls_cert="$2" tls_key="$3"
+  nohup "$py" "$FTP_RUNTIME_SCRIPT" --listen 0.0.0.0 --port "$FTP_PORT" --lan-ip "$FIXED_INTERNAL_IP" --wan-ip "$FIXED_PUBLIC_IP" --passive-min "$FTP_PASV_MIN" --passive-max "$FTP_PASV_MAX" --auth-file "$FTP_AUTH_TXT" --user-conf-dir "$FTP_USER_CONF_DIR" --ftp-dir "$FTP_DIR" --banner HYPER-HOST-FTPS --log-file "$FTP_RUNTIME_LOG_DIR/ftp.log" --tls-cert "$tls_cert" --tls-key "$tls_key" >/dev/null 2>&1 &
   echo $! > "$FTP_RUNTIME_RUN_DIR/ftp-main.pid"
 }
 
@@ -3325,15 +3417,19 @@ configure_vsftpd_backend() {
   ftp_runtime_install_dependency
   [[ -x "$FTP_RUNTIME_SCRIPT" ]] || err "FTP runtime script not found: $FTP_RUNTIME_SCRIPT"
   mkdir -p "$FTP_RUNTIME_LOG_DIR" "$FTP_RUNTIME_RUN_DIR" "$BASE_DIR/bin"
-  local py
+  local py tls_line tls_cert tls_key tls_source
   py="$(ftp_runtime_python)"
+  tls_line="$(ftp_tls_select_certificate)"
+  IFS=$'\t' read -r tls_cert tls_key tls_source <<< "$tls_line"
+  [[ -r "$tls_cert" && -r "$tls_key" ]] || err "Не удалось подготовить сертификат FTP TLS"
+  printf '%s\n' "$tls_source" > "$FTP_TLS_DIR/active-source"
   ftp_runtime_stop
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
-    write_ftp_runtime_unit "$py"
+    write_ftp_runtime_unit "$py" "$tls_cert" "$tls_key"
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl start hyper-host-ftp.service
   else
-    ftp_runtime_start_no_systemd "$py"
+    ftp_runtime_start_no_systemd "$py" "$tls_cert" "$tls_key"
   fi
   install_ftp_runtime_boot_hook
 }
@@ -3397,11 +3493,11 @@ PYFTPROWS
   fi
   ftp_auth_rebuild_db
   assert_hyper_ftp_ready
-  log "FTP исправлен: один pyftpdlib-сервис, TCP 21, PASV ${FTP_PASV_MIN}-${FTP_PASV_MAX}"
+  log "FTP исправлен: один pyftpdlib FTPS-сервис, explicit TLS на TCP 21, PASV ${FTP_PASV_MIN}-${FTP_PASV_MAX}"
 }
 
 cmd_ftp_doctor_json() {
-  local pub internal listening service users_count banner owner issue hint pasv
+  local pub internal listening service users_count banner owner issue hint pasv tls_source tls_ok
   pub="$(public_ip)"; internal="$(detect_internal_ipv4)"; listening=0
   listen_port_tcp "$FTP_PORT" && listening=1
   service="$(systemctl is-active hyper-host-ftp.service 2>/dev/null || true)"
@@ -3418,6 +3514,16 @@ PYBANNER
 )"
   users_count="$(awk 'NF{c++} END{print int(c/2)}' "$FTP_AUTH_TXT" 2>/dev/null || echo 0)"
   pasv="dynamic LAN=${FIXED_INTERNAL_IP}, WAN=${FIXED_PUBLIC_IP}, ports=${FTP_PASV_MIN}-${FTP_PASV_MAX}"
+  tls_source="$(cat "$FTP_TLS_DIR/active-source" 2>/dev/null || true)"
+  tls_ok=0
+  python3 - <<'PYFTPTLS' >/dev/null 2>&1 && tls_ok=1 || true
+import ftplib, ssl
+ctx=ssl._create_unverified_context()
+f=ftplib.FTP_TLS(context=ctx, timeout=3)
+f.connect('127.0.0.1',21)
+f.auth()
+f.close()
+PYFTPTLS
   if [[ "$listening" != 1 || ( "$service" != active && "$service" != runtime ) ]]; then
     issue="FTP не слушает TCP 21"; hint="sudo hyper ftp fix; tail -n 160 /opt/hyper-host/logs/ftp.log"
   elif [[ "$banner" != 220* ]]; then
@@ -3427,7 +3533,7 @@ PYBANNER
   else
     issue="FTP локально исправен"; hint="LAN и Internet используют TCP 21. На роутере: TCP 21 и TCP ${FTP_PASV_MIN}-${FTP_PASV_MAX} -> ${FIXED_INTERNAL_IP}"
   fi
-  SERVER_IP="$internal" PUBLIC_IP="$pub" LISTENING="$listening" SERVICE="$service" OWNER="$owner" BANNER="$banner" USERS_COUNT="$users_count" PASV="$pasv" ISSUE="$issue" HINT="$hint" python3 - <<'PYFTP'
+  SERVER_IP="$internal" PUBLIC_IP="$pub" LISTENING="$listening" SERVICE="$service" OWNER="$owner" BANNER="$banner" USERS_COUNT="$users_count" PASV="$pasv" ISSUE="$issue" HINT="$hint" TLS_OK="$tls_ok" TLS_SOURCE="$tls_source" python3 - <<'PYFTP'
 import os,json
 print(json.dumps({
  'server_ip':os.environ.get('SERVER_IP',''), 'public_ip':os.environ.get('PUBLIC_IP',''),
@@ -3435,7 +3541,9 @@ print(json.dumps({
  'listen_21':os.environ.get('LISTENING')=='1', 'port_owner':os.environ.get('OWNER',''),
  'banner':os.environ.get('BANNER',''), 'ftp_users':int(os.environ.get('USERS_COUNT') or 0),
  'passive_range':'40000-40100', 'pasv_config':os.environ.get('PASV',''),
- 'tls':False, 'lan_endpoint':'192.168.0.179:21', 'internet_endpoint':'90.189.208.25:21',
+ 'tls':os.environ.get('TLS_OK')=='1', 'tls_mode':'explicit', 'tls_optional':True,
+ 'tls_certificate_source':os.environ.get('TLS_SOURCE',''),
+ 'lan_endpoint':'192.168.0.179:21', 'internet_endpoint':'90.189.208.25:21',
  'router_rules':['TCP 21 -> 192.168.0.179:21','TCP 40000-40100 -> 192.168.0.179:40000-40100'],
  'issue':os.environ.get('ISSUE',''), 'hint':os.environ.get('HINT','')
 },ensure_ascii=False))
@@ -4018,14 +4126,18 @@ cmd_panel_ssl() {
   if [[ -n "$expected" && "$check_ip" != "$expected" ]]; then
     err "DNS панели смотрит не туда: $domain -> ${check_ip:-нет A}. Нужно: A $domain $expected"
   fi
-  local log_file="/var/log/letsencrypt/hyper-host-panel-${domain}-$(date +%F-%H%M%S).log"
-  mkdir -p /var/log/letsencrypt
+  ensure_acme_webroot
+  mkdir -p "$LE_CONFIG_DIR" "$LE_WORK_DIR" "$LE_LOGS_DIR"
+  local log_file="$LE_LOGS_DIR/hyper-host-panel-${domain}-$(date +%F-%H%M%S).log"
   log "Panel SSL preflight OK: $domain -> $root"
-  if ! certbot --nginx --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --expand --redirect --preferred-challenges http --cert-name "hyper-host-panel-$domain" -d "$domain" >"$log_file" 2>&1; then
+  if ! certbot --config-dir "$LE_CONFIG_DIR" --work-dir "$LE_WORK_DIR" --logs-dir "$LE_LOGS_DIR" --nginx --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --expand --redirect --preferred-challenges http --cert-name "hyper-host-panel-$domain" -d "$domain" >"$log_file" 2>&1; then
     tail -n 120 "$log_file" >&2 || true
     err "SSL панели не выпущен. Лог: $log_file. Проверь проброс TCP 80/443 на $SERVER_IP."
   fi
   nginx_reload
+  mkdir -p "$FTP_TLS_DIR"
+  printf '%s\n' "$domain" > "$FTP_TLS_DIR/preferred-domain"
+  cmd_ftp_fix_all >/dev/null 2>&1 || warn "SSL панели выпущен, но FTP TLS не удалось перезапустить автоматически"
   log "Panel SSL issued: https://$domain / log: $log_file"
 }
 

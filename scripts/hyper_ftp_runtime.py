@@ -18,7 +18,7 @@ from typing import Dict, Tuple
 
 try:
     from pyftpdlib.authorizers import AuthenticationFailed, DummyAuthorizer
-    from pyftpdlib.handlers import FTPHandler
+    from pyftpdlib.handlers import FTPHandler, TLS_FTPHandler
     from pyftpdlib.servers import FTPServer
 except Exception as exc:  # pragma: no cover
     print(f"pyftpdlib import failed: {exc}", file=sys.stderr)
@@ -170,7 +170,7 @@ class ReloadingAuthorizer(DummyAuthorizer):
         return super().get_msg_quit(username)
 
 
-class HyperFTPHandler(FTPHandler):
+class HyperHandlerMixin:
     permit_foreign_addresses = False
     permit_privileged_ports = False
     use_sendfile = True
@@ -179,26 +179,34 @@ class HyperFTPHandler(FTPHandler):
 
     def on_connect(self):
         selected = self.lan_ip if is_lan_client(self.remote_ip) else self.wan_ip
-        # PassiveDTP reads the command-channel instance attribute at PASV time.
         self.masquerade_address = selected
         local_ip, local_port = self.socket.getsockname()[:2]
         logging.info(
-            "connect remote=%s:%s local=%s:%s pasv_address=%s",
+            "connect remote=%s:%s local=%s:%s pasv_address=%s tls=%s",
             self.remote_ip,
             self.remote_port,
             local_ip,
             local_port,
             selected,
+            isinstance(self, TLS_FTPHandler),
         )
 
     def on_login(self, username):
-        logging.info("login ok user=%s remote=%s", username, self.remote_ip)
+        logging.info("login ok user=%s remote=%s tls=%s", username, self.remote_ip, getattr(self, "_ssl_established", False))
 
     def on_login_failed(self, username, password):
         logging.warning("login failed user=%s remote=%s", username, self.remote_ip)
 
     def on_disconnect(self):
         logging.info("disconnect remote=%s", self.remote_ip)
+
+
+class HyperFTPHandler(HyperHandlerMixin, FTPHandler):
+    pass
+
+
+class HyperTLSFTPHandler(HyperHandlerMixin, TLS_FTPHandler):
+    pass
 
 
 def parse_args() -> argparse.Namespace:
@@ -212,8 +220,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--auth-file", required=True)
     parser.add_argument("--user-conf-dir", required=True)
     parser.add_argument("--ftp-dir", required=True)
-    parser.add_argument("--banner", default="HYPER-HOST FTP ready")
+    parser.add_argument("--banner", default="HYPER-HOST FTP/FTPS ready")
     parser.add_argument("--log-file", required=True)
+    parser.add_argument("--tls-cert")
+    parser.add_argument("--tls-key")
+    parser.add_argument("--tls-control-required", action="store_true")
+    parser.add_argument("--tls-data-required", action="store_true")
     return parser.parse_args()
 
 
@@ -243,7 +255,20 @@ def main() -> int:
     auth_file.touch(exist_ok=True)
 
     authorizer = ReloadingAuthorizer(auth_file, user_conf_dir, ftp_dir)
-    handler = HyperFTPHandler
+    tls_enabled = bool(args.tls_cert and args.tls_key)
+    if tls_enabled:
+        cert = Path(args.tls_cert)
+        key = Path(args.tls_key)
+        if not cert.is_file() or not key.is_file():
+            raise SystemExit("TLS certificate or key not found")
+        handler = HyperTLSFTPHandler
+        handler.certfile = str(cert)
+        handler.keyfile = str(key)
+        # Explicit FTPS is available while plain FTP remains compatible.
+        handler.tls_control_required = bool(args.tls_control_required)
+        handler.tls_data_required = bool(args.tls_data_required)
+    else:
+        handler = HyperFTPHandler
     handler.authorizer = authorizer
     handler.banner = args.banner
     handler.lan_ip = args.lan_ip
@@ -263,13 +288,16 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     logging.info(
-        "starting HYPER-HOST FTP listen=%s:%d lan_ip=%s wan_ip=%s passive=%d-%d",
+        "starting HYPER-HOST FTP listen=%s:%d lan_ip=%s wan_ip=%s passive=%d-%d tls=%s control_required=%s data_required=%s",
         args.listen,
         args.port,
         args.lan_ip,
         args.wan_ip,
         args.passive_min,
         args.passive_max,
+        tls_enabled,
+        bool(args.tls_control_required),
+        bool(args.tls_data_required),
     )
     server.serve_forever(timeout=1, blocking=True, handle_exit=True)
     return 0
