@@ -34,6 +34,11 @@ DNS_DIR="${DNS_DIR:-/etc/bind/hyper-host-zones}"
 CRON_DIR="/etc/cron.d"
 NGINX_AVAILABLE="/etc/nginx/sites-available"
 NGINX_ENABLED="/etc/nginx/sites-enabled"
+# v57: если /etc/nginx доступен только для чтения, рабочая копия конфигов
+# хранится в /opt и bind-mount'ится поверх /etc/nginx.
+NGINX_RUNTIME_DIR="${NGINX_RUNTIME_DIR:-$BASE_DIR/runtime/nginx}"
+NGINX_MOUNT_UNIT="${NGINX_MOUNT_UNIT:-/usr/lib/systemd/system/etc-nginx.mount}"
+NGINX_SERVICE_DROPIN="${NGINX_SERVICE_DROPIN:-/usr/lib/systemd/system/nginx.service.d/20-hyper-host-runtime.conf}"
 
 # v53: FTP работает через стандартный vsftpd с виртуальными пользователями PAM/Berkeley DB.
 FTP_GUEST_USER="${FTP_GUEST_USER:-www-data}"
@@ -56,7 +61,7 @@ FTP_RUNTIME_VENV="${FTP_RUNTIME_VENV:-$BASE_DIR/venv-ftp}"
 FTP_RUNTIME_RUN_DIR="${FTP_RUNTIME_RUN_DIR:-$BASE_DIR/run}"
 FTP_RUNTIME_LOG_DIR="${FTP_RUNTIME_LOG_DIR:-$BASE_DIR/logs}"
 
-export PANEL_NAME POWERED_BY CONFIGURED_SERVER_IP DETECTED_INTERNAL_IP SERVER_IP PUBLIC_IP PUBLIC_IP_MODE PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB FTP_PORT FTP_PASV_MIN FTP_PASV_MAX FTP_LAN_PORT FTP_WAN_PORT FTP_LAN_PASV_MIN FTP_LAN_PASV_MAX FTP_WAN_PASV_MIN FTP_WAN_PASV_MAX FTP_RUNTIME_SCRIPT FTP_RUNTIME_VENV FTP_RUNTIME_RUN_DIR FTP_RUNTIME_LOG_DIR
+export PANEL_NAME POWERED_BY CONFIGURED_SERVER_IP DETECTED_INTERNAL_IP SERVER_IP PUBLIC_IP PUBLIC_IP_MODE PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB FTP_PORT FTP_PASV_MIN FTP_PASV_MAX FTP_LAN_PORT FTP_WAN_PORT FTP_LAN_PASV_MIN FTP_LAN_PASV_MAX FTP_WAN_PASV_MIN FTP_WAN_PASV_MAX FTP_RUNTIME_SCRIPT FTP_RUNTIME_VENV FTP_RUNTIME_RUN_DIR FTP_RUNTIME_LOG_DIR NGINX_RUNTIME_DIR NGINX_MOUNT_UNIT NGINX_SERVICE_DROPIN
 BOT_USER="${BOT_USER:-hyperbot}"
 PM2_HOME_DIR="${PM2_HOME_DIR:-$BOTS_DIR/.pm2}"
 NODE_MAJOR_MIN="${NODE_MAJOR_MIN:-18}"
@@ -199,7 +204,82 @@ print(json.dumps({
 PYST
 }
 
-nginx_reload() { nginx -t >/dev/null; systemctl reload nginx; }
+nginx_write_probe() {
+  local probe="/etc/nginx/.hyper-host-write-test-$$"
+  if ( : > "$probe" ) 2>/dev/null; then
+    rm -f "$probe" 2>/dev/null || true
+    return 0
+  fi
+  return 1
+}
+
+install_nginx_runtime_units() {
+  mkdir -p "$(dirname "$NGINX_MOUNT_UNIT")" "$(dirname "$NGINX_SERVICE_DROPIN")"
+  cat > "$NGINX_MOUNT_UNIT" <<'EOUNIT'
+[Unit]
+Description=HYPER-HOST writable Nginx configuration
+Before=nginx.service
+After=local-fs.target
+
+[Mount]
+What=/opt/hyper-host/runtime/nginx
+Where=/etc/nginx
+Type=none
+Options=bind
+EOUNIT
+  cat > "$NGINX_SERVICE_DROPIN" <<'EODROPIN'
+[Unit]
+Requires=etc-nginx.mount
+After=etc-nginx.mount
+EODROPIN
+  chmod 0644 "$NGINX_MOUNT_UNIT" "$NGINX_SERVICE_DROPIN"
+}
+
+ensure_nginx_runtime_overlay() {
+  if nginx_write_probe; then
+    if [[ -f "$NGINX_RUNTIME_DIR/.hyper-host-runtime-ready" ]]; then
+      install_nginx_runtime_units
+      systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    return 0
+  fi
+
+  command -v mount >/dev/null 2>&1 || err "Команда mount не найдена — невозможно подключить writable Nginx runtime"
+  mkdir -p "$NGINX_RUNTIME_DIR"
+
+  # Первый запуск: сохраняем полный действующий /etc/nginx. Повторные запуски
+  # только добавляют отсутствующие системные файлы и не затирают сайты панели.
+  if [[ ! -f "$NGINX_RUNTIME_DIR/.hyper-host-runtime-ready" ]]; then
+    cp -a /etc/nginx/. "$NGINX_RUNTIME_DIR/" 2>/dev/null || err "Не удалось скопировать действующий /etc/nginx в $NGINX_RUNTIME_DIR"
+    touch "$NGINX_RUNTIME_DIR/.hyper-host-runtime-ready"
+  else
+    cp -an /etc/nginx/. "$NGINX_RUNTIME_DIR/" 2>/dev/null || true
+  fi
+  mkdir -p "$NGINX_RUNTIME_DIR/sites-available" "$NGINX_RUNTIME_DIR/sites-enabled"
+
+  # Bind mount не изменяет read-only /etc: writable-каталог из /opt просто
+  # становится содержимым /etc/nginx для Nginx и панели.
+  mount --bind "$NGINX_RUNTIME_DIR" /etc/nginx 2>/dev/null || err "Не удалось подключить $NGINX_RUNTIME_DIR поверх /etc/nginx"
+  mount -o remount,bind,rw /etc/nginx >/dev/null 2>&1 || true
+  nginx_write_probe || err "Nginx runtime подключён, но /etc/nginx всё ещё read-only"
+
+  install_nginx_runtime_units
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  log "Nginx runtime ready: $NGINX_RUNTIME_DIR -> /etc/nginx"
+}
+
+cmd_nginx_runtime_fix() {
+  ensure_nginx_runtime_overlay
+  nginx -t >/dev/null
+  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1
+  log "Nginx writable config OK: /etc/nginx -> $NGINX_RUNTIME_DIR"
+}
+
+nginx_reload() {
+  ensure_nginx_runtime_overlay
+  nginx -t >/dev/null
+  systemctl reload nginx
+}
 
 
 ensure_writable_parent_for() {
@@ -302,6 +382,7 @@ ensure_acme_locations_all() {
 }
 
 write_panel_nginx_conf() {
+  ensure_nginx_runtime_overlay
   local domain="${1:-$PANEL_DOMAIN}"
   [[ -n "$domain" ]] || domain="_"
   mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled "$PANEL_DIR/public/.well-known/acme-challenge"
@@ -599,6 +680,7 @@ cmd_delete_folder() { local name="${1:-}"; [[ -n "$name" ]] || err "Folder name 
 
 cmd_add_site() {
   ensure_dirs
+  ensure_nginx_runtime_overlay
   local domain="${1:-}" aliases="${2:-}" phpv="${3:-}"
   [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain: $domain"
   if [[ -n "$PANEL_DOMAIN" && "$PANEL_DOMAIN" != "_" && "$domain" == "$PANEL_DOMAIN" ]]; then
@@ -642,7 +724,7 @@ EONGINX
   nginx_reload
   log "Site created: $domain -> $root"
 }
-cmd_delete_site() { local domain="${1:-}" mode="${2:---keep-files}"; [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain"; rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"; nginx_reload; [[ "$mode" == "--delete-files" ]] && rm -rf "$SITES_DIR/$domain"; log "Site deleted: $domain / $mode"; }
+cmd_delete_site() { local domain="${1:-}" mode="${2:---keep-files}"; [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain"; ensure_nginx_runtime_overlay; rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"; nginx_reload; [[ "$mode" == "--delete-files" ]] && rm -rf "$SITES_DIR/$domain"; log "Site deleted: $domain / $mode"; }
 is_private_ipv4() {
   local ip="$1"
   [[ "$ip" =~ ^10\. ]] && return 0
@@ -999,6 +1081,7 @@ cmd_ip_autofix() {
 
 
 cmd_ssl_ip_selfsigned() {
+  ensure_nginx_runtime_overlay
   local ip="${1:-$SERVER_IP}"
   [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || err "Invalid IP: $ip"
   local dir="/etc/ssl/hyper-host-ip-$ip" key="$dir/privkey.pem" crt="$dir/fullchain.pem" conf="$dir/openssl.cnf" nginx_conf="/etc/nginx/sites-available/hyper-host-ip-$ip.conf"
@@ -1132,6 +1215,7 @@ cmd_ssl_site() {
 }
 
 cmd_site_php() {
+  ensure_nginx_runtime_overlay
   local domain="${1:-}" version="${2:-}"
   [[ -n "$domain" && -n "$version" ]] || err "Domain and PHP version required"
   valid_domain "$domain" || err "Invalid domain"
@@ -3843,6 +3927,7 @@ cmd_panel_ssl() {
 
 
 cmd_repair() {
+  ensure_nginx_runtime_overlay
   configure_phpmyadmin_label # v26
   configure_php_limits
   configure_phpmyadmin_storage
@@ -3943,6 +4028,7 @@ case "${1:-}" in
   ftp-fix) shift; cmd_ftp_fix_all ;;
   ftp-doctor-json) shift; cmd_ftp_doctor_json ;;
   connectivity-fix) shift; cmd_connectivity_fix ;;
+  nginx-runtime-fix) shift; cmd_nginx_runtime_fix ;;
   connectivity-doctor-json) shift; cmd_connectivity_doctor_json ;;
   mysql-repair-accounts) shift; cmd_mysql_repair_accounts ;;
   backup-run) shift; cmd_backup_run "$@" ;;
@@ -3982,6 +4068,7 @@ Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
        hyper-host-ctl ip-detect --apply
        hyper-host-ctl public-ip set 90.189.208.25
        hyper-host-ctl network-fix [DOMAIN] [PUBLIC_IP]
+       hyper-host-ctl nginx-runtime-fix
        hyper-host-ctl dns-wizard DOMAIN [PUBLIC_IP] [panel]
        hyper-host-ctl dns-status-json DOMAIN
        hyper-host-ctl panel-domain set panel.example.com

@@ -11,6 +11,7 @@ FTP_DIR="/var/www/hyper-host-ftp"
 BACKUP_DIR="/opt/hyper-host/backups"
 CACHE_DIR="/opt/hyper-host/cache"
 DNS_DIR="/etc/bind/hyper-host-zones"
+ADMIN_CREDENTIALS_FILE="$BASE_DIR/admin-credentials.env"
 CONF_DIR="/etc/hyper-host"
 CONTROL_BIN="/usr/local/sbin/hyper-host-ctl"
 HYPER_BIN="/usr/local/bin/hyper"
@@ -23,9 +24,10 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-log() { echo -e "\033[1;36m[HYPER-HOST]\033[0m $*"; }
-warn() { echo -e "\033[1;33m[HYPER-HOST WARNING]\033[0m $*"; }
-fail() { echo -e "\033[1;31m[HYPER-HOST ERROR]\033[0m $*"; exit 1; }
+PROJECT_LABEL="\033[1;36mHYPER-HOST\033[0m"
+log() { echo -e "[${PROJECT_LABEL}] $*"; }
+warn() { echo -e "[${PROJECT_LABEL}] WARNING: $*" >&2; }
+fail() { echo -e "[${PROJECT_LABEL}] ERROR: $*" >&2; exit 1; }
 
 # v49: раньше при занятой dpkg-блокировке (unattended-upgrades или другой apt-get,
 # который ещё не закончился) установка сразу падала с "Не удалось получить блокировку
@@ -78,8 +80,14 @@ SERVER_IP="$FIXED_SERVER_IP"
 PUBLIC_IP="$FIXED_PUBLIC_IP"
 PUBLIC_IP_MODE="manual"
 PANEL_DOMAIN="${PANEL_DOMAIN:-_}"
-ADMIN_USER="${ADMIN_USER:-admin}"
-ADMIN_PASS="${ADMIN_PASS:-$(openssl rand -base64 18 | tr -d '\n')}"
+HYPER_ADMIN_USER=""
+HYPER_ADMIN_PASS=""
+if [[ -r "$ADMIN_CREDENTIALS_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$ADMIN_CREDENTIALS_FILE" || true
+fi
+ADMIN_USER="${ADMIN_USER:-${HYPER_ADMIN_USER:-admin}}"
+ADMIN_PASS="${ADMIN_PASS:-${HYPER_ADMIN_PASS:-$(openssl rand -base64 18 | tr -d '\n')}}"
 PMA_APP_PASS="$(openssl rand -base64 24 | tr -d '\n')"
 
 export DEBIAN_FRONTEND=noninteractive
@@ -363,6 +371,12 @@ chmod 0770 "$BASE_DIR/data"
 
 log "Инициализация базы панели..."
 php "$PANEL_DIR/app/setup_db.php" "$ADMIN_USER" "$ADMIN_PASS"
+{
+  printf 'HYPER_ADMIN_USER=%q\n' "$ADMIN_USER"
+  printf 'HYPER_ADMIN_PASS=%q\n' "$ADMIN_PASS"
+} > "$ADMIN_CREDENTIALS_FILE"
+chmod 0600 "$ADMIN_CREDENTIALS_FILE"
+chown root:root "$ADMIN_CREDENTIALS_FILE" 2>/dev/null || true
 chown www-data:www-data "$BASE_DIR/data/hyperhost.sqlite"
 chmod 0660 "$BASE_DIR/data/hyperhost.sqlite"
 chown www-data:www-data "$BASE_DIR/data/hyperhost.sqlite"-* 2>/dev/null || true
@@ -379,6 +393,7 @@ chmod 0440 /etc/sudoers.d/hyper-host
 visudo -cf /etc/sudoers.d/hyper-host >/dev/null || fail "Ошибка sudoers-конфига"
 
 log "Настройка Nginx для панели..."
+"$CONTROL_BIN" nginx-runtime-fix >/dev/null || fail "Не удалось подготовить writable Nginx runtime"
 {
 cat > /etc/nginx/sites-available/hyper-host-panel.conf <<EONGINX
 server {
@@ -567,29 +582,42 @@ log "Проверка панели..."
 php -l "$PANEL_DIR/public/index.php" >/dev/null
 php -l "$PANEL_DIR/app/bootstrap.php" >/dev/null
 
-cat <<EOF_DONE
+PANEL_DOMAIN_HTTP="не настроен"
+PMA_DOMAIN_HTTP="не настроен"
+if [[ -n "${PANEL_DOMAIN:-}" && "${PANEL_DOMAIN}" != "_" ]]; then
+  PANEL_DOMAIN_HTTP="http://${PANEL_DOMAIN}/"
+  PMA_DOMAIN_HTTP="http://${PANEL_DOMAIN}/phpmyadmin/"
+fi
 
-============================================================
- ${PANEL_NAME} установлен
- ${POWERED_BY}
-============================================================
- URL:      http://${SERVER_IP}/
- Login:    ${ADMIN_USER}
- Password: ${ADMIN_PASS}
- LAN IP:   ${SERVER_IP}
- WAN IP:   ${PUBLIC_IP:-не определён}
+printf '\n============================================================\n'
+printf ' %b установлен\n' "\\033[1;36m${PANEL_NAME}\\033[0m"
+printf ' %s\n' "${POWERED_BY}"
+printf '============================================================\n'
+printf ' LAN IP:             %s\n' "${SERVER_IP}"
+printf ' WAN IP:             %s\n' "${PUBLIC_IP:-не определён}"
+printf '\n ПАНЕЛЬ\n'
+printf ' LAN:                http://%s/\n' "${SERVER_IP}"
+printf ' WAN:                http://%s/\n' "${PUBLIC_IP:-не определён}"
+printf ' Домен:              %s\n' "${PANEL_DOMAIN_HTTP}"
+printf '\n PHPMYADMIN\n'
+printf ' LAN:                http://%s/phpmyadmin/\n' "${SERVER_IP}"
+printf ' WAN:                http://%s/phpmyadmin/\n' "${PUBLIC_IP:-не определён}"
+printf ' Домен:              %s\n' "${PMA_DOMAIN_HTTP}"
+printf '\n ДОСТУП АДМИНИСТРАТОРА\n'
+printf ' Логин:              %s\n' "${ADMIN_USER}"
+printf ' Пароль:             %s\n' "${ADMIN_PASS}"
+printf ' Файл с данными:     %s\n' "${ADMIN_CREDENTIALS_FILE}"
+printf '\n СЕРВИСЫ\n'
+printf ' FTP LAN:            %s:21\n' "${SERVER_IP}"
+printf ' FTP WAN:            %s:21\n' "${PUBLIC_IP:-не определён}"
+printf ' SQL LAN:            %s:3306\n' "${SERVER_IP}"
+printf ' SQL WAN:            %s:3306\n' "${PUBLIC_IP:-не определён}"
+printf '\n ПАПКИ\n'
+printf ' Сайты:              %s\n' "${SITES_DIR}"
+printf ' Боты:               %s\n' "${BOTS_DIR}"
+printf ' FTP:                %s\n' "${FTP_DIR}"
+printf ' Резервные копии:    %s\n' "${BACKUP_DIR}"
+printf '============================================================\n'
+printf ' ВАЖНО: сохрани логин и пароль администратора.\n'
+printf '============================================================\n'
 
- Файлы сайтов: ${SITES_DIR}
- Файлы ботов:  ${BOTS_DIR}
- FTP папки:     ${FTP_DIR}
- Backup:       ${BACKUP_DIR}
- phpMyAdmin:   http://${SERVER_IP}/phpmyadmin
- SQL LAN:      ${SERVER_IP}:3306
- SQL Internet: ${PUBLIC_IP:-не определён}:3306
- FTP LAN:      ${SERVER_IP}:21
- FTP Internet: ${PUBLIC_IP:-не определён}:2121
-
- Проверка: sudo hyper ip
- ВАЖНО: сохрани пароль сейчас.
-============================================================
-EOF_DONE
