@@ -326,6 +326,16 @@ def db_deployment_update(
             )
 
 
+def db_deployment_delete(row: dict[str, Any]) -> None:
+    """Удаляет только запись развёрнутого бота. Сам project/user/token не трогаем."""
+    with connect_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                'DELETE FROM bot_deployments WHERE project_id=%s',
+                (int(row['project_id']),),
+            )
+
+
 def get_project(project_id: int) -> dict[str, Any]:
     for row in query_projects():
         if int(row['project_id']) == int(project_id):
@@ -417,10 +427,32 @@ def action_project(project_id: int, action: str, delete_files: bool = False) -> 
         if cp.returncode == 0:
             db_deployment_update(row, pm2_name, path, 'stopped', None)
     elif action == 'delete':
+        # Удаление идемпотентно: даже если PM2-процесса уже нет,
+        # папка и запись развёртывания всё равно очищаются.
         cp = run_as_bot(['pm2', 'delete', pm2_name], timeout=120)
+
         if delete_files and path.exists():
-            shutil.rmtree(path)
-        db_deployment_update(row, pm2_name, path, 'stopped', 'Удалён из Deploy Manager')
+            managed_root = MANAGED_DIR.resolve()
+            resolved = path.resolve()
+            if resolved == managed_root or managed_root not in resolved.parents:
+                raise RuntimeError(f'Отказано в удалении небезопасного пути: {resolved}')
+            shutil.rmtree(resolved)
+
+        # PM2 может оставлять старые stdout/stderr логи после delete.
+        log_dir = PM2_HOME / 'logs'
+        if log_dir.is_dir():
+            for log_file in log_dir.glob(f'{pm2_name}-*.log'):
+                try:
+                    log_file.unlink()
+                except FileNotFoundError:
+                    pass
+
+        db_deployment_delete(row)
+        cp = subprocess.CompletedProcess(
+            args=['delete', pm2_name],
+            returncode=0,
+            stdout=(cp.stdout or '') + '\nБот, папка и запись развёртывания удалены.',
+        )
     elif action == 'logs':
         cp = run_as_bot(['pm2', 'logs', pm2_name, '--lines', '250', '--nostream'], timeout=35)
         return {'ok': cp.returncode == 0, 'output': cp.stdout[-30000:], 'pm2_name': pm2_name}
