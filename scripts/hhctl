@@ -414,6 +414,34 @@ nginx_reload() {
   nginx_repair_log_paths
   nginx -t >/dev/null
   systemctl reload nginx
+  # Reload у Nginx graceful: старые workers могут короткое время принимать
+  # запросы. Даём новому поколению workers подняться до проверки vhost.
+  sleep 0.35
+}
+
+nginx_verify_site_vhost() {
+  # Проверяет не только наличие файла конфига, а реальную маршрутизацию Host
+  # в public_html. Используем LAN IP сервера, а не 127.0.0.1: некоторые
+  # конфиги слушают только адрес интерфейса. Повторяем запрос во время
+  # graceful reload Nginx.
+  local domain="$1" root="$2" token probe body i
+  [[ -n "$domain" && -d "$root" ]] || return 1
+  command -v curl >/dev/null 2>&1 || return 0
+  token="HYPER-HOST-VHOST-$domain-$(date +%s)-$$-$RANDOM"
+  probe="$root/.hyper-host-vhost-probe-$$-$RANDOM.txt"
+  printf '%s' "$token" > "$probe" || return 1
+  chown www-data:www-data "$probe" 2>/dev/null || true
+  chmod 0644 "$probe" 2>/dev/null || true
+  for i in $(seq 1 30); do
+    body="$(curl --noproxy '*' -fsS --max-time 4       --resolve "$domain:80:$SERVER_IP"       "http://$domain/${probe##*/}" 2>/dev/null || true)"
+    if [[ "$body" == "$token" ]]; then
+      rm -f "$probe"
+      return 0
+    fi
+    sleep 0.2
+  done
+  rm -f "$probe"
+  return 1
 }
 
 
@@ -1065,7 +1093,12 @@ EONGINX
     nginx_reload >/dev/null 2>&1 || true
     err "Конфиг сайта $domain не прошёл nginx -t; конфиг откатан, файлы сайта сохранены"
   fi
-  log "Site created: $domain -> $root"
+  if ! nginx_verify_site_vhost "$domain" "$root"; then
+    rm -f "$enabled" "$conf" 2>/dev/null || true
+    nginx_reload >/dev/null 2>&1 || true
+    err "Nginx загрузил конфиг, но Host $domain не попал в $root; конфиг откатан, файлы сайта сохранены"
+  fi
+  log "Site created and verified: $domain -> $root"
 }
 cmd_delete_site() { local domain="${1:-}" mode="${2:---keep-files}"; [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain"; ensure_nginx_runtime_overlay; rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"; nginx_reload; [[ "$mode" == "--delete-files" ]] && rm -rf "$SITES_DIR/$domain"; log "Site deleted: $domain / $mode"; }
 is_private_ipv4() {
