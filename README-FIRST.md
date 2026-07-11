@@ -1,5 +1,5 @@
-# HYPER-HOST v77 — удаление дочерних ботов
+# Установка v78
 
-Добавлена красная кнопка **Удалить** у каждого проекта в Deploy Manager.
-
-Удаление очищает PM2-процесс, папку проекта, `.env`, `venv`, логи и запись `bot_deployments`. Сам проект, владелец и токен в MyStock SQL сохраняются.
+```bash
+sudo bash apply-v78-deploy-manager-project-actions-fix.sh
+```

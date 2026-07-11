@@ -3699,7 +3699,21 @@ cmd_deploy_center_template_install() { deploy_center_python template-install --b
 cmd_deploy_center_master_install() { deploy_center_python master-install --bot-file "${1:-}" --env-file "${2:-}" --requirements-file "${3:-}"; }
 cmd_deploy_center_master_action() { deploy_center_python master-action "${1:-}"; }
 cmd_deploy_center_project_action() {
-  local project_id="${1:-0}" action="${2:-}" delete_files="${3:-0}" args=(project-action "$project_id" "$action")
+  # Не объединять эти присваивания в один local: Bash вычисляет args до того,
+  # как локальные project_id/action получают значения, и передаёт в argparse "".
+  local project_id="${1:-0}"
+  local action="${2:-}"
+  local delete_files="${3:-0}"
+  local -a args
+
+  [[ "$project_id" =~ ^[0-9]+$ ]] && (( project_id > 0 )) \
+    || err "Некорректный project_id: ${project_id:-пусто}"
+  case "$action" in
+    deploy|start|stop|restart|logs|delete) ;;
+    *) err "Некорректное действие проекта: ${action:-пусто}" ;;
+  esac
+
+  args=(project-action "$project_id" "$action")
   [[ "$delete_files" == 1 ]] && args+=(--delete-files)
   deploy_center_python "${args[@]}"
 }
