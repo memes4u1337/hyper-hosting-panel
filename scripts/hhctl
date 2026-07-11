@@ -43,7 +43,7 @@ NGINX_BOOT_SCRIPT="${NGINX_BOOT_SCRIPT:-$BASE_DIR/bin/hyper-host-nginx-runtime}"
 NGINX_RUNTIME_UNIT="${NGINX_RUNTIME_UNIT:-/run/systemd/system/hyper-host-nginx-runtime.service}"
 NGINX_REBOOT_MARKER="HYPER-HOST-NGINX-RUNTIME"
 NGINX_RUNTIME_LOG="${NGINX_RUNTIME_LOG:-$BASE_DIR/logs/nginx-runtime-boot.log}"
-# v69: неизвестные домены больше не открывают панель. Старые panel-конфиги
+# v73: неизвестные домены больше не открывают панель. Старые panel-конфиги
 # с server_name _ отключаются, панель закрепляется только за точным доменом/IP,
 # а каждый сайт обслуживается из собственного public_html.
 NGINX_DEFAULT_ROOT="${NGINX_DEFAULT_ROOT:-$BASE_DIR/default-site}"
@@ -872,8 +872,8 @@ nginx_restart_guaranteed() {
 
 nginx_probe_host_root() {
   local host="$1" root="$2" token probe body i
-  token="HYPER-HOST-V71-${host}-$(date +%s)-$$-$RANDOM"
-  probe="$root/.hyper-host-v71-probe-$$-$RANDOM.txt"
+  token="HYPER-HOST-V73-${host}-$(date +%s)-$$-$RANDOM"
+  probe="$root/hyper-host-v73-probe-$$-$RANDOM.txt"
   printf '%s' "$token" > "$probe" || return 1
   chown www-data:www-data "$probe" 2>/dev/null || true
   chmod 0644 "$probe" 2>/dev/null || true
