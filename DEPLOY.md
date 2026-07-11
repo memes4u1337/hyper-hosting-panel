@@ -1,29 +1,13 @@
-# Deploy Manager v75 — серверные пути
+# Установка v76
 
-```text
-Главный бот:        /var/www/hyper-host-deploy/master
-Файлы магазинов:    /var/www/hyper-host-deploy/template
-Созданные магазины: /var/www/hyper-host-managed-bots
-PM2 HOME:           /var/www/hyper-host-bots/.pm2
-Готовый master bot: /opt/hyper-host/deploy-center/examples
-Конфиг SQL:         /opt/hyper-host/deploy-center/config.json
-```
-
-## Диагностика
+Загрузи содержимое архива в корень репозитория и выполни:
 
 ```bash
-sudo hyper-host-ctl deploy-center-doctor
-sudo hyper-host-ctl deploy-center-sync
-sudo -u hyperbot -H env HOME=/var/www/hyper-host-bots PM2_HOME=/var/www/hyper-host-bots/.pm2 pm2 ls
+cd /tmp && sudo rm -rf hyper-host-update && git clone --depth 1 --branch main https://github.com/memes4u1337/hyper-hosting-panel.git hyper-host-update && cd hyper-host-update && sudo bash apply-v76-deploy-manager-upload-only.sh
 ```
 
-## Что должно быть установлено
+После установки открой `Панель → Боты → Deploy Manager`.
 
-- Python 3
-- `python3-venv`
-- `pip`
-- Node.js/npm
-- PM2
-- PyMySQL в `/opt/hyper-host/deploy-center/venv`
-- доступ к MySQL `90.189.208.25:3306`
-- доступ к `api.telegram.org`
+Главный бот: самостоятельно загрузи `bot.py`, `.env`, `requirements.txt`.
+Шаблон магазинов: самостоятельно загрузи `bot.py`, `requirements.txt`.
+Установщик никаких файлов-примеров не создаёт.
