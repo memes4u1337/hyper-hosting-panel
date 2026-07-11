@@ -3386,7 +3386,11 @@ AllowRetrieveRestart            on
 DeleteAbortedStores             on
 UseSendfile                     off
 PassivePorts                    ${FTP_PASV_MIN} ${FTP_PASV_MAX}
-MasqueradeAddress               ${FIXED_PUBLIC_IP}
+
+# Простой локальный FTP: один адрес внутри сети, без NAT и внешнего PASV IP.
+# Клиенты в той же сети всегда получают реальный адрес сервера.
+MasqueradeAddress               ${SERVER_IP}
+
 TimeoutLogin                    60
 TimeoutNoTransfer               300
 TimeoutStalled                  300
@@ -3397,7 +3401,7 @@ SystemLog                       ${PROFTPD_LOG_DIR}/proftpd.log
 TransferLog                     ${PROFTPD_LOG_DIR}/xfer.log
 
 TLSEngine                       on
-TLSRequired                     on
+TLSRequired                     off
 TLSProtocol                     TLSv1.2
 TLSOptions                      NoSessionReuseRequired
 TLSVerifyClient                 off
@@ -3558,12 +3562,12 @@ PYFTPROWS
   ftp_auth_rebuild_db
   proftpd_reload_quiet
   assert_hyper_ftp_ready
-  log "FTP исправлен: ProFTPD explicit FTPS TLS 1.2, TCP 21, PASV ${FTP_PASV_MIN}-${FTP_PASV_MAX}"
+  log "FTP исправлен: ProFTPD LAN-only ${SERVER_IP}:${FTP_PORT}, PASV ${FTP_PASV_MIN}-${FTP_PASV_MAX}, TLS optional"
 }
 
 cmd_ftp_doctor_json() {
-  local pub internal listening service users_count banner owner issue hint pasv tls_source tls_ok version
-  pub="$(public_ip)"; internal="$(detect_internal_ipv4)"; listening=0
+  local internal listening service users_count banner owner issue hint pasv tls_source tls_ok version
+  internal="$(detect_internal_ipv4)"; listening=0
   listen_port_tcp "$FTP_PORT" && listening=1
   service="$(systemctl is-active hyper-host-ftp.service 2>/dev/null || true)"
   [[ "$listening" == 1 && "$service" != active ]] && service="runtime"
@@ -3578,7 +3582,7 @@ except Exception:
 PYBANNER
 )"
   users_count="$(awk 'NF{c++} END{print int(c/2)}' "$FTP_AUTH_TXT" 2>/dev/null || echo 0)"
-  pasv="WAN=${FIXED_PUBLIC_IP}, ports=${FTP_PASV_MIN}-${FTP_PASV_MAX}"
+  pasv="LAN=${internal}; ports=${FTP_PASV_MIN}-${FTP_PASV_MAX}"
   tls_source="$(cat "$FTP_TLS_DIR/active-source" 2>/dev/null || true)"
   version="$("$PROFTPD_BIN" -v 2>/dev/null | head -n1 || true)"
   tls_ok=0
@@ -3598,27 +3602,26 @@ PYFTPTLS
   elif [[ "$banner" != 220* ]]; then
     issue="FTP порт открыт, но нет корректного banner"; hint="tail -n 200 /opt/hyper-host/logs/proftpd/*.log"
   elif [[ "${users_count:-0}" == 0 ]]; then
-    issue="ProFTPD/FTPS работает, но нет пользователей"; hint="Создай FTP-аккаунт в панели"
+    issue="FTP работает, но нет пользователей"; hint="Создай FTP-аккаунт в панели"
   else
-    issue="ProFTPD/FTPS локально исправен"; hint="Из интернета используй 90.189.208.25:21; роутер: TCP 21 и TCP ${FTP_PASV_MIN}-${FTP_PASV_MAX}"
+    issue="Локальный FTP исправен"; hint="Подключайся из той же сети к ${internal}:21; PASV ${FTP_PASV_MIN}-${FTP_PASV_MAX}; обычный FTP или explicit TLS"
   fi
-  SERVER_IP="$internal" PUBLIC_IP="$pub" LISTENING="$listening" SERVICE="$service" OWNER="$owner" BANNER="$banner" USERS_COUNT="$users_count" PASV="$pasv" ISSUE="$issue" HINT="$hint" TLS_OK="$tls_ok" TLS_SOURCE="$tls_source" VERSION="$version" python3 - <<'PYFTP'
+  SERVER_IP="$internal" LISTENING="$listening" SERVICE="$service" OWNER="$owner" BANNER="$banner" USERS_COUNT="$users_count" PASV="$pasv" ISSUE="$issue" HINT="$hint" TLS_OK="$tls_ok" TLS_SOURCE="$tls_source" VERSION="$version" python3 - <<'PYFTP'
 import os,json
 print(json.dumps({
- 'server_ip':os.environ.get('SERVER_IP',''), 'public_ip':os.environ.get('PUBLIC_IP',''),
+ 'server_ip':os.environ.get('SERVER_IP',''),
  'ftp_backend':'ProFTPD', 'ftp_version':os.environ.get('VERSION',''), 'service':os.environ.get('SERVICE',''),
  'listen_21':os.environ.get('LISTENING')=='1', 'port_owner':os.environ.get('OWNER',''),
  'banner':os.environ.get('BANNER',''), 'ftp_users':int(os.environ.get('USERS_COUNT') or 0),
  'passive_range':'40000-40100', 'pasv_config':os.environ.get('PASV',''),
- 'tls':os.environ.get('TLS_OK')=='1', 'tls_mode':'explicit', 'tls_protocol':'TLSv1.2', 'tls_optional':False,
+ 'tls':os.environ.get('TLS_OK')=='1', 'tls_mode':'explicit optional', 'tls_protocol':'TLSv1.2', 'tls_optional':True,
  'tls_session_reuse_required':False, 'tls_certificate_source':os.environ.get('TLS_SOURCE',''),
- 'lan_endpoint':'192.168.0.179:21', 'internet_endpoint':'90.189.208.25:21',
- 'router_rules':['TCP 21 -> 192.168.0.179:21','TCP 40000-40100 -> 192.168.0.179:40000-40100'],
+ 'lan_endpoint':'192.168.0.179:21', 'internet_endpoint':'disabled in LAN-only mode', 'adaptive_pasv':False,
+ 'router_rules':[],
  'issue':os.environ.get('ISSUE',''), 'hint':os.environ.get('HINT','')
 },ensure_ascii=False))
 PYFTP
 }
-
 
 cmd_access_fix() {
   # Включает доступ к серверу с другого ПК: SSH, FTP, HTTP/HTTPS и MySQL-порт в firewall Ubuntu.
