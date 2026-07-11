@@ -259,14 +259,12 @@ install -m 0755 "$PROJECT_DIR/scripts/hyper_ftp_server.py" "$HYPER_FTP_BIN"
 mkdir -p "$BASE_DIR/deploy-center/defaults" /var/www/hyper-host-deploy/master /var/www/hyper-host-deploy/template /var/www/hyper-host-managed-bots
 install -m 0755 "$PROJECT_DIR/scripts/deploy_center.py" "$BASE_DIR/deploy-center/deploy_center.py"
 install -m 0755 "$PROJECT_DIR/scripts/ssl_truth.py" "$BASE_DIR/ssl-truth.py"
-install -m 0644 "$PROJECT_DIR/templates/deploy-worker/bot.py" "$BASE_DIR/deploy-center/defaults/master-bot.py"
-install -m 0644 "$PROJECT_DIR/templates/deploy-worker/requirements.txt" "$BASE_DIR/deploy-center/defaults/master-requirements.txt"
-install -m 0644 "$PROJECT_DIR/templates/project-bot/bot.py" "$BASE_DIR/deploy-center/defaults/project-bot.py"
-install -m 0644 "$PROJECT_DIR/templates/project-bot/requirements.txt" "$BASE_DIR/deploy-center/defaults/project-requirements.txt"
-[[ -f /var/www/hyper-host-deploy/master/bot.py ]] || cp "$BASE_DIR/deploy-center/defaults/master-bot.py" /var/www/hyper-host-deploy/master/bot.py
-[[ -f /var/www/hyper-host-deploy/master/requirements.txt ]] || cp "$BASE_DIR/deploy-center/defaults/master-requirements.txt" /var/www/hyper-host-deploy/master/requirements.txt
-[[ -f /var/www/hyper-host-deploy/template/bot.py ]] || cp "$BASE_DIR/deploy-center/defaults/project-bot.py" /var/www/hyper-host-deploy/template/bot.py
-[[ -f /var/www/hyper-host-deploy/template/requirements.txt ]] || cp "$BASE_DIR/deploy-center/defaults/project-requirements.txt" /var/www/hyper-host-deploy/template/requirements.txt
+# v75: не создаём никакие bot.py/.env/requirements.txt автоматически.
+# Пользователь загружает главный комплект и файлы магазинов через отдельную страницу Deploy Manager.
+mkdir -p "$BASE_DIR/deploy-center/examples"
+install -m 0644 "$PROJECT_DIR/ready-master-bot/bot.py" "$BASE_DIR/deploy-center/examples/bot.py"
+install -m 0644 "$PROJECT_DIR/ready-master-bot/requirements.txt" "$BASE_DIR/deploy-center/examples/requirements.txt"
+install -m 0600 "$PROJECT_DIR/ready-master-bot/.env.example" "$BASE_DIR/deploy-center/examples/.env.example"
 # v23: делаем CLI доступным для панели, PM2-ботов и обычной shell-среды.
 # Некоторые окружения/боты ищут hyper в /usr/local/bin или /usr/bin.
 ln -sf "$HYPER_BIN" /usr/bin/hyper 2>/dev/null || true

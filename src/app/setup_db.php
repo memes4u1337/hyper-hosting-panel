@@ -215,7 +215,6 @@ $defaults = [
     'deploy_db_port' => '3306',
     'deploy_db_user' => 'mystock',
     'deploy_db_name' => 'mystock',
-    'deploy_master_project_id' => '0',
 ];
 foreach ($defaults as $k => $v) {
     $stmt = $pdo->prepare('INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)');

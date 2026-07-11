@@ -1,173 +1,29 @@
-# HYPER-HOST — установка, FTP и DNS (v46)
+# Deploy Manager v75 — серверные пути
 
-powered by memes4u1337
+```text
+Главный бот:        /var/www/hyper-host-deploy/master
+Файлы магазинов:    /var/www/hyper-host-deploy/template
+Созданные магазины: /var/www/hyper-host-managed-bots
+PM2 HOME:           /var/www/hyper-host-bots/.pm2
+Готовый master bot: /opt/hyper-host/deploy-center/examples
+Конфиг SQL:         /opt/hyper-host/deploy-center/config.json
+```
 
-## 1. Установка / обновление панели
+## Диагностика
 
 ```bash
-cd /root
-if [ ! -d /root/hyper-hosting-panel/.git ]; then
-  git clone https://github.com/memes4u1337/hyper-hosting-panel.git /root/hyper-hosting-panel
-fi
-cd /root/hyper-hosting-panel
-git fetch origin main
-git checkout main
-git reset --hard origin/main
-git clean -fd
-chmod +x install.sh uninstall.sh scripts/hhctl scripts/hyper || true
-
-sudo bash install.sh
-sudo hyper repair
-sudo hyper network fix hyper-host.pw 90.189.208.25
-sudo hyper ftp fix
-sudo hyper bot persist
-sudo nginx -t && sudo systemctl reload nginx
-sudo systemctl restart bind9
-
-sudo hyper stats
-sudo hyper bots
-sudo hyper network doctor hyper-host.pw
-sudo hyper ssl check hyper-host.pw
-sudo hyper ftp doctor
+sudo hyper-host-ctl deploy-center-doctor
+sudo hyper-host-ctl deploy-center-sync
+sudo -u hyperbot -H env HOME=/var/www/hyper-host-bots PM2_HOME=/var/www/hyper-host-bots/.pm2 pm2 ls
 ```
 
-**Важно:** никогда не выполняй `systemctl restart vsftpd` вручную. С v46 vsftpd
-замаскирован (`systemctl mask vsftpd`) — эта команда будет просто падать с ошибкой,
-и это нормально, так и должно быть. FTP теперь обслуживает только
-`hyper-host-ftp.service` (собственный сервер панели).
+## Что должно быть установлено
 
-Прочитать эту инструкцию после обновления: `cat /root/hyper-hosting-panel/DEPLOY.md`
-
-
-## 2. FTP не подключается — порядок диагностики
-
-1. `sudo hyper ftp doctor` — главный источник правды. Смотри поле `issue`/`hint`:
-   - **`ip_mismatch_cgnat_suspected: true`** — настроенный публичный IP не совпадает с
-     тем, что реально видно из интернета. В 95% случаев это значит, что провайдер
-     просто выдал тебе новый IP (динамический IP меняется при переподключении/
-     перезагрузке роутера) — старый адрес больше не твой, поэтому FileZilla туда и не
-     достучится. С v47 это чинится само: в cron стоит `hyper-host-ip-watch`, он раз в
-     5 минут проверяет реальный внешний IP и сам обновляет публичный IP, FTP и все
-     DNS-зоны, если он изменился. Чтобы не ждать — почини прямо сейчас:
-     `sudo hyper network ip-fix`. Если после этого IP на следующий день снова "уехал"
-     на что-то левое и это повторяется постоянно — вот тогда уже стоит спросить у
-     провайдера про статический IP / CGNAT.
-   - **`port21_owner` не `python3` и `vsftpd_active: active`** — старый vsftpd снова
-     перехватил порт 21. Выполни: `sudo systemctl stop vsftpd && sudo systemctl mask vsftpd && sudo hyper ftp fix`.
-   - **`listen_21: false`** — сервис не поднялся локально. `sudo hyper ftp fix`, потом
-     `sudo tail -n 120 /var/log/hyper-host-ftp.log`.
-2. Если `sudo hyper ftp doctor` говорит, что локально всё ок (`ftp_backend` слушает,
-   баннер отвечает), а FileZilla всё равно пишет "Нет соединения" на порт 21 — это
-   значит проблема не на сервере, а по пути до него:
-   - На роутере должен быть проброс TCP 21 и TCP 40000-40100 на **LAN-IP сервера**
-     (смотри поле `server_ip` в `sudo hyper access doctor`).
-   - Провайдер не должен блокировать входящий 21 порт (некоторые домашние/мобильные
-     тарифы режут входящие соединения на "серверные" порты).
-   - Проверь совпадение `configured_public_ip` и `outbound_ip` в `hyper ftp doctor` —
-     см. пункт про CGNAT выше.
-3. Локальная проверка логина (без интернета, прямо на сервере):
-   `sudo hyper ftp test ЛОГИН ПАРОЛЬ 127.0.0.1`
-
-
-## 3. DNS и перенос доменов на свою панель (v46)
-
-Раньше каждый добавленный домен получал СВОИ ns1.домен/ns2.домен — и под каждый
-домен нужно было отдельно настраивать glue-записи у его регистратора. Теперь есть
-общие NS-серверы панели, их видно в самом верху страницы **DNS** в панели
-("Твои DNS-серверы").
-
-### Шаг 1 — один раз настроить домен панели
-Настройки → Сеть → "Домен панели" (например `hyper-host.pw`), затем:
-```bash
-sudo hyper network fix hyper-host.pw 90.189.208.25
-sudo hyper dns wizard hyper-host.pw 90.189.208.25 panel
-```
-У регистратора **этого** домена один раз пропиши:
-- NS: `ns1.hyper-host.pw`, `ns2.hyper-host.pw`
-- Glue (если просит): `ns1.hyper-host.pw -> 90.189.208.25`, `ns2.hyper-host.pw -> 90.189.208.25`
-
-### Шаг 2 — для каждого следующего домена
-В панели: DNS → "Создать зону" → указываешь домен → жмёшь создать.
-Либо командой:
-```bash
-sudo hyper dns wizard mydomain.ru 90.189.208.25
-```
-У регистратора ЭТОГО домена просто прописываешь те же самые NS:
-```
-ns1.hyper-host.pw
-ns2.hyper-host.pw
-```
-Glue настраивать не нужно — эти NS-имена уже привязаны к IP через зону hyper-host.pw.
-
-### Проверка
-```bash
-sudo hyper dns status ДОМЕН
-sudo hyper dns inspect ДОМЕН
-```
-В панели на карточке зоны кнопка "Проверить" покажет актуальную делегацию у
-регистратора (`public_ns`, `delegation_status`).
-
-DNS-записи (A/MX/TXT/CNAME и т.д.) для каждого домена редактируются на той же
-странице DNS, в карточке нужного домена.
-
-
-## 4. Боты не создаются / "Read-only file system" на hyperbot-pm2.service
-
-Найдена и исправлена реальная причина: при создании любого бота панель сначала
-пыталась поставить PM2 в автозапуск через systemd-юнит
-`/etc/systemd/system/hyperbot-pm2.service`. Если эта директория у тебя read-only
-(похоже на контейнер/урезанное окружение — `/etc/nginx`, `/etc/bind`,
-`/etc/phpmyadmin` при этом остаются писабельными, так что это не вся ФС, а именно
-управление systemd-юнитами), запись падала с "Read-only file system", а так как весь
-скрипт выполняется с `set -e`, это ПАДЕНИЕ УБИВАЛО ВЕСЬ ПРОЦЕСС ЦЕЛИКОМ — ещё до того,
-как бот успевал создаться и запуститься.
-
-Исправлено: теперь если systemd-юнит записать нельзя, панель просто пропускает этот
-шаг (с понятным предупреждением в лог, не падая), пробует более лёгкий fallback через
-`cron @reboot`, и создание/запуск бота продолжается как обычно — сам PM2-процесс для
-работы бота systemd не требует, юнит нужен только для автоподъёма после полной
-перезагрузки сервера.
-
-Заодно проверены и защищены от той же ошибки ещё 7 подобных мест (конфиги nginx для
-панели и сайтов, phpMyAdmin, bind9, sudoers, cron) — если что-то из этого тоже
-окажется read-only на твоей машине, панель теперь предупредит и продолжит работу
-вместо того, чтобы вылетать с сырой ошибкой bash.
-
-Проверить, что именно read-only на сервере: `mount | grep ' / '` и
-`findmnt /etc/systemd/system`.
-
-
-## 5. "Не удалось получить блокировку файла /var/lib/dpkg/lock-frontend"
-
-Это не баг панели — это значит, что в момент запуска `install.sh` apt/dpkg уже
-использовался другим процессом (чаще всего фоновые автообновления Ubuntu,
-`unattended-upgrades`). С v49 `install.sh` сам ждёт освобождения блокировки до 3 минут
-вместо мгновенного отказа. Если это всё равно повторяется — посмотри, что держит
-блокировку: `sudo fuser /var/lib/dpkg/lock-frontend` и подожди завершения процесса
-(или `sudo systemctl stop unattended-upgrades` на время установки).
-
-
-## 6. Долгая установка бота + статистика ботов не обновлялась без перезагрузки
-
-Обе проблемы были в одном и том же месте — панель на каждое действие с ботами
-безусловно перепроверяла весь рантайм (python/node/npm/pm2/systemd), даже когда всё
-уже давно стоит:
-
-- **Создание бота**: при каждом клике "Загрузить и запустить" панель дёргала
-  `apt-get update` по всем репозиториям (Ubuntu x4, nodesource, ondrej/php PPA), даже
-  если Node.js уже нужной версии. На домашнем интернете это легко давало от 10 секунд
-  до пары минут ожидания впустую на КАЖДОГО бота. Теперь если Node.js уже нужной
-  версии — apt вообще не трогается (замерено: 2 мс вместо полного apt-get update).
-- **Live-статистика ботов**: страница "Боты" и так была устроена опрашивать
-  `/?api=bots` каждые 4 секунды в фоне (без перезагрузки) — но сама эта команда на
-  сервере попутно перезапускала полную проверку python/node/pm2 и **записывала
-  dump.pm2 на диск** при каждом опросе. Из-за этого реальный интервал обновления
-  растягивался на секунды, а иногда команда не укладывалась в таймаут (8с) и
-  обновление вообще пропускалось. Теперь для простого чтения статуса используется
-  прямой опрос PM2 без лишней работы (замерено: 43 мс вместо нескольких секунд) —
-  статистика (RAM/CPU/uptime/restarts) обновляется на странице сама, раз в 4 секунды,
-  без перезагрузки.
-
-Кнопки долгих операций (создание бота, установка зависимостей, "Обновить" в шапке)
-теперь сразу блокируются и показывают спиннер с пояснением при клике — если что-то
-идёт, это будет видно сразу, а не "непонятно, сработало или зависло".
+- Python 3
+- `python3-venv`
+- `pip`
+- Node.js/npm
+- PM2
+- PyMySQL в `/opt/hyper-host/deploy-center/venv`
+- доступ к MySQL `90.189.208.25:3306`
+- доступ к `api.telegram.org`

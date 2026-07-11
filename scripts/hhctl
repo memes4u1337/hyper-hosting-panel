@@ -3696,7 +3696,7 @@ cmd_deploy_center_config() {
 cmd_deploy_center_sync() { deploy_center_python sync; }
 cmd_deploy_center_doctor() { deploy_center_python doctor; }
 cmd_deploy_center_template_install() { deploy_center_python template-install --bot-file "${1:-}" --requirements-file "${2:-}"; }
-cmd_deploy_center_master_install() { deploy_center_python master-install --bot-file "${1:-}" --requirements-file "${2:-}" --project-id "${3:-0}"; }
+cmd_deploy_center_master_install() { deploy_center_python master-install --bot-file "${1:-}" --env-file "${2:-}" --requirements-file "${3:-}"; }
 cmd_deploy_center_master_action() { deploy_center_python master-action "${1:-}"; }
 cmd_deploy_center_project_action() {
   local project_id="${1:-0}" action="${2:-}" delete_files="${3:-0}" args=(project-action "$project_id" "$action")

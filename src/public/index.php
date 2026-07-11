@@ -188,34 +188,33 @@ function handle_post(string $action): void
                 if($host===''||$user===''||$name===''||$port<1||$port>65535) throw new RuntimeException('Проверь параметры MySQL');
                 $res=run_ctl_json(['deploy-center-config','save',$host,(string)$port,$user,$pass,$name],60); if(empty($res['ok'])) throw new RuntimeException((string)($res['error']??$res['_error']??'Не удалось сохранить MySQL'));
                 setting_set('deploy_db_host',$host); setting_set('deploy_db_port',(string)$port); setting_set('deploy_db_user',$user); setting_set('deploy_db_name',$name);
-                flash('Подключение MyStock сохранено. Пароль хранится только на сервере.','success'); redirect('/?page=bots');
+                flash('Подключение MyStock сохранено. Пароль хранится только на сервере.','success'); redirect('/?page=deploy_center');
             }
             case 'deploy_sync': {
                 $data=run_ctl_json(['deploy-center-sync'],120); sync_managed_projects_local($data);
-                flash('Проекты синхронизированы из MySQL: '.(int)($data['count']??0),'success'); redirect('/?page=bots');
+                flash('Проекты синхронизированы из MySQL: '.(int)($data['count']??0),'success'); redirect('/?page=deploy_center');
             }
             case 'deploy_template_upload': {
                 $botTmp=bot_uploaded_tmp('template_bot_file'); $reqTmp=bot_uploaded_tmp('template_requirements_file');
                 if($botTmp==='' && $reqTmp==='') throw new RuntimeException('Выбери bot.py или requirements.txt шаблона');
                 $res=run_ctl_json(['deploy-center-template-install',$botTmp,$reqTmp],120); if(empty($res['ok'])) throw new RuntimeException((string)($res['error']??$res['_error']??'Не удалось сохранить шаблон'));
-                flash('Шаблон дочерних ботов сохранён','success'); redirect('/?page=bots');
+                flash('Файлы для новых магазинов сохранены','success'); redirect('/?page=deploy_center');
             }
             case 'deploy_master_upload': {
-                $projectId=(int)($_POST['master_project_id']??0); if($projectId<1) throw new RuntimeException('Выбери проект для токена главного deploy-бота');
-                $botTmp=bot_uploaded_tmp('master_bot_file'); $reqTmp=bot_uploaded_tmp('master_requirements_file');
-                $res=run_ctl_json(['deploy-center-master-install',$botTmp,$reqTmp,(string)$projectId],1200); if(empty($res['ok'])) throw new RuntimeException((string)($res['error']??$res['_error']??'Не удалось запустить главный deploy-бот'));
-                setting_set('deploy_master_project_id',(string)$projectId);
-                flash('Главный deploy-бот установлен и запущен через PM2','success'); redirect('/?page=bots');
+                $botTmp=bot_uploaded_tmp('master_bot_file'); $envTmp=bot_uploaded_tmp('master_env_file'); $reqTmp=bot_uploaded_tmp('master_requirements_file');
+                if($botTmp==='' && $envTmp==='' && $reqTmp==='') throw new RuntimeException('Выбери bot.py, .env или requirements.txt главного бота');
+                $res=run_ctl_json(['deploy-center-master-install',$botTmp,$envTmp,$reqTmp],1200); if(empty($res['ok'])) throw new RuntimeException((string)($res['error']??$res['_error']??'Не удалось запустить главный deploy-бот'));
+                flash('Главный deploy-бот обновлён и запущен через PM2','success'); redirect('/?page=deploy_center');
             }
             case 'deploy_master_action': {
                 $act=(string)($_POST['master_action']??'restart'); $res=run_ctl_json(['deploy-center-master-action',$act],180); if(empty($res['ok'])) throw new RuntimeException((string)($res['error']??$res['_error']??'Ошибка главного бота'));
-                flash('Главный deploy-бот: '.$act,'success'); redirect('/?page=bots');
+                flash('Главный deploy-бот: '.$act,'success'); redirect('/?page=deploy_center');
             }
             case 'deploy_project_action': {
                 $pid=(int)($_POST['project_id']??0); $act=(string)($_POST['project_action']??'deploy'); $del=!empty($_POST['delete_files'])?'1':'0'; if($pid<1) throw new RuntimeException('Проект не выбран');
                 $res=run_ctl_json(['deploy-center-project-action',(string)$pid,$act,$del],1200); if(empty($res['ok'])) throw new RuntimeException((string)($res['error']??$res['_error']??'Ошибка проекта'));
                 $data=run_ctl_json(['deploy-center-sync'],120); if(!empty($data['ok'])) sync_managed_projects_local($data);
-                flash('Проект #'.$pid.': '.$act,'success'); redirect('/?page=bots');
+                flash('Проект #'.$pid.': '.$act,'success'); redirect('/?page=deploy_center');
             }
             case 'ssl_restore_existing': {
                 hh_clear_cache(); $res=run_ctl_json(['ssl-restore-existing'],300); if(empty($res['ok'])) throw new RuntimeException((string)($res['error']??$res['_error']??'Не удалось восстановить SSL'));
@@ -437,14 +436,14 @@ function fm_delete(): void
 function rrmdir(string $path): void { if(is_dir($path)&&!is_link($path)){ foreach(scandir($path)?:[] as $i){ if($i==='.'||$i==='..') continue; rrmdir($path.'/'.$i);} if(!@rmdir($path)){ run_ctl(['repair'],180); @rmdir($path); } } else { if(!@unlink($path)){ run_ctl(['repair'],180); @unlink($path); } } }
 
 
-function hh_app_version(): string { return '1.6-v74'; }
+function hh_app_version(): string { return '1.6-v75'; }
 
 function hh_nav_config(): array
 {
     return [
         'main'    => ['label'=>'Сервер','icon'=>'fa-gauge-high','accent'=>'#4f7dff','items'=>['dashboard'=>['fa-chart-line','Дашборд'],'files'=>['fa-folder-open','Файлы'],'disk'=>['fa-hard-drive','Диск'],'settings'=>['fa-sliders','Настройки']]],
         'hosting' => ['label'=>'Хостинг','icon'=>'fa-server','accent'=>'#22d3ee','items'=>['sites'=>['fa-globe','Сайты'],'ftp'=>['fa-network-wired','FTP'],'databases'=>['fa-database','Базы'],'php'=>['fa-code','PHP']]],
-        'auto'    => ['label'=>'Боты','icon'=>'fa-robot','accent'=>'#a855f7','items'=>['bots'=>['fa-robot','PM2 боты'],'backups'=>['fa-box-archive','Backup'],'cron'=>['fa-clock','Cron'],'logs'=>['fa-file-lines','Логи']]],
+        'auto'    => ['label'=>'Боты','icon'=>'fa-robot','accent'=>'#a855f7','items'=>['bots'=>['fa-robot','PM2 боты'],'deploy_center'=>['fa-diagram-project','Deploy Manager'],'backups'=>['fa-box-archive','Backup'],'cron'=>['fa-clock','Cron'],'logs'=>['fa-file-lines','Логи']]],
         'secure'  => ['label'=>'Доступ','icon'=>'fa-shield-halved','accent'=>'#f472b6','items'=>['access'=>['fa-plug-circle-bolt','Внешний доступ'],'dns'=>['fa-diagram-project','DNS'],'network'=>['fa-tower-broadcast','Сеть'],'ssl'=>['fa-shield-halved','SSL'],'security'=>['fa-lock','Безопасность']]],
     ];
 }
@@ -460,7 +459,7 @@ function nav_item(string $id,string $icon,string $label,string $page): string { 
 function render_login(): void
 {
     $flash=flash(); $need2fa=setting_get('security_2fa_enabled','0')==='1'; ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=74" rel="stylesheet"></head><body class="login-body">
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=75" rel="stylesheet"></head><body class="login-body">
 <div class="login-orb login-orb-a"></div><div class="login-orb login-orb-b"></div><div class="login-orb login-orb-c"></div>
 <main class="login-clean">
   <section class="login-card card-glass login-clean-card">
@@ -481,14 +480,14 @@ function render_login(): void
 
 function render_page(string $page, array $user): void
 {
-    $titles=['dashboard'=>'Панель управления','files'=>'Файловый менеджер','sites'=>'Сайты и папки','ftp'=>'FTP','databases'=>'Базы данных','bots'=>'Боты PM2 24/7','bot_logs'=>'Логи бота','deploy_logs'=>'Логи проекта','backups'=>'Backup','dns'=>'DNS','network'=>'Сеть и доступ','ssl'=>'SSL','php'=>'PHP-версии','cron'=>'Cron','logs'=>'Логи сайтов','security'=>'Безопасность','settings'=>'Настройки','access'=>'Внешний доступ','disk'=>'Диск и LVM']; $title=$titles[$page]??'Дашборд'; $flash=flash();
+    $titles=['dashboard'=>'Панель управления','files'=>'Файловый менеджер','sites'=>'Сайты и папки','ftp'=>'FTP','databases'=>'Базы данных','bots'=>'Боты PM2 24/7','deploy_center'=>'MyStock Deploy Manager','bot_logs'=>'Логи бота','deploy_logs'=>'Логи проекта','backups'=>'Backup','dns'=>'DNS','network'=>'Сеть и доступ','ssl'=>'SSL','php'=>'PHP-версии','cron'=>'Cron','logs'=>'Логи сайтов','security'=>'Безопасность','settings'=>'Настройки','access'=>'Внешний доступ','disk'=>'Диск и LVM']; $title=$titles[$page]??'Дашборд'; $flash=flash();
     $nav=hh_nav_config(); $activeCat=hh_active_category($page);
     ?>
 <!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($title) ?> — HYPER-HOST</title>
 <link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
-<link href="/assets/style.css?v=74" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
+<link href="/assets/style.css?v=75" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
 <div class="mobile-nav-backdrop" id="mobileNavBackdrop"></div>
 <aside class="sidebar sidebar-v2">
   <div class="rail" data-active-cat="<?= e($activeCat) ?>">
@@ -519,9 +518,9 @@ function render_page(string $page, array $user): void
     </div>
   </div>
 </aside>
-<main class="content" style="--cat-accent:<?= e($nav[$activeCat]['accent']??'#4f7dff') ?>"><header class="topbar"><button type="button" class="mobile-nav-toggle" id="mobileNavToggle" aria-label="Меню" aria-expanded="false"><i class="fa-solid fa-bars"></i></button><div><div class="topbar-kicker"><i class="fa-solid <?= e($nav[$activeCat]['icon']??'fa-rocket') ?>"></i><?= e($nav[$activeCat]['label']??'') ?></div><h1><?= e($title) ?></h1><div class="small muted">Сервер: <code><?= e(host_name()) ?></code></div></div><form method="post" data-async-submit><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft" data-loading-text="Синхронизирую..."><i class="fa-solid fa-rotate me-2"></i>Обновить</button></form></header><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?><?php route_view($page); ?></main></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script><script src="/assets/app.js?v=74" defer></script></body></html><?php
+<main class="content" style="--cat-accent:<?= e($nav[$activeCat]['accent']??'#4f7dff') ?>"><header class="topbar"><button type="button" class="mobile-nav-toggle" id="mobileNavToggle" aria-label="Меню" aria-expanded="false"><i class="fa-solid fa-bars"></i></button><div><div class="topbar-kicker"><i class="fa-solid <?= e($nav[$activeCat]['icon']??'fa-rocket') ?>"></i><?= e($nav[$activeCat]['label']??'') ?></div><h1><?= e($title) ?></h1><div class="small muted">Сервер: <code><?= e(host_name()) ?></code></div></div><form method="post" data-async-submit><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft" data-loading-text="Синхронизирую..."><i class="fa-solid fa-rotate me-2"></i>Обновить</button></form></header><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?><?php route_view($page); ?></main></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script><script src="/assets/app.js?v=75" defer></script></body></html><?php
 }
-function route_view(string $page): void { match($page){ 'files'=>view_files(), 'sites'=>view_sites(), 'ftp'=>view_ftp(), 'databases'=>view_databases(), 'pma_login'=>view_pma_login(), 'bots'=>view_bots(), 'bot_logs'=>view_bot_logs(), 'deploy_logs'=>view_deploy_logs(), 'backups'=>view_backups(), 'dns'=>view_dns(), 'network'=>view_network(), 'ssl'=>view_ssl(), 'php'=>view_php(), 'cron'=>view_cron(), 'logs'=>view_logs(), 'security'=>view_security(), 'settings'=>view_settings(), 'access'=>view_access(), 'disk'=>view_disk(), default=>view_dashboard(), }; }
+function route_view(string $page): void { match($page){ 'files'=>view_files(), 'sites'=>view_sites(), 'ftp'=>view_ftp(), 'databases'=>view_databases(), 'pma_login'=>view_pma_login(), 'bots'=>view_bots(), 'deploy_center'=>view_deploy_center(), 'bot_logs'=>view_bot_logs(), 'deploy_logs'=>view_deploy_logs(), 'backups'=>view_backups(), 'dns'=>view_dns(), 'network'=>view_network(), 'ssl'=>view_ssl(), 'php'=>view_php(), 'cron'=>view_cron(), 'logs'=>view_logs(), 'security'=>view_security(), 'settings'=>view_settings(), 'access'=>view_access(), 'disk'=>view_disk(), default=>view_dashboard(), }; }
 function stat_card(string $icon,string $label,string $value,string $sub=''): void { ?><div class="stat-card"><div class="stat-icon"><i class="fa-solid <?= e($icon) ?>"></i></div><div><span><?= e($label) ?></span><b><?= e($value) ?></b><?php if($sub): ?><em><?= e($sub) ?></em><?php endif; ?></div></div><?php }
 function progress_block(string $label,float $used,float $total): string { $p=percent($used,$total); return '<div class="usage"><div class="d-flex justify-content-between"><span>'.e($label).'</span><b>'.e(human_bytes($used).' / '.human_bytes($total)).'</b></div><div class="progress"><div class="progress-bar" style="width:'.$p.'%"></div></div></div>'; }
 
@@ -932,32 +931,119 @@ function pm2_status_map(): array { $d=run_ctl_json_live(['bot-list-json'],8); $m
 function view_deploy_center(): void
 {
   $cfg=deploy_center_config();
-  $doctor=run_ctl_json_live(['deploy-center-doctor'],20);
+  $doctor=run_ctl_json_live(['deploy-center-doctor'],25);
   $projects=db()->query('SELECT * FROM managed_projects ORDER BY project_id DESC')->fetchAll();
-  $masterProject=(int)setting_get('deploy_master_project_id','0');
   $lastSync=setting_get('deploy_last_sync','ещё не выполнялась');
   $masterStatus=(string)($cfg['master_pm2']['status']??'not_found');
+  $masterFiles=$cfg['master_files']??[];
+  $templateFiles=$cfg['template_files']??[];
+  $masterTg=$cfg['master_telegram']??[];
+  $serverMissing=$doctor['missing']??[];
+  $uploadMissing=$doctor['upload_missing']??[];
   ?>
-<div class="deploy-center-v74 mb-4">
-  <div class="deploy-hero-v74 panel-card">
-    <div><div class="eyebrow"><i class="fa-solid fa-diagram-project"></i> MyStock Deploy Center</div><h2>Главный бот и магазины из SQL</h2><p class="muted mb-0">Проекты читаются из <code>projects</code>, а каждый магазин получает отдельные папку, venv, .env и PM2-процесс.</p></div><?php if(empty($doctor['ok'])): ?><div class="alert alert-warning mt-3 mb-0 py-2"><b>Не хватает:</b> <?= e(implode(', ', $doctor['missing']??[])) ?><?= !empty($doctor['db_error'])?' · '.e((string)$doctor['db_error']):'' ?></div><?php else: ?><div class="small text-success mt-2"><i class="fa-solid fa-circle-check me-1"></i>Сервер готов · проектов в SQL: <?= (int)($doctor['project_count']??0) ?></div><?php endif; ?>
-    <div class="deploy-hero-actions-v74"><span class="bot-status-v29 <?= $masterStatus==='online'?'ok':'bad' ?>"><?= e($masterStatus) ?></span><form method="post" data-async-submit><?= csrf_field() ?><input type="hidden" name="action" value="deploy_sync"><button class="btn btn-primary" data-loading-text="Читаю MySQL и Telegram getMe..."><i class="fa-solid fa-rotate me-2"></i>Синхронизировать</button></form></div>
-  </div>
+<div class="deploy-manager-v75">
+  <section class="deploy-manager-hero-v75 panel-card">
+    <div class="deploy-manager-copy-v75">
+      <div class="eyebrow"><i class="fa-solid fa-diagram-project"></i> MyStock Deploy Manager</div>
+      <h2>Главный deploy-бот и все магазины</h2>
+      <p>Отдельный центр управления. Главный бот читает проекты из MySQL, берёт твои файлы шаблона и создаёт каждый магазин в своей папке с отдельным venv и PM2-процессом.</p>
+      <div class="deploy-manager-badges-v75">
+        <span><i class="fa-solid fa-crown"></i> Master: <b><?= e($masterStatus) ?></b></span>
+        <span><i class="fa-solid fa-store"></i> Проектов: <b><?= count($projects) ?></b></span>
+        <span><i class="fa-solid fa-clock"></i> Sync: <b><?= e($lastSync) ?></b></span>
+      </div>
+    </div>
+    <div class="deploy-manager-hero-actions-v75">
+      <form method="post" data-async-submit><?= csrf_field() ?><input type="hidden" name="action" value="deploy_sync"><button class="btn btn-primary btn-lg" data-loading-text="Читаю SQL и Telegram getMe..."><i class="fa-solid fa-rotate me-2"></i>Синхронизировать</button></form>
+      <a class="btn btn-soft" href="/?page=deploy_logs&master=1"><i class="fa-solid fa-terminal me-2"></i>Логи master</a>
+    </div>
+  </section>
+
+  <?php if($serverMissing): ?><div class="alert alert-danger mt-4"><b>На сервере не хватает:</b> <?= e(implode(', ', $serverMissing)) ?><?= !empty($doctor['db_error'])?' · '.e((string)$doctor['db_error']):'' ?></div><?php endif; ?>
+  <?php if($uploadMissing): ?><div class="alert alert-warning mt-3"><b>Нужно загрузить через эту страницу:</b> <?= e(implode(', ', $uploadMissing)) ?></div><?php endif; ?>
+
   <div class="row g-4 mt-1">
-    <div class="col-xl-4"><div class="panel-card h-100"><h3><i class="fa-solid fa-database me-2"></i>MySQL проекта</h3><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="deploy_config_save"><div class="row g-2"><div class="col-8"><input class="form-control" name="db_host" value="<?= e((string)($cfg['db_host']??'90.189.208.25')) ?>"></div><div class="col-4"><input class="form-control" type="number" name="db_port" value="<?= e((string)($cfg['db_port']??3306)) ?>"></div></div><input class="form-control" name="db_user" value="<?= e((string)($cfg['db_user']??'mystock')) ?>"><input class="form-control" type="password" name="db_pass" placeholder="<?= !empty($cfg['db_pass_set'])?'Пароль сохранён — оставь пустым':'DB_PASS' ?>"><input class="form-control" name="db_name" value="<?= e((string)($cfg['db_name']??'mystock')) ?>"><button class="btn btn-soft">Сохранить подключение</button></form><div class="deploy-paths-v74 mt-3"><span>Master</span><code><?= e((string)($cfg['master_dir']??'')) ?></code><span>Template</span><code><?= e((string)($cfg['template_dir']??'')) ?></code><span>Проекты</span><code><?= e((string)($cfg['managed_dir']??'')) ?></code></div></div></div>
-    <div class="col-xl-4"><div class="panel-card h-100"><h3><i class="fa-solid fa-crown me-2"></i>Главный deploy-бот</h3><form method="post" enctype="multipart/form-data" class="vstack gap-3" data-async-submit><?= csrf_field() ?><input type="hidden" name="action" value="deploy_master_upload"><label class="upload-mini"><span>bot.py</span><input class="form-control" type="file" name="master_bot_file" accept=".py"></label><label class="upload-mini"><span>requirements.txt</span><input class="form-control" type="file" name="master_requirements_file" accept=".txt"></label><select class="form-select" name="master_project_id" required><option value="">Токен главного бота из проекта...</option><?php foreach($projects as $p): ?><option value="<?= (int)$p['project_id'] ?>" <?= $masterProject===(int)$p['project_id']?'selected':'' ?>>#<?= (int)$p['project_id'] ?> — <?= e($p['project_name']) ?><?= $p['bot_username']?' (@'.e($p['bot_username']).')':'' ?></option><?php endforeach; ?></select><button class="btn btn-primary" data-loading-text="Создаю venv и запускаю PM2..."><i class="fa-solid fa-upload me-2"></i>Загрузить и запустить</button></form><div class="d-flex gap-2 mt-3 flex-wrap"><?php foreach(['start'=>'Start','stop'=>'Stop','restart'=>'Restart'] as $a=>$label): ?><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="deploy_master_action"><input type="hidden" name="master_action" value="<?= e($a) ?>"><button class="btn btn-sm btn-soft"><?= e($label) ?></button></form><?php endforeach; ?><a class="btn btn-sm btn-soft" href="/?page=deploy_logs&master=1">Logs</a></div></div></div>
-    <div class="col-xl-4"><div class="panel-card h-100"><h3><i class="fa-solid fa-box-open me-2"></i>Шаблон новых магазинов</h3><form method="post" enctype="multipart/form-data" class="vstack gap-3" data-async-submit><?= csrf_field() ?><input type="hidden" name="action" value="deploy_template_upload"><label class="upload-mini"><span>bot.py дочернего бота</span><input class="form-control" type="file" name="template_bot_file" accept=".py"></label><label class="upload-mini"><span>requirements.txt</span><input class="form-control" type="file" name="template_requirements_file" accept=".txt"></label><button class="btn btn-soft"><i class="fa-solid fa-floppy-disk me-2"></i>Сохранить шаблон</button></form><div class="template-state-v74 mt-3"><span class="<?= !empty($cfg['template_bot_exists'])?'ok':'bad' ?>"><i class="fa-solid <?= !empty($cfg['template_bot_exists'])?'fa-circle-check':'fa-circle-xmark' ?>"></i> bot.py</span><span class="<?= !empty($cfg['template_requirements_exists'])?'ok':'warn' ?>"><i class="fa-solid fa-file-lines"></i> requirements.txt</span></div><p class="small muted mt-3 mb-0">Папка проекта: <code>&lt;project_id&gt;-&lt;название-магазина&gt;</code>.</p></div></div>
+    <div class="col-xxl-4 col-xl-6">
+      <section class="panel-card deploy-config-card-v75 h-100">
+        <div class="deploy-card-icon-v75 db"><i class="fa-solid fa-database"></i></div>
+        <h3>Подключение к MyStock SQL</h3>
+        <p class="muted">Из SQL берутся проекты, токены, владельцы, статусы и названия магазинов.</p>
+        <form method="post" class="vstack gap-3 mt-3">
+          <?= csrf_field() ?><input type="hidden" name="action" value="deploy_config_save">
+          <div class="row g-2"><div class="col-8"><label class="hh-field"><span>DB_HOST</span><input class="form-control" name="db_host" value="<?= e((string)($cfg['db_host']??'90.189.208.25')) ?>"></label></div><div class="col-4"><label class="hh-field"><span>PORT</span><input class="form-control" type="number" name="db_port" value="<?= e((string)($cfg['db_port']??3306)) ?>"></label></div></div>
+          <label class="hh-field"><span>DB_USER</span><input class="form-control" name="db_user" value="<?= e((string)($cfg['db_user']??'mystock')) ?>"></label>
+          <label class="hh-field"><span>DB_PASS</span><input class="form-control" type="password" name="db_pass" placeholder="<?= !empty($cfg['db_pass_set'])?'Пароль сохранён — оставь пустым':'Пароль MySQL' ?>"></label>
+          <label class="hh-field"><span>DB_NAME</span><input class="form-control" name="db_name" value="<?= e((string)($cfg['db_name']??'mystock')) ?>"></label>
+          <button class="btn btn-soft"><i class="fa-solid fa-floppy-disk me-2"></i>Сохранить SQL</button>
+        </form>
+      </section>
+    </div>
+
+    <div class="col-xxl-4 col-xl-6">
+      <section class="panel-card deploy-master-card-v75 h-100">
+        <div class="deploy-card-head-v75"><div class="deploy-card-icon-v75 master"><i class="fa-solid fa-crown"></i></div><span class="bot-status-v29 <?= $masterStatus==='online'?'ok':'bad' ?>"><?= e($masterStatus) ?></span></div>
+        <h3>Главный deploy-бот</h3>
+        <p class="muted">Ты сам загружаешь все три файла. Панель ничего не генерирует и не заменяет внутри главного бота.</p>
+        <form method="post" enctype="multipart/form-data" class="vstack gap-3 mt-3" data-async-submit>
+          <?= csrf_field() ?><input type="hidden" name="action" value="deploy_master_upload">
+          <label class="upload-mini deploy-upload-v75"><span><i class="fa-brands fa-python"></i> bot.py</span><input class="form-control" type="file" name="master_bot_file" accept=".py"></label>
+          <label class="upload-mini deploy-upload-v75"><span><i class="fa-solid fa-key"></i> .env</span><input class="form-control" type="file" name="master_env_file" accept=".env,.txt"></label>
+          <label class="upload-mini deploy-upload-v75"><span><i class="fa-solid fa-list"></i> requirements.txt</span><input class="form-control" type="file" name="master_requirements_file" accept=".txt"></label>
+          <button class="btn btn-primary" data-loading-text="Создаю venv, ставлю зависимости и запускаю PM2..."><i class="fa-solid fa-cloud-arrow-up me-2"></i>Загрузить и запустить</button>
+        </form>
+        <div class="deploy-file-state-v75 mt-3">
+          <span class="<?= !empty($masterFiles['bot_py']['exists'])?'ok':'bad' ?>"><i class="fa-solid fa-file-code"></i> bot.py</span>
+          <span class="<?= !empty($masterFiles['env']['exists'])?'ok':'bad' ?>"><i class="fa-solid fa-key"></i> .env</span>
+          <span class="<?= !empty($masterFiles['requirements']['exists'])?'ok':'warn' ?>"><i class="fa-solid fa-list"></i> requirements</span>
+        </div>
+        <?php if(!empty($masterTg['link'])): ?><a class="deploy-master-link-v75 mt-3" target="_blank" rel="noopener" href="<?= e((string)$masterTg['link']) ?>"><i class="fa-brands fa-telegram"></i><span><?= e((string)($masterTg['first_name']?:$masterTg['username'])) ?></span><b>@<?= e((string)$masterTg['username']) ?></b></a><?php endif; ?>
+        <div class="d-flex gap-2 mt-3 flex-wrap"><?php foreach(['start'=>'Start','stop'=>'Stop','restart'=>'Restart'] as $a=>$label): ?><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="deploy_master_action"><input type="hidden" name="master_action" value="<?= e($a) ?>"><button class="btn btn-sm btn-soft"><?= e($label) ?></button></form><?php endforeach; ?><a class="btn btn-sm btn-soft" href="/?page=deploy_logs&master=1">Logs</a></div>
+      </section>
+    </div>
+
+    <div class="col-xxl-4 col-xl-12">
+      <section class="panel-card deploy-template-card-v75 h-100">
+        <div class="deploy-card-icon-v75 template"><i class="fa-solid fa-box-open"></i></div>
+        <h3>Файлы для новых магазинов</h3>
+        <p class="muted">Загружаются только твои реальные файлы. Никаких bot.py-заглушек установщик не создаёт.</p>
+        <form method="post" enctype="multipart/form-data" class="vstack gap-3 mt-3" data-async-submit>
+          <?= csrf_field() ?><input type="hidden" name="action" value="deploy_template_upload">
+          <label class="upload-mini deploy-upload-v75"><span><i class="fa-brands fa-python"></i> bot.py магазина</span><input class="form-control" type="file" name="template_bot_file" accept=".py"></label>
+          <label class="upload-mini deploy-upload-v75"><span><i class="fa-solid fa-list"></i> requirements.txt магазина</span><input class="form-control" type="file" name="template_requirements_file" accept=".txt"></label>
+          <button class="btn btn-soft"><i class="fa-solid fa-floppy-disk me-2"></i>Сохранить мои файлы</button>
+        </form>
+        <div class="deploy-file-state-v75 mt-3">
+          <span class="<?= !empty($templateFiles['bot_py']['exists'])?'ok':'bad' ?>"><i class="fa-solid fa-file-code"></i> bot.py</span>
+          <span class="<?= !empty($templateFiles['requirements']['exists'])?'ok':'warn' ?>"><i class="fa-solid fa-list"></i> requirements</span>
+        </div>
+        <div class="deploy-paths-v75 mt-3"><span>Master</span><code><?= e((string)($cfg['master_dir']??'')) ?></code><span>Шаблон</span><code><?= e((string)($cfg['template_dir']??'')) ?></code><span>Магазины</span><code><?= e((string)($cfg['managed_dir']??'')) ?></code></div>
+      </section>
+    </div>
   </div>
-  <div class="panel-card mt-4"><div class="card-title-row flex-wrap"><div><h2><i class="fa-solid fa-store me-2"></i>Проекты / магазины</h2><div class="small muted">Последняя синхронизация: <?= e($lastSync) ?></div></div><span class="badge text-bg-info"><?= count($projects) ?> проектов</span></div><div class="table-responsive"><table class="table table-dark-soft align-middle deploy-project-table-v74"><thead><tr><th>Магазин</th><th>Создатель</th><th>Telegram</th><th>PM2 / SQL</th><th>Папка</th><th></th></tr></thead><tbody>
-  <?php foreach($projects as $p): ?><tr><td><b>#<?= (int)$p['project_id'] ?> <?= e($p['project_name']) ?></b><div class="small muted"><?= e($p['subscription_status']) ?></div></td><td><?= e($p['owner_name']?:$p['owner_username']) ?><div class="small muted"><?= $p['owner_username']?'@'.e($p['owner_username']).' · ':'' ?>TG <?= e($p['owner_tg_id']) ?></div></td><td><?php if($p['bot_link']): ?><a class="btn btn-sm btn-soft" target="_blank" rel="noopener" href="<?= e($p['bot_link']) ?>">@<?= e($p['bot_username']) ?></a><?php else: ?><span class="muted">getMe недоступен</span><?php endif; ?></td><td><span class="bot-status-v29 <?= $p['pm2_status']==='online'?'ok':'bad' ?>"><?= e($p['pm2_status']) ?></span><div class="small muted mt-1">SQL: <?= e($p['sql_status']?:'—') ?></div><?php if($p['last_error']): ?><div class="small text-danger text-truncate" style="max-width:240px" title="<?= e($p['last_error']) ?>"><?= e($p['last_error']) ?></div><?php endif; ?></td><td><code><?= e($p['deploy_path']) ?></code></td><td><div class="d-flex gap-1 flex-wrap justify-content-end"><form method="post" data-async-submit><?= csrf_field() ?><input type="hidden" name="action" value="deploy_project_action"><input type="hidden" name="project_id" value="<?= (int)$p['project_id'] ?>"><input type="hidden" name="project_action" value="deploy"><button class="btn btn-sm btn-primary" data-loading-text="Ставлю venv и зависимости...">Deploy</button></form><?php foreach(['start'=>'Start','stop'=>'Stop','restart'=>'Restart'] as $a=>$label): ?><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="deploy_project_action"><input type="hidden" name="project_id" value="<?= (int)$p['project_id'] ?>"><input type="hidden" name="project_action" value="<?= e($a) ?>"><button class="btn btn-sm btn-soft"><?= e($label) ?></button></form><?php endforeach; ?><a class="btn btn-sm btn-soft" href="/?page=deploy_logs&project_id=<?= (int)$p['project_id'] ?>">Logs</a></div></td></tr><?php endforeach; if(!$projects): ?><tr><td colspan="6" class="empty">Сохрани MySQL и нажми «Синхронизировать»</td></tr><?php endif; ?>
-  </tbody></table></div></div>
+
+  <section class="panel-card mt-4 deploy-projects-v75">
+    <div class="card-title-row flex-wrap">
+      <div><div class="eyebrow"><i class="fa-solid fa-store"></i> SQL projects</div><h2>Проекты / магазины</h2><div class="small muted">Каждый проект получает папку <code>&lt;project_id&gt;-&lt;название&gt;</code>, свой <code>.env</code>, venv и PM2.</div></div>
+      <div class="d-flex gap-2"><span class="badge text-bg-info"><?= count($projects) ?> проектов</span><a class="btn btn-sm btn-soft" href="/?page=files&root=bots"><i class="fa-solid fa-folder-open me-1"></i>Файлы</a></div>
+    </div>
+    <div class="table-responsive"><table class="table table-dark-soft align-middle deploy-project-table-v75"><thead><tr><th>Магазин</th><th>Кто создал</th><th>Telegram-бот</th><th>Состояние</th><th>Папка</th><th>Управление</th></tr></thead><tbody>
+    <?php foreach($projects as $p): ?><tr>
+      <td><b class="deploy-project-name-v75">#<?= (int)$p['project_id'] ?> <?= e($p['project_name']) ?></b><div class="small muted mt-1">Тариф: <?= e($p['subscription_status']) ?> · token fp: <code><?= e($p['token_fingerprint']) ?></code></div></td>
+      <td><b><?= e($p['owner_name']?:($p['owner_username']?:'Без имени')) ?></b><div class="small muted"><?= $p['owner_username']?'@'.e($p['owner_username']).' · ':'' ?>TG <?= e($p['owner_tg_id']) ?></div></td>
+      <td><?php if($p['bot_link']): ?><a class="deploy-telegram-link-v75" target="_blank" rel="noopener" href="<?= e($p['bot_link']) ?>"><i class="fa-brands fa-telegram"></i><span>@<?= e($p['bot_username']) ?></span></a><?php else: ?><span class="muted">getMe недоступен</span><?php endif; ?></td>
+      <td><span class="bot-status-v29 <?= $p['pm2_status']==='online'?'ok':'bad' ?>"><?= e($p['pm2_status']) ?></span><div class="small muted mt-1">SQL: <?= e($p['sql_status']?:'—') ?> · user: <?= e($p['bot_active']) ?></div><?php if($p['last_error']): ?><div class="deploy-error-v75" title="<?= e($p['last_error']) ?>"><?= e($p['last_error']) ?></div><?php endif; ?></td>
+      <td><code class="deploy-project-path-v75"><?= e($p['deploy_path']) ?></code></td>
+      <td><div class="deploy-actions-v75"><form method="post" data-async-submit><?= csrf_field() ?><input type="hidden" name="action" value="deploy_project_action"><input type="hidden" name="project_id" value="<?= (int)$p['project_id'] ?>"><input type="hidden" name="project_action" value="deploy"><button class="btn btn-sm btn-primary" data-loading-text="Копирую файлы, создаю .env и venv...">Развернуть</button></form><?php foreach(['start'=>'Start','stop'=>'Stop','restart'=>'Restart'] as $a=>$label): ?><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="deploy_project_action"><input type="hidden" name="project_id" value="<?= (int)$p['project_id'] ?>"><input type="hidden" name="project_action" value="<?= e($a) ?>"><button class="btn btn-sm btn-soft"><?= e($label) ?></button></form><?php endforeach; ?><a class="btn btn-sm btn-soft" href="/?page=deploy_logs&project_id=<?= (int)$p['project_id'] ?>">Logs</a></div></td>
+    </tr><?php endforeach; if(!$projects): ?><tr><td colspan="6" class="empty">Сохрани подключение к MySQL и нажми «Синхронизировать»</td></tr><?php endif; ?>
+    </tbody></table></div>
+  </section>
 </div>
 <?php }
 
 function view_deploy_logs(): void
 {
   $master=!empty($_GET['master']); $pid=(int)($_GET['project_id']??0); $args=$master?['deploy-center-master-action','logs']:['deploy-center-project-action',(string)$pid,'logs','0']; $res=run_ctl_json($args,40); $text=(string)($res['output']??$res['error']??$res['_error']??'Логов нет'); ?>
-  <div class="panel-card"><div class="card-title-row"><h2><?= $master?'Логи главного deploy-бота':'Логи проекта #'.$pid ?></h2><a class="btn btn-soft" href="/?page=bots">Назад</a></div><pre class="logs"><?= e($text) ?></pre></div><?php
+  <div class="panel-card"><div class="card-title-row"><h2><?= $master?'Логи главного deploy-бота':'Логи проекта #'.$pid ?></h2><a class="btn btn-soft" href="/?page=deploy_center">Назад</a></div><pre class="logs"><?= e($text) ?></pre></div><?php
 }
 
 function view_bots(): void
@@ -965,7 +1051,6 @@ function view_bots(): void
   $bots=db()->query('SELECT * FROM bots ORDER BY id DESC')->fetchAll();
   $status=pm2_status_map();
   $modals=[];
-  view_deploy_center();
   ?>
 <div class="bots-live-page-v29" data-live-bots>
   <div class="row g-4">

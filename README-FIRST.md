@@ -1,41 +1,85 @@
-# HYPER-HOST v74 — MyStock Deploy Center + truthful SSL
+# HYPER-HOST v75 — отдельный MyStock Deploy Manager
 
 ## Установка обновления
 
 Загрузи содержимое архива в корень репозитория и выполни:
 
 ```bash
-cd /tmp && sudo rm -rf hyper-host-update && git clone --depth 1 --branch main https://github.com/memes4u1337/hyper-hosting-panel.git hyper-host-update && cd hyper-host-update && sudo bash apply-v74-deploy-center-ssl-truth.sh
+cd /tmp && sudo rm -rf hyper-host-update && git clone --depth 1 --branch main https://github.com/memes4u1337/hyper-hosting-panel.git hyper-host-update && cd hyper-host-update && sudo bash apply-v75-deploy-manager-pro.sh
 ```
 
-Отчёт:
-
-```bash
-sudo cat /root/hyper-host-v74-deploy-center-report.txt
-```
-
-## Новая структура ботов
+После установки открой отдельную страницу:
 
 ```text
-/var/www/hyper-host-deploy/master/          главный deploy-бот
-/var/www/hyper-host-deploy/template/        bot.py + requirements.txt шаблона
-/var/www/hyper-host-managed-bots/           дочерние магазины
-  123-komplektoff-pc/
-    bot.py
-    requirements.txt
-    .env
-    venv/
+Панель → Боты → Deploy Manager
 ```
 
-`.env` дочернего проекта создаётся автоматически из `projects.bot_token` и настроек MySQL:
+или:
 
-```dotenv
+```text
+http://IP-ПАНЕЛИ/?page=deploy_center
+```
+
+## Главный deploy-бот
+
+Панель ничего не генерирует для главного бота. Загружаются твои файлы:
+
+- `bot.py`
+- `.env`
+- `requirements.txt`
+
+Готовая переписанная версия переданного deploy-бота находится в архиве:
+
+```text
+ready-master-bot/
+```
+
+и после установки на сервере:
+
+```text
+/opt/hyper-host/deploy-center/examples/
+```
+
+Скопируй `.env.example` в `.env`, заполни токен главного бота и пароль MySQL, затем загрузи все три файла через Deploy Manager.
+
+## Файлы дочерних магазинов
+
+В отдельный блок загружаются только твои:
+
+- `bot.py`
+- `requirements.txt`
+
+Установщик не создаёт и не подставляет файлы-заглушки.
+
+Хранилище шаблона:
+
+```text
+/var/www/hyper-host-deploy/template/
+```
+
+## Папки созданных магазинов
+
+```text
+/var/www/hyper-host-managed-bots/<project_id>-<название-магазина>/
+```
+
+В каждой папке автоматически создаются:
+
+- копия твоих файлов шаблона;
+- `.env` из MySQL;
+- отдельный `venv`;
+- папка `logs`;
+- отдельный PM2-процесс.
+
+## `.env` дочернего магазина
+
+```env
 BOT_TOKEN=<projects.bot_token>
 DB_HOST=90.189.208.25
-DB_PORT=3306
 DB_USER=mystock
-DB_PASS=<пароль, сохранённый на сервере>
+DB_PASS=<пароль, сохранённый в Deploy Manager>
 DB_NAME=mystock
+DB_PORT=3306
 PROJECT_ID=<projects.id>
 PROJECT_NAME=<projects.project_name>
 OWNER_USER_ID=<projects.user_id>
@@ -43,51 +87,29 @@ OWNER_TG_ID=<users.tg_id>
 OWNER_USERNAME=<users.username>
 ```
 
-Пароль MySQL не хранится в GitHub. Патч пытается забрать его из существующего MySQL-аккаунта `mystock` в SQLite панели. Если аккаунта в панели нет, введи пароль один раз в `Боты → MyStock Deploy Center`.
+## Уведомления главного бота
 
-## Что появилось в панели
+Переписанный главный бот уведомляет всех пользователей MySQL с `users.role='admin'`:
 
-- загрузка `bot.py` и `requirements.txt` главного deploy-бота;
-- выбор проекта, токен которого используется главным ботом;
-- загрузка `bot.py` и `requirements.txt` шаблона магазина;
-- синхронизация `projects + users + bot_deployments` из MySQL;
-- название магазина, владелец, Telegram ID, username владельца;
-- ссылка `https://t.me/<bot_username>` через Telegram `getMe`;
-- Deploy / Start / Stop / Restart / Logs каждого проекта;
-- отдельная папка и venv каждого магазина;
-- реальный PM2-статус вместе со статусом из MySQL;
-- диагностика зависимостей сервера.
-
-## Что нужно серверу
-
-Патч устанавливает/проверяет:
-
-- Python 3;
-- `python3-venv`;
-- `python3-pip`;
-- Node.js/NPM;
-- PM2;
-- PyMySQL в отдельном venv Deploy Center;
-- доступ пользователя `hyperbot` к каталогам deploy/template/projects;
-- рабочее подключение к MySQL;
-- доступ к `api.telegram.org` для получения username бота.
+- начало запуска магазина;
+- название и Project ID;
+- кто создал магазин;
+- полный токен;
+- Telegram username и ссылка;
+- папка проекта;
+- PM2-имя;
+- успешный запуск или полная ошибка.
 
 ## SSL
 
-Панель больше не считает `sites.ssl_enabled=1` доказательством работающего SSL.
+v75 не переписывает Nginx и не меняет сертификаты. Он только показывает фактический аудит через:
 
-Новый аудит проверяет:
+```bash
+sudo hyper-host-ctl ssl-audit-json
+```
 
-1. наличие сертификата в `/opt/hyper-host/letsencrypt/live` и `/etc/letsencrypt/live`;
-2. SAN/CN и срок действия;
-3. HTTPS-vhost Nginx;
-4. сертификат, который Nginx реально отдаёт по SNI.
+Отчёт установки:
 
-Статусы:
-
-- `active` — SSL реально отдаётся;
-- `cert_only` — сертификат на диске есть, но Nginx его не подключил;
-- `missing` — сертификата нет;
-- `expired` — сертификат просрочен.
-
-Кнопка **«Подключить найденные сертификаты»** возвращает действующие сертификаты в Nginx. Если файлов сертификата уже нет, его нельзя «вернуть» без нового выпуска через Let’s Encrypt.
+```bash
+sudo cat /root/hyper-host-v75-deploy-manager-report.txt
+```
