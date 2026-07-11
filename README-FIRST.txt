@@ -1,19 +1,25 @@
-HYPER-HOST v71 — ПОЛНОЕ ВОССТАНОВЛЕНИЕ NGINX-МАРШРУТИЗАЦИИ
+HYPER-HOST v72 — полное восстановление SSL после v71
 
-Патч меняет только Nginx/создание сайтов.
-FTP, SQL, боты, база панели и пароль admin не изменяются.
+Проблема:
+v71 пересобрал Nginx-vhost'ы и поставил всем сайтам общий self-signed
+сертификат. Файлы Let's Encrypt при этом не были удалены, но Nginx перестал
+на них ссылаться.
 
-Что делает:
-1. Возвращает панель по 192.168.0.179, 90.189.208.25 и panel.hyper-host.pw.
-2. Находит все реальные папки /var/www/hyper-host-sites/<домен>/public_html.
-3. Пересоздаёт отдельный vhost для каждого такого домена.
-4. Для новых сайтов автоматически создаёт стартовую заглушку, только если index.html/index.php отсутствуют.
-5. Для beta.mystockbot.xyz устанавливает отдельную заглушку; прежний index сохраняется в backup.
-6. Неизвестный Host показывает «Домен не настроен», но добавленные сайты туда больше не попадают.
+Что делает v72:
+- находит все существующие сертификаты в:
+  /opt/hyper-host/letsencrypt/live
+  /etc/letsencrypt/live
+- читает SAN/CN каждого сертификата;
+- возвращает каждому сайту подходящий действующий сертификат;
+- восстанавливает сертификат панели panel.hyper-host.pw;
+- не выпускает новые сертификаты и не удаляет старые;
+- домены без действующего сертификата оставляет на HTTP;
+- сохраняет ACME challenge для будущего выпуска/продления;
+- не меняет FTP, SQL, ботов, пароль admin и содержимое public_html.
 
-Установка после загрузки файлов в корень GitHub:
-
-cd /tmp && sudo rm -rf hyper-host-update && git clone --depth 1 --branch main https://github.com/memes4u1337/hyper-hosting-panel.git hyper-host-update && cd hyper-host-update && sudo bash apply-v71-nginx-full-recovery.sh beta.mystockbot.xyz
+Установка:
+  sudo bash apply-v72-ssl-full-restore.sh
 
 Отчёт:
-sudo cat /root/hyper-host-v71-nginx-full-recovery-report.txt
+  sudo cat /root/hyper-host-v72-ssl-full-restore-report.txt
+  sudo cat /root/hyper-host-v72-ssl-map.json

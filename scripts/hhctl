@@ -4677,6 +4677,356 @@ EOSUDO
   log "Repair finished: permissions, ACL, FTP safe homes, PM2 hyperbot and services checked"
 }
 
+
+# ============================================================================
+# HYPER-HOST v72: восстановление настоящих SSL-сертификатов после v71.
+# v71 пересобирал vhost'ы с общим self-signed сертификатом. Эти override-
+# функции выбирают существующий Let's Encrypt сертификат по SAN/CN и никогда
+# не заменяют его fallback-сертификатом, если валидный сертификат уже есть.
+# ============================================================================
+nginx_select_certificate() {
+  # Usage: nginx_select_certificate PRIMARY [ALIAS ...]
+  # Output: cert<TAB>key<TAB>certificate-name<TAB>matched/total<TAB>expiry
+  local names=("$@")
+  [[ ${#names[@]} -gt 0 ]] || return 1
+  NGINX_CERT_NAMES="${names[*]}" LE_CONFIG_DIR="$LE_CONFIG_DIR" python3 - <<'PYV72CERT'
+import datetime, glob, os, pathlib, ssl, sys
+
+wanted=[x.strip().lower().rstrip('.') for x in os.environ.get('NGINX_CERT_NAMES','').split() if x.strip()]
+if not wanted:
+    raise SystemExit(1)
+primary=wanted[0]
+roots=[pathlib.Path(os.environ.get('LE_CONFIG_DIR','/opt/hyper-host/letsencrypt'))/'live', pathlib.Path('/etc/letsencrypt/live')]
+
+def dns_match(pattern, host):
+    pattern=pattern.lower().rstrip('.')
+    host=host.lower().rstrip('.')
+    if pattern == host:
+        return True
+    if pattern.startswith('*.'):
+        suffix=pattern[1:]  # .example.com
+        return host.endswith(suffix) and host.count('.') == pattern.count('.')
+    return False
+
+def decode(cert):
+    try:
+        return ssl._ssl._test_decode_cert(str(cert.resolve()))
+    except Exception:
+        return {}
+
+def parse_expiry(info):
+    raw=info.get('notAfter','')
+    if not raw:
+        return None
+    try:
+        return datetime.datetime.strptime(raw, '%b %d %H:%M:%S %Y %Z').replace(tzinfo=datetime.timezone.utc)
+    except Exception:
+        return None
+
+candidates=[]
+seen=set()
+for root in roots:
+    if not root.exists():
+        continue
+    for cert in root.glob('*/fullchain.pem'):
+        try:
+            real=str(cert.resolve())
+        except Exception:
+            real=str(cert)
+        if real in seen:
+            continue
+        seen.add(real)
+        key=cert.parent/'privkey.pem'
+        if not cert.is_file() or not key.is_file():
+            continue
+        info=decode(cert)
+        sans=[v.lower().rstrip('.') for typ,v in info.get('subjectAltName',[]) if typ=='DNS']
+        if not sans:
+            for row in info.get('subject',[]):
+                for k,v in row:
+                    if k=='commonName':
+                        sans.append(str(v).lower().rstrip('.'))
+        if not any(dns_match(p, primary) for p in sans):
+            continue
+        expiry=parse_expiry(info)
+        if expiry and expiry <= datetime.datetime.now(datetime.timezone.utc):
+            continue
+        matched=sum(1 for n in wanted if any(dns_match(p,n) for p in sans))
+        dirname=cert.parent.name.lower()
+        score=1000 + matched*100
+        if dirname == primary:
+            score += 50
+        if dirname == 'hyper-host-panel-'+primary:
+            score += 40
+        # Prefer the writable /opt certificate store when otherwise equal.
+        if str(cert).startswith(os.environ.get('LE_CONFIG_DIR','/opt/hyper-host/letsencrypt')):
+            score += 5
+        candidates.append((score, matched, expiry or datetime.datetime.max.replace(tzinfo=datetime.timezone.utc), cert, key, dirname))
+
+if not candidates:
+    raise SystemExit(1)
+candidates.sort(key=lambda x:(x[0],x[1],x[2]), reverse=True)
+score,matched,expiry,cert,key,name=candidates[0]
+expiry_s='' if expiry.year >= 9999 else expiry.isoformat()
+print(f'{cert}\t{key}\t{name}\t{matched}/{len(wanted)}\t{expiry_s}')
+PYV72CERT
+}
+
+nginx_write_site_vhost_exact() {
+  local domain="$1" aliases="${2:-}" phpv="${3:-}" root conf enabled sock names item cert_info cert key cert_name cert_cover cert_expiry
+  valid_domain "$domain" || err "Invalid domain: $domain"
+  nginx_reserved_panel_name "$domain" && err "Домен закреплён за панелью: $domain"
+  root="$SITES_DIR/$domain/public_html"
+  conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
+  enabled="$NGINX_ENABLED/hyper-host-site-$domain.conf"
+  prepare_site_runtime_dirs "$domain"
+  [[ -f "$root/index.html" || -f "$root/index.php" ]] || php_index_template_file "$domain работает" "$root/index.html"
+  chown -R www-data:www-data "$SITES_DIR/$domain" 2>/dev/null || true
+  fix_web_permissions "$SITES_DIR/$domain"
+  ensure_acme_webroot
+  if [[ -n "$phpv" ]]; then sock="$(php_sock_for_version "$phpv")"; else sock="$(nginx_existing_php_sock "$domain")"; fi
+  names="$domain"
+  if [[ -n "$aliases" ]]; then
+    IFS=',' read -ra _aliases <<< "$aliases"
+    for item in "${_aliases[@]}"; do
+      item="$(echo "$item" | xargs)"; [[ -n "$item" ]] || continue
+      valid_domain "$item" || err "Invalid alias: $item"
+      nginx_reserved_panel_name "$item" && continue
+      [[ " $names " == *" $item "* ]] || names="$names $item"
+    done
+  else
+    while IFS= read -r item; do
+      [[ -n "$item" ]] || continue
+      [[ " $names " == *" $item "* ]] || names="$names $item"
+    done < <(nginx_existing_site_aliases "$domain")
+  fi
+
+  cert_info="$(nginx_select_certificate $names 2>/dev/null || true)"
+  cert=''; key=''; cert_name=''; cert_cover=''; cert_expiry=''
+  if [[ -n "$cert_info" ]]; then
+    IFS=$'\t' read -r cert key cert_name cert_cover cert_expiry <<< "$cert_info"
+  fi
+
+  cat > "$conf" <<EOSITEHTTP
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${names};
+    root ${root};
+    index index.html index.htm index.php;
+    client_max_body_size 1024M;
+    access_log ${SITES_DIR}/${domain}/logs/access.log;
+    error_log ${SITES_DIR}/${domain}/logs/error.log;
+    location ^~ /.well-known/acme-challenge/ {
+        root ${ACME_WEBROOT};
+        default_type "text/plain";
+        try_files \$uri =404;
+        allow all;
+        access_log off;
+        log_not_found off;
+    }
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_read_timeout 600;
+        fastcgi_send_timeout 600;
+        fastcgi_connect_timeout 60;
+        fastcgi_pass unix:${sock};
+    }
+    location ~ /\. { deny all; }
+}
+EOSITEHTTP
+
+  if [[ -n "$cert" && -r "$cert" && -r "$key" ]]; then
+    cat >> "$conf" <<EOSITEHTTPS
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name ${names};
+    ssl_certificate ${cert};
+    ssl_certificate_key ${key};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:HYPERHOSTSSL:20m;
+    ssl_session_timeout 1d;
+    root ${root};
+    index index.html index.htm index.php;
+    client_max_body_size 1024M;
+    access_log ${SITES_DIR}/${domain}/logs/access.log;
+    error_log ${SITES_DIR}/${domain}/logs/error.log;
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_read_timeout 600;
+        fastcgi_send_timeout 600;
+        fastcgi_connect_timeout 60;
+        fastcgi_pass unix:${sock};
+    }
+    location ~ /\. { deny all; }
+}
+EOSITEHTTPS
+    printf '# HYPER-HOST SSL: %s | coverage %s | expires %s\n' "$cert_name" "$cert_cover" "$cert_expiry" >> "$conf"
+  else
+    printf '# HYPER-HOST SSL: no matching valid certificate; HTTP remains enabled\n' >> "$conf"
+  fi
+  ln -sfn "$conf" "$enabled"
+}
+
+# nginx_reload used to re-add a shared self-signed certificate after every
+# site operation. Rebuild exact site vhosts with matching real certs instead.
+nginx_repair_site_vhosts() {
+  nginx_rebuild_all_sites_from_disk
+}
+
+write_panel_nginx_conf() {
+  ensure_nginx_runtime_overlay
+  ensure_nginx_default_tls
+  ensure_acme_webroot
+  local names conf panel_cert_names cert_info cert key cert_name cert_cover cert_expiry
+  names="$(panel_exact_server_names)"
+  conf="$NGINX_AVAILABLE/hyper-host-panel.conf"
+  if [[ -z "${PHP_FPM_SOCK:-}" || ! -S "${PHP_FPM_SOCK:-/nonexistent}" ]]; then
+    PHP_FPM_SOCK="$(php_sock_for_version '')"
+  fi
+  mkdir -p "$NGINX_AVAILABLE" "$NGINX_ENABLED" "$PANEL_DIR/public/.well-known/acme-challenge" /var/log/nginx
+  chown -R www-data:www-data "$PANEL_DIR/public/.well-known" 2>/dev/null || true
+  chmod -R a+rX "$PANEL_DIR/public/.well-known" 2>/dev/null || true
+
+  panel_cert_names="panel.hyper-host.pw www.panel.hyper-host.pw"
+  if [[ -n "${PANEL_DOMAIN:-}" && "${PANEL_DOMAIN:-_}" != "_" ]] && valid_domain "$PANEL_DOMAIN"; then
+    panel_cert_names="$PANEL_DOMAIN $panel_cert_names"
+  fi
+  cert_info="$(nginx_select_certificate $panel_cert_names 2>/dev/null || true)"
+  if [[ -n "$cert_info" ]]; then
+    IFS=$'\t' read -r cert key cert_name cert_cover cert_expiry <<< "$cert_info"
+  else
+    cert="$NGINX_DEFAULT_TLS_CERT"; key="$NGINX_DEFAULT_TLS_KEY"; cert_name='self-signed-fallback'; cert_cover='0'; cert_expiry=''
+  fi
+
+  cat > "$conf" <<EOPANELV72
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${names};
+    root ${PANEL_DIR}/public;
+    index index.php index.html;
+    client_max_body_size 1024M;
+    access_log /var/log/nginx/hyper-host-panel.access.log;
+    error_log /var/log/nginx/hyper-host-panel.error.log;
+    location ^~ /.well-known/acme-challenge/ {
+        root ${ACME_WEBROOT};
+        default_type "text/plain";
+        try_files \$uri =404;
+        allow all;
+        access_log off;
+        log_not_found off;
+    }
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+    location /phpmyadmin { alias /usr/share/phpmyadmin/; index index.php index.html; }
+    location ~ ^/phpmyadmin/(.+\.php)$ {
+        alias /usr/share/phpmyadmin/\$1;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /usr/share/phpmyadmin/\$1;
+        fastcgi_read_timeout 600;
+        fastcgi_send_timeout 600;
+        fastcgi_connect_timeout 60;
+        fastcgi_pass unix:${PHP_FPM_SOCK};
+    }
+    location ~ ^/phpmyadmin/(.+)$ { alias /usr/share/phpmyadmin/\$1; }
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_read_timeout 600;
+        fastcgi_send_timeout 600;
+        fastcgi_connect_timeout 60;
+        fastcgi_pass unix:${PHP_FPM_SOCK};
+    }
+    location ~ /\. { deny all; }
+}
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name ${names};
+    ssl_certificate ${cert};
+    ssl_certificate_key ${key};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:HYPERHOSTPANELSSL:10m;
+    ssl_session_timeout 1d;
+    root ${PANEL_DIR}/public;
+    index index.php index.html;
+    client_max_body_size 1024M;
+    access_log /var/log/nginx/hyper-host-panel.ssl.access.log;
+    error_log /var/log/nginx/hyper-host-panel.ssl.error.log;
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+    location /phpmyadmin { alias /usr/share/phpmyadmin/; index index.php index.html; }
+    location ~ ^/phpmyadmin/(.+\.php)$ {
+        alias /usr/share/phpmyadmin/\$1;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /usr/share/phpmyadmin/\$1;
+        fastcgi_read_timeout 600;
+        fastcgi_send_timeout 600;
+        fastcgi_connect_timeout 60;
+        fastcgi_pass unix:${PHP_FPM_SOCK};
+    }
+    location ~ ^/phpmyadmin/(.+)$ { alias /usr/share/phpmyadmin/\$1; }
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_read_timeout 600;
+        fastcgi_send_timeout 600;
+        fastcgi_connect_timeout 60;
+        fastcgi_pass unix:${PHP_FPM_SOCK};
+    }
+    location ~ /\. { deny all; }
+}
+# HYPER-HOST PANEL SSL: ${cert_name} | coverage ${cert_cover} | expires ${cert_expiry}
+EOPANELV72
+  rm -f "$NGINX_ENABLED/00-hyper-host-panel.conf" "$NGINX_ENABLED/hyper-host-panel.conf" 2>/dev/null || true
+  ln -sfn "$conf" "$NGINX_ENABLED/10-hyper-host-panel.conf"
+}
+
+cmd_nginx_ssl_map_json() {
+  NGINX_AVAILABLE="$NGINX_AVAILABLE" SITES_DIR="$SITES_DIR" LE_CONFIG_DIR="$LE_CONFIG_DIR" python3 - <<'PYV72MAP'
+import glob,json,os,pathlib,re,ssl,datetime
+items=[]
+for conf in sorted(glob.glob(os.path.join(os.environ['NGINX_AVAILABLE'],'hyper-host-site-*.conf'))):
+    p=pathlib.Path(conf)
+    text=p.read_text(encoding='utf-8',errors='ignore')
+    domain=p.name[len('hyper-host-site-'):-len('.conf')]
+    cert_m=re.search(r'^\s*ssl_certificate\s+([^;]+);',text,re.M)
+    key_m=re.search(r'^\s*ssl_certificate_key\s+([^;]+);',text,re.M)
+    names=[]
+    for m in re.finditer(r'^\s*server_name\s+([^;]+);',text,re.M):
+        for n in m.group(1).split():
+            if n not in names: names.append(n)
+    item={'domain':domain,'names':names,'https':bool(cert_m),'certificate':cert_m.group(1) if cert_m else None,'key':key_m.group(1) if key_m else None}
+    if cert_m:
+        cert=pathlib.Path(cert_m.group(1))
+        try:
+            info=ssl._ssl._test_decode_cert(str(cert.resolve()))
+            item['sans']=[v for typ,v in info.get('subjectAltName',[]) if typ=='DNS']
+            item['expires']=info.get('notAfter')
+        except Exception as e:
+            item['certificate_error']=str(e)
+    items.append(item)
+print(json.dumps(items,ensure_ascii=False))
+PYV72MAP
+}
+
+cmd_nginx_restore_ssl_all() {
+  ensure_nginx_runtime_overlay
+  ensure_acme_webroot
+  ensure_nginx_default_tls
+  write_nginx_default_catchall
+  write_panel_nginx_conf
+  nginx_disable_old_panel_ip_configs
+  nginx_rebuild_all_sites_from_disk
+  nginx_disable_legacy_panel_catchalls
+  nginx_remove_other_defaults
+  ln -sfn "$NGINX_AVAILABLE/hyper-host-default.conf" "$NGINX_ENABLED/00-hyper-host-default.conf"
+  ln -sfn "$NGINX_AVAILABLE/hyper-host-panel.conf" "$NGINX_ENABLED/10-hyper-host-panel.conf"
+  nginx_repair_log_paths
+  nginx_restart_guaranteed || err 'Nginx не перезапустился после восстановления SSL'
+  log 'SSL восстановлен: каждому сайту возвращён существующий сертификат по SAN/CN; сайты без сертификата оставлены на HTTP'
+}
+
 case "${1:-}" in
   create-folder) shift; cmd_create_folder "$@" ;;
   delete-folder) shift; cmd_delete_folder "$@" ;;
@@ -4727,6 +5077,8 @@ case "${1:-}" in
   nginx-runtime-fix) shift; cmd_nginx_runtime_fix ;;
   nginx-site-routing-fix) shift; cmd_nginx_site_routing_fix ;;
   nginx-full-recover) shift; cmd_nginx_full_recover ;;
+  nginx-restore-ssl-all) shift; cmd_nginx_restore_ssl_all ;;
+  nginx-ssl-map-json) shift; cmd_nginx_ssl_map_json ;;
   connectivity-doctor-json) shift; cmd_connectivity_doctor_json ;;
   mysql-repair-accounts) shift; cmd_mysql_repair_accounts ;;
   backup-run) shift; cmd_backup_run "$@" ;;
@@ -4769,6 +5121,8 @@ Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
        hyper-host-ctl nginx-runtime-fix
        hyper-host-ctl nginx-site-routing-fix
        hyper-host-ctl nginx-full-recover
+       hyper-host-ctl nginx-restore-ssl-all
+       hyper-host-ctl nginx-ssl-map-json
        hyper-host-ctl dns-wizard DOMAIN [PUBLIC_IP] [panel]
        hyper-host-ctl dns-status-json DOMAIN
        hyper-host-ctl panel-domain set panel.example.com
