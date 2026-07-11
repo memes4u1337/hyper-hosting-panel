@@ -43,6 +43,12 @@ NGINX_BOOT_SCRIPT="${NGINX_BOOT_SCRIPT:-$BASE_DIR/bin/hyper-host-nginx-runtime}"
 NGINX_RUNTIME_UNIT="${NGINX_RUNTIME_UNIT:-/run/systemd/system/hyper-host-nginx-runtime.service}"
 NGINX_REBOOT_MARKER="HYPER-HOST-NGINX-RUNTIME"
 NGINX_RUNTIME_LOG="${NGINX_RUNTIME_LOG:-$BASE_DIR/logs/nginx-runtime-boot.log}"
+# v68: неизвестные домены больше не должны открывать панель. Для HTTP/HTTPS
+# используется отдельный нейтральный default vhost, а сайты получают свой TLS vhost.
+NGINX_DEFAULT_ROOT="${NGINX_DEFAULT_ROOT:-$BASE_DIR/default-site}"
+NGINX_DEFAULT_TLS_DIR="${NGINX_DEFAULT_TLS_DIR:-$BASE_DIR/data/nginx-default-tls}"
+NGINX_DEFAULT_TLS_CERT="${NGINX_DEFAULT_TLS_CERT:-$NGINX_DEFAULT_TLS_DIR/fullchain.pem}"
+NGINX_DEFAULT_TLS_KEY="${NGINX_DEFAULT_TLS_KEY:-$NGINX_DEFAULT_TLS_DIR/privkey.pem}"
 
 # v62: один FTP/FTPS-движок ProFTPD; учётные записи и конфиг хранятся в /opt.
 FTP_GUEST_USER="${FTP_GUEST_USER:-www-data}"
@@ -50,16 +56,20 @@ FTP_USER_CONF_DIR="${FTP_USER_CONF_DIR:-$BASE_DIR/ftp/user_conf}"
 FTP_AUTH_TXT="${FTP_AUTH_TXT:-$BASE_DIR/data/vsftpd_virtual_users.txt}"
 FTP_AUTH_DB_BASE="${FTP_AUTH_DB_BASE:-$BASE_DIR/data/vsftpd_virtual_users}"
 FTP_AUTH_DB="${FTP_AUTH_DB:-$FTP_AUTH_DB_BASE.db}"
+# v67: два независимых ProFTPD-инстанса.
+# LAN-клиенты остаются на TCP 21 и получают LAN PASV-IP.
+# Внешние клиенты приходят с роутера на TCP 21 и перенаправляются iptables на
+# внутренний WAN-backend TCP 2121, который отдаёт публичный PASV-IP.
 FTP_PORT="${FTP_PORT:-21}"
-FTP_PASV_MIN="${FTP_PASV_MIN:-40000}"
-FTP_PASV_MAX="${FTP_PASV_MAX:-40100}"
-# Compatibility aliases for older panel code. v62 runs one ProFTPD service on TCP 21.
-FTP_LAN_PORT="$FTP_PORT"
-FTP_WAN_PORT="$FTP_PORT"
-FTP_LAN_PASV_MIN="$FTP_PASV_MIN"
-FTP_LAN_PASV_MAX="$FTP_PASV_MAX"
-FTP_WAN_PASV_MIN="$FTP_PASV_MIN"
-FTP_WAN_PASV_MAX="$FTP_PASV_MAX"
+FTP_LAN_PORT="${FTP_LAN_PORT:-21}"
+FTP_WAN_PORT="${FTP_WAN_PORT:-2121}"
+FTP_LAN_PASV_MIN="${FTP_LAN_PASV_MIN:-40000}"
+FTP_LAN_PASV_MAX="${FTP_LAN_PASV_MAX:-40049}"
+FTP_WAN_PASV_MIN="${FTP_WAN_PASV_MIN:-40050}"
+FTP_WAN_PASV_MAX="${FTP_WAN_PASV_MAX:-40100}"
+FTP_PASV_MIN="$FTP_LAN_PASV_MIN"
+FTP_PASV_MAX="$FTP_WAN_PASV_MAX"
+FTP_LAN_CIDR="${FTP_LAN_CIDR:-192.168.0.0/24}"
 FTP_RUNTIME_SCRIPT="${FTP_RUNTIME_SCRIPT:-$BASE_DIR/bin/hyper_ftp_runtime.py}"
 FTP_RUNTIME_VENV="${FTP_RUNTIME_VENV:-$BASE_DIR/venv-ftp}"
 FTP_RUNTIME_RUN_DIR="${FTP_RUNTIME_RUN_DIR:-$BASE_DIR/run}"
@@ -68,7 +78,10 @@ FTP_RUNTIME_LOG_DIR="${FTP_RUNTIME_LOG_DIR:-$BASE_DIR/logs}"
 # v62: один промышленный FTP/FTPS-движок ProFTPD. Конфиг, auth и runtime
 # находятся в /opt; PAM, Berkeley DB и запись конфигов FTP в /etc не нужны.
 PROFTPD_DIR="${PROFTPD_DIR:-$BASE_DIR/proftpd}"
-PROFTPD_CONFIG="${PROFTPD_CONFIG:-$PROFTPD_DIR/proftpd.conf}"
+PROFTPD_CONFIG_LAN="${PROFTPD_CONFIG_LAN:-$PROFTPD_DIR/proftpd-lan.conf}"
+PROFTPD_CONFIG_WAN="${PROFTPD_CONFIG_WAN:-$PROFTPD_DIR/proftpd-wan.conf}"
+# Совместимость со старым кодом: основной конфиг указывает на LAN-инстанс.
+PROFTPD_CONFIG="${PROFTPD_CONFIG:-$PROFTPD_CONFIG_LAN}"
 PROFTPD_PASSWD="${PROFTPD_PASSWD:-$PROFTPD_DIR/auth/users.passwd}"
 PROFTPD_GROUP="${PROFTPD_GROUP:-$PROFTPD_DIR/auth/groups}"
 PROFTPD_RUN_DIR="${PROFTPD_RUN_DIR:-$PROFTPD_DIR/run}"
@@ -87,7 +100,8 @@ FTP_TLS_DIR="${FTP_TLS_DIR:-$BASE_DIR/data/ftp-tls}"
 FTP_TLS_CERT_FALLBACK="${FTP_TLS_CERT_FALLBACK:-$FTP_TLS_DIR/fullchain.pem}"
 FTP_TLS_KEY_FALLBACK="${FTP_TLS_KEY_FALLBACK:-$FTP_TLS_DIR/privkey.pem}"
 
-export PANEL_NAME POWERED_BY CONFIGURED_SERVER_IP DETECTED_INTERNAL_IP SERVER_IP PUBLIC_IP PUBLIC_IP_MODE PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB FTP_PORT FTP_PASV_MIN FTP_PASV_MAX FTP_LAN_PORT FTP_WAN_PORT FTP_LAN_PASV_MIN FTP_LAN_PASV_MAX FTP_WAN_PASV_MIN FTP_WAN_PASV_MAX FTP_RUNTIME_SCRIPT FTP_RUNTIME_VENV FTP_RUNTIME_RUN_DIR FTP_RUNTIME_LOG_DIR PROFTPD_DIR PROFTPD_CONFIG PROFTPD_PASSWD PROFTPD_GROUP PROFTPD_RUN_DIR PROFTPD_LOG_DIR PROFTPD_AUTH_BUILDER PROFTPD_BIN PROFTPD_MODULE_DIR NGINX_RUNTIME_DIR NGINX_BOOT_SCRIPT NGINX_RUNTIME_UNIT NGINX_REBOOT_MARKER NGINX_RUNTIME_LOG ACME_WEBROOT LE_CONFIG_DIR LE_WORK_DIR LE_LOGS_DIR FTP_TLS_DIR FTP_TLS_CERT_FALLBACK FTP_TLS_KEY_FALLBACK
+export PANEL_NAME POWERED_BY CONFIGURED_SERVER_IP DETECTED_INTERNAL_IP SERVER_IP PUBLIC_IP PUBLIC_IP_MODE PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB FTP_PORT FTP_PASV_MIN FTP_PASV_MAX FTP_LAN_PORT FTP_WAN_PORT FTP_LAN_PASV_MIN FTP_LAN_PASV_MAX FTP_WAN_PASV_MIN FTP_WAN_PASV_MAX FTP_RUNTIME_SCRIPT FTP_RUNTIME_VENV FTP_RUNTIME_RUN_DIR FTP_RUNTIME_LOG_DIR PROFTPD_DIR PROFTPD_CONFIG PROFTPD_PASSWD PROFTPD_GROUP PROFTPD_RUN_DIR PROFTPD_LOG_DIR PROFTPD_AUTH_BUILDER PROFTPD_BIN PROFTPD_MODULE_DIR NGINX_RUNTIME_DIR NGINX_BOOT_SCRIPT NGINX_RUNTIME_UNIT NGINX_REBOOT_MARKER NGINX_RUNTIME_LOG NGINX_DEFAULT_ROOT NGINX_DEFAULT_TLS_DIR NGINX_DEFAULT_TLS_CERT NGINX_DEFAULT_TLS_KEY ACME_WEBROOT LE_CONFIG_DIR LE_WORK_DIR LE_LOGS_DIR FTP_TLS_DIR FTP_TLS_CERT_FALLBACK FTP_TLS_KEY_FALLBACK
+export FTP_LAN_CIDR PROFTPD_CONFIG_LAN PROFTPD_CONFIG_WAN
 BOT_USER="${BOT_USER:-hyperbot}"
 PM2_HOME_DIR="${PM2_HOME_DIR:-$BOTS_DIR/.pm2}"
 NODE_MAJOR_MIN="${NODE_MAJOR_MIN:-18}"
@@ -386,6 +400,9 @@ cmd_nginx_runtime_fix() {
 
 nginx_reload() {
   ensure_nginx_runtime_overlay
+  write_nginx_default_catchall
+  nginx_repair_site_vhosts
+  nginx_remove_other_defaults
   nginx_repair_duplicate_panel_name
   nginx_repair_log_paths
   nginx -t >/dev/null
@@ -511,8 +528,143 @@ ensure_acme_locations_all() {
   shopt -u nullglob
 }
 
+ensure_nginx_default_tls() {
+  mkdir -p "$NGINX_DEFAULT_TLS_DIR" "$NGINX_DEFAULT_ROOT"
+  if [[ ! -s "$NGINX_DEFAULT_TLS_CERT" || ! -s "$NGINX_DEFAULT_TLS_KEY" ]]; then
+    local cn="hyper-host-default.invalid" san="DNS:hyper-host-default.invalid,IP:${SERVER_IP},IP:${FIXED_PUBLIC_IP}"
+    if ! openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 825 \
+        -keyout "$NGINX_DEFAULT_TLS_KEY" -out "$NGINX_DEFAULT_TLS_CERT" \
+        -subj "/CN=$cn" -addext "subjectAltName=$san" >/dev/null 2>&1; then
+      openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 825 \
+        -keyout "$NGINX_DEFAULT_TLS_KEY" -out "$NGINX_DEFAULT_TLS_CERT" \
+        -subj "/CN=$cn" >/dev/null 2>&1 || err "Не удалось создать fallback TLS-сертификат Nginx"
+    fi
+  fi
+  chmod 0600 "$NGINX_DEFAULT_TLS_KEY" 2>/dev/null || true
+  chmod 0644 "$NGINX_DEFAULT_TLS_CERT" 2>/dev/null || true
+  if [[ ! -f "$NGINX_DEFAULT_ROOT/index.html" ]]; then
+    cat > "$NGINX_DEFAULT_ROOT/index.html" <<'EOFDEFAULTSITE'
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Домен не настроен</title></head><body style="font-family:Arial,sans-serif;background:#07101f;color:#fff;display:grid;place-items:center;min-height:100vh;margin:0"><main style="max-width:720px;padding:36px;border:1px solid #ffffff24;border-radius:24px;background:#0f1b31"><h1>Домен не настроен</h1><p>Создай сайт в HYPER-HOST или проверь DNS и имя домена.</p></main></body></html>
+EOFDEFAULTSITE
+  fi
+  chmod -R a+rX "$NGINX_DEFAULT_ROOT" 2>/dev/null || true
+}
+
+write_nginx_default_catchall() {
+  ensure_nginx_runtime_overlay
+  ensure_nginx_default_tls
+  mkdir -p "$NGINX_AVAILABLE" "$NGINX_ENABLED"
+  local conf="$NGINX_AVAILABLE/hyper-host-default.conf"
+  cat > "$conf" <<EODEFAULTNGINX
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    root ${NGINX_DEFAULT_ROOT};
+    index index.html;
+    location ^~ /.well-known/acme-challenge/ {
+        root ${ACME_WEBROOT};
+        default_type "text/plain";
+        try_files \$uri =404;
+        allow all;
+        access_log off;
+        log_not_found off;
+    }
+    location / { try_files \$uri /index.html =404; }
+}
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+    ssl_certificate ${NGINX_DEFAULT_TLS_CERT};
+    ssl_certificate_key ${NGINX_DEFAULT_TLS_KEY};
+    root ${NGINX_DEFAULT_ROOT};
+    index index.html;
+    location / { try_files \$uri /index.html =404; }
+}
+EODEFAULTNGINX
+  # Отключаем стандартную заглушку Ubuntu, чтобы default_server был ровно один.
+  rm -f "$NGINX_ENABLED/default" 2>/dev/null || true
+  ln -sfn "$conf" "$NGINX_ENABLED/00-hyper-host-default.conf"
+}
+
+nginx_repair_site_vhosts() {
+  ensure_nginx_default_tls
+  local conf
+  shopt -s nullglob
+  for conf in "$NGINX_AVAILABLE"/hyper-host-site-*.conf; do
+    python3 - "$conf" "$NGINX_DEFAULT_TLS_CERT" "$NGINX_DEFAULT_TLS_KEY" <<'PYVHOST'
+import pathlib,re,sys
+p=pathlib.Path(sys.argv[1]); cert=sys.argv[2]; key=sys.argv[3]
+text=p.read_text(encoding='utf-8',errors='ignore')
+# Uploaded index.html must win over the generated placeholder index.php.
+text=re.sub(r'index\s+index\.php\s+index\.html\s+index\.htm\s*;', 'index index.html index.htm index.php;', text)
+text=re.sub(r'index\s+index\.php\s+index\.html\s*;', 'index index.html index.php;', text)
+# Old HTTP-only sites were falling through to the panel on HTTPS. Give every
+# HYPER-HOST site an exact HTTPS vhost using the shared fallback certificate.
+if not re.search(r'listen\s+(?:\[::\]:)?443\b', text):
+    marker='    listen [::]:80;'
+    addition=(marker+'\n    listen 443 ssl;\n    listen [::]:443 ssl;\n'
+              f'    ssl_certificate {cert};\n'
+              f'    ssl_certificate_key {key};')
+    if marker in text:
+        text=text.replace(marker, addition, 1)
+    else:
+        marker='    listen 80;'
+        addition=(marker+'\n    listen 443 ssl;\n'
+                  f'    ssl_certificate {cert};\n'
+                  f'    ssl_certificate_key {key};')
+        text=text.replace(marker, addition, 1)
+p.write_text(text,encoding='utf-8')
+PYVHOST
+    ln -sfn "$conf" "$NGINX_ENABLED/${conf##*/}"
+  done
+  shopt -u nullglob
+}
+
+nginx_remove_other_defaults() {
+  local path real
+  shopt -s nullglob
+  for path in "$NGINX_ENABLED"/*; do
+    [[ "${path##*/}" == "00-hyper-host-default.conf" ]] && continue
+    real="$(readlink -f "$path" 2>/dev/null || echo "$path")"
+    [[ -f "$real" ]] || continue
+    case "${real##*/}" in
+      hyper-host-panel.conf|hyper-host-site-*.conf|hyper-host-ip-*.conf)
+        python3 - "$real" <<'PYDEFAULT'
+import pathlib,re,sys
+p=pathlib.Path(sys.argv[1]); text=p.read_text(encoding='utf-8',errors='ignore')
+text=re.sub(r'(listen\s+(?:\[::\]:)?(?:80|443)(?:\s+ssl)?)[^;]*\bdefault_server\b([^;]*;)', r'\1\2', text)
+p.write_text(text,encoding='utf-8')
+PYDEFAULT
+        ;;
+    esac
+  done
+  shopt -u nullglob
+}
+
+cmd_nginx_site_routing_fix() {
+  ensure_nginx_runtime_overlay
+  ensure_acme_webroot
+  write_nginx_default_catchall
+  nginx_repair_site_vhosts
+  nginx_remove_other_defaults
+  if [[ -n "${PANEL_DOMAIN:-}" && "${PANEL_DOMAIN:-_}" != "_" ]]; then
+    if [[ -f "$NGINX_AVAILABLE/hyper-host-panel.conf" ]]; then
+      rm -f "$NGINX_ENABLED/00-hyper-host-panel.conf" "$NGINX_ENABLED/hyper-host-panel.conf" 2>/dev/null || true
+      ln -sfn "$NGINX_AVAILABLE/hyper-host-panel.conf" "$NGINX_ENABLED/10-hyper-host-panel.conf"
+    else
+      write_panel_nginx_conf "$PANEL_DOMAIN"
+    fi
+  fi
+  nginx -t >/dev/null
+  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1
+  log "Nginx site routing fixed: panel only on exact panel domain; sites serve their own public_html on HTTP/HTTPS"
+}
+
 write_panel_nginx_conf() {
   ensure_nginx_runtime_overlay
+  write_nginx_default_catchall
   local domain="${1:-$PANEL_DOMAIN}" named_domain
   [[ -n "$domain" ]] || domain="_"
   named_domain="$domain"
@@ -580,33 +732,12 @@ server {
     }
 }
 
-server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name _;
-
-    root ${PANEL_DIR}/public;
-    index index.php index.html;
-    client_max_body_size 1024M;
-
-    location ^~ /.well-known/acme-challenge/ {
-        root ${PANEL_DIR}/public;
-        default_type "text/plain";
-        try_files \$uri =404;
-        allow all;
-    }
-
-    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
-    location /phpmyadmin { alias /usr/share/phpmyadmin/; index index.php index.html; }
-    location ~ ^/phpmyadmin/(.+\.php)$ { alias /usr/share/phpmyadmin/\$1; include fastcgi_params; fastcgi_param SCRIPT_FILENAME /usr/share/phpmyadmin/\$1; fastcgi_pass unix:${PHP_FPM_SOCK}; }
-    location ~ \.php$ { include snippets/fastcgi-php.conf; fastcgi_pass unix:${PHP_FPM_SOCK}; }
-}
 EOPANELNGINX
   } 2>/dev/null || warn "Не удалось записать /etc/nginx/sites-available/hyper-host-panel.conf (read-only /etc?) — конфиг nginx для домена панели не обновлён."
-  # Load panel config first. If panel.hyper-host.pw was accidentally created as a site,
-  # this plus duplicate cleanup makes the exact domain open the panel, not site stub.
-  ln -sf /etc/nginx/sites-available/hyper-host-panel.conf /etc/nginx/sites-enabled/00-hyper-host-panel.conf 2>/dev/null || true
-  rm -f /etc/nginx/sites-enabled/hyper-host-panel.conf 2>/dev/null || true
+  # Панель открывается только по точному PANEL_DOMAIN. Default vhost теперь
+  # отдельный и никогда не показывает интерфейс панели для нового домена.
+  rm -f /etc/nginx/sites-enabled/00-hyper-host-panel.conf /etc/nginx/sites-enabled/hyper-host-panel.conf 2>/dev/null || true
+  ln -sf /etc/nginx/sites-available/hyper-host-panel.conf /etc/nginx/sites-enabled/10-hyper-host-panel.conf 2>/dev/null || true
 }
 
 panel_domain_conflict_cleanup() {
@@ -620,7 +751,7 @@ panel_domain_conflict_cleanup() {
   shopt -s nullglob
   for path in "$NGINX_ENABLED"/*; do
     [[ -e "$path" || -L "$path" ]] || continue
-    [[ "${path##*/}" == "00-hyper-host-panel.conf" || "${path##*/}" == "hyper-host-panel.conf" ]] && continue
+    [[ "${path##*/}" == "00-hyper-host-default.conf" || "${path##*/}" == "00-hyper-host-panel.conf" || "${path##*/}" == "10-hyper-host-panel.conf" || "${path##*/}" == "hyper-host-panel.conf" ]] && continue
     real="$(readlink -f "$path" 2>/dev/null || echo "$path")"
     [[ -f "$real" ]] || continue
     if python3 - "$real" "$domain" <<'PYCHECK'
@@ -782,7 +913,6 @@ php_index_template_file() {
   local title="$1" file="$2"
   mkdir -p "$(dirname "$file")"
   cat > "$file" <<EOPHP
-<?php http_response_code(200); ?>
 <!doctype html>
 <html lang="ru">
 <head>
@@ -805,7 +935,7 @@ cmd_create_folder() {
   local name="${1:-}"; [[ -n "$name" ]] || err "Folder name required"; valid_folder "$name" || err "Invalid folder name: $name"
   local root="$SITES_DIR/$name/public_html"
   mkdir -p "$root" "$SITES_DIR/$name/logs"
-  [[ -f "$root/index.php" || -f "$root/index.html" ]] || php_index_template_file "$name" "$root/index.php"
+  [[ -f "$root/index.php" || -f "$root/index.html" ]] || php_index_template_file "$name" "$root/index.html"
   chown -R www-data:www-data "$SITES_DIR/$name" 2>/dev/null || true
   fix_web_permissions "$SITES_DIR/$name"
   log "Folder created: $name -> $root"
@@ -828,11 +958,12 @@ cmd_add_site() {
   # ВАЖНО: сначала создаём public_html + logs + сами log-файлы,
   # и только потом публикуем конфиг. Иначе nginx -t падает на open(access.log).
   prepare_site_runtime_dirs "$domain"
-  [[ -f "$root/index.php" || -f "$root/index.html" ]] || php_index_template_file "$domain работает" "$root/index.php"
+  [[ -f "$root/index.php" || -f "$root/index.html" ]] || php_index_template_file "$domain работает" "$root/index.html"
   chown -R www-data:www-data "$SITES_DIR/$domain" 2>/dev/null || true
   fix_web_permissions "$SITES_DIR/$domain"
   prepare_site_runtime_dirs "$domain"
   ensure_acme_webroot
+  ensure_nginx_default_tls
   local server_names="$domain"
   if [[ -n "$aliases" ]]; then
     IFS=',' read -ra arr <<< "$aliases"
@@ -843,9 +974,13 @@ cmd_add_site() {
 server {
     listen 80;
     listen [::]:80;
+    listen 443 ssl;
+    listen [::]:443 ssl;
     server_name ${server_names};
+    ssl_certificate ${NGINX_DEFAULT_TLS_CERT};
+    ssl_certificate_key ${NGINX_DEFAULT_TLS_KEY};
     root ${root};
-    index index.php index.html index.htm;
+    index index.html index.htm index.php;
     client_max_body_size 1024M;
     access_log ${SITES_DIR}/${domain}/logs/access.log;
     error_log ${SITES_DIR}/${domain}/logs/error.log;
@@ -985,7 +1120,7 @@ print(json.dumps({
   'ftp_lan_endpoint': f'{internal}:21' if internal else '',
   'ftp_external': f'{external}:21' if external else '',
   'ftp_external_endpoint': f'{external}:21' if external else '',
-  'ftp_passive_ports': {'lan':'40000-40100','internet':'40000-40100'},
+  'ftp_passive_ports': {'lan':'40000-40049','internet':'40050-40100'},
   'mysql_local': '127.0.0.1:3306',
   'mysql_local_endpoint': '127.0.0.1:3306',
   'mysql_lan': f'{internal}:3306' if internal else '',
@@ -3174,8 +3309,8 @@ listen_port_udp() {
 }
 
 open_server_ports() {
-  # v56: one FTP control port and one passive range.
-  local tcp_ports=(21 22 53 80 443 3306)
+  # v67: LAN control 21, internal WAN backend 2121, split PASV ranges.
+  local tcp_ports=(21 2121 22 53 80 443 3306)
   local p
   if command -v ufw >/dev/null 2>&1; then
     for p in "${tcp_ports[@]}"; do ufw allow "$p/tcp" >/dev/null 2>&1 || true; done
@@ -3198,22 +3333,12 @@ open_server_ports() {
   if command -v nft >/dev/null 2>&1; then
     nft add table inet hyper_host 2>/dev/null || true
     nft 'add chain inet hyper_host input { type filter hook input priority -100; policy accept; }' 2>/dev/null || true
-    nft add rule inet hyper_host input tcp dport '{ 21, 22, 53, 80, 443, 3306 }' accept 2>/dev/null || true
+    nft add rule inet hyper_host input tcp dport '{ 21, 2121, 22, 53, 80, 443, 3306 }' accept 2>/dev/null || true
     nft add rule inet hyper_host input tcp dport 40000-40100 accept 2>/dev/null || true
     nft add rule inet hyper_host input udp dport 53 accept 2>/dev/null || true
   fi
 }
 
-
-is_private_ipv4_simple() {
-  local ip="${1:-}"
-  [[ "$ip" =~ ^10\. ]] && return 0
-  [[ "$ip" =~ ^192\.168\. ]] && return 0
-  [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] && return 0
-  [[ "$ip" =~ ^127\. ]] && return 0
-  [[ "$ip" =~ ^169\.254\. ]] && return 0
-  return 1
-}
 
 ftp_passive_address() {
   local ip
@@ -3277,12 +3402,16 @@ proftpd_auth_rebuild() {
 }
 
 proftpd_reload_quiet() {
-  if systemctl is-active --quiet hyper-host-ftp.service 2>/dev/null; then
-    systemctl reload hyper-host-ftp.service >/dev/null 2>&1 || true
-  elif [[ -s "$PROFTPD_RUN_DIR/proftpd.pid" ]]; then
-    kill -HUP "$(cat "$PROFTPD_RUN_DIR/proftpd.pid" 2>/dev/null)" >/dev/null 2>&1 || true
-  fi
+  local unit pidfile
+  for unit in hyper-host-ftp-lan.service hyper-host-ftp-wan.service; do
+    systemctl is-active --quiet "$unit" 2>/dev/null && systemctl reload "$unit" >/dev/null 2>&1 || true
+  done
+  for pidfile in "$PROFTPD_RUN_DIR/proftpd-lan.pid" "$PROFTPD_RUN_DIR/proftpd-wan.pid"; do
+    [[ -s "$pidfile" ]] || continue
+    kill -HUP "$(cat "$pidfile" 2>/dev/null)" >/dev/null 2>&1 || true
+  done
 }
+
 
 ftp_tls_generate_fallback() {
   mkdir -p "$FTP_TLS_DIR"
@@ -3346,27 +3475,25 @@ proftpd_load_module_lines() {
   fi
 }
 
-write_proftpd_config() {
-  local tls_cert="$1" tls_key="$2" guest group module_lines
+write_proftpd_instance_config() {
+  local config="$1" port="$2" pasv_min="$3" pasv_max="$4" masquerade="$5" suffix="$6" label="$7" tls_cert="$8" tls_key="$9"
+  local guest group module_lines
   guest="$FTP_GUEST_USER"
   id "$guest" >/dev/null 2>&1 || guest="www-data"
   group="$(id -gn "$guest")"
   module_lines="$(proftpd_load_module_lines)"
   mkdir -p "$PROFTPD_DIR" "$PROFTPD_RUN_DIR" "$PROFTPD_LOG_DIR"
-  touch "$PROFTPD_LOG_DIR/proftpd.log" "$PROFTPD_LOG_DIR/tls.log" "$PROFTPD_LOG_DIR/xfer.log"
-  chown -R "$guest":"$group" "$PROFTPD_LOG_DIR" 2>/dev/null || true
-  chmod 0750 "$PROFTPD_LOG_DIR" 2>/dev/null || true
-  chmod 0640 "$PROFTPD_LOG_DIR"/*.log 2>/dev/null || true
-  cat > "$PROFTPD_CONFIG" <<EOPROFTPD
+  touch "$PROFTPD_LOG_DIR/proftpd-${suffix}.log" "$PROFTPD_LOG_DIR/tls-${suffix}.log" "$PROFTPD_LOG_DIR/xfer-${suffix}.log"
+  chown "$guest":"$group" "$PROFTPD_LOG_DIR/proftpd-${suffix}.log" "$PROFTPD_LOG_DIR/tls-${suffix}.log" "$PROFTPD_LOG_DIR/xfer-${suffix}.log" 2>/dev/null || true
+  chmod 0640 "$PROFTPD_LOG_DIR/proftpd-${suffix}.log" "$PROFTPD_LOG_DIR/tls-${suffix}.log" "$PROFTPD_LOG_DIR/xfer-${suffix}.log" 2>/dev/null || true
+  cat > "$config" <<EOPROFTPD
 ${module_lines}
-# Минимальный конфиг без необязательных mod_ident/mod_wtmp директив.
-# Подходит для пакетной сборки ProFTPD Ubuntu 22.04.
-ServerName                      "HYPER-HOST FTPS"
-ServerIdent                     on "HYPER-HOST FTPS"
+ServerName                      "HYPER-HOST ${label} FTPS"
+ServerIdent                     on "HYPER-HOST ${label} FTPS"
 ServerType                      standalone
 DefaultServer                   on
 UseIPv6                         off
-Port                            ${FTP_PORT}
+Port                            ${port}
 User                            ${guest}
 Group                           ${group}
 Umask                           022
@@ -3385,20 +3512,16 @@ AllowStoreRestart               on
 AllowRetrieveRestart            on
 DeleteAbortedStores             on
 UseSendfile                     off
-PassivePorts                    ${FTP_PASV_MIN} ${FTP_PASV_MAX}
-
-# Простой локальный FTP: один адрес внутри сети, без NAT и внешнего PASV IP.
-# Клиенты в той же сети всегда получают реальный адрес сервера.
-MasqueradeAddress               ${SERVER_IP}
-
+PassivePorts                    ${pasv_min} ${pasv_max}
+MasqueradeAddress               ${masquerade}
 TimeoutLogin                    60
 TimeoutNoTransfer               300
 TimeoutStalled                  300
 TimeoutIdle                     600
-PidFile                         ${PROFTPD_RUN_DIR}/proftpd.pid
-ScoreboardFile                  ${PROFTPD_RUN_DIR}/proftpd.scoreboard
-SystemLog                       ${PROFTPD_LOG_DIR}/proftpd.log
-TransferLog                     ${PROFTPD_LOG_DIR}/xfer.log
+PidFile                         ${PROFTPD_RUN_DIR}/proftpd-${suffix}.pid
+ScoreboardFile                  ${PROFTPD_RUN_DIR}/proftpd-${suffix}.scoreboard
+SystemLog                       ${PROFTPD_LOG_DIR}/proftpd-${suffix}.log
+TransferLog                     ${PROFTPD_LOG_DIR}/xfer-${suffix}.log
 
 TLSEngine                       on
 TLSRequired                     off
@@ -3407,68 +3530,106 @@ TLSOptions                      NoSessionReuseRequired
 TLSVerifyClient                 off
 TLSRSACertificateFile           ${tls_cert}
 TLSRSACertificateKeyFile        ${tls_key}
-TLSLog                          ${PROFTPD_LOG_DIR}/tls.log
+TLSLog                          ${PROFTPD_LOG_DIR}/tls-${suffix}.log
 
 <Directory />
   AllowOverwrite                on
 </Directory>
 EOPROFTPD
-  chmod 0600 "$PROFTPD_CONFIG"
-  "$PROFTPD_BIN" -t -c "$PROFTPD_CONFIG" >/dev/null 2>&1 || {
-    "$PROFTPD_BIN" -t -c "$PROFTPD_CONFIG" >&2 || true
-    printf '%s\n' '--- ProFTPD compiled modules ---' >&2
-    "$PROFTPD_BIN" -l >&2 2>/dev/null || true
-    printf '%s\n' '--- Generated config ---' >&2
-    nl -ba "$PROFTPD_CONFIG" >&2 2>/dev/null || true
-    err "Конфиг ProFTPD не прошёл проверку"
+  chmod 0600 "$config"
+  "$PROFTPD_BIN" -t -c "$config" >/dev/null 2>&1 || {
+    "$PROFTPD_BIN" -t -c "$config" >&2 || true
+    printf '%s\n' "--- Generated ${suffix} config ---" >&2
+    nl -ba "$config" >&2 2>/dev/null || true
+    err "Конфиг ProFTPD ${suffix} не прошёл проверку"
   }
 }
+
+write_proftpd_config() {
+  local tls_cert="$1" tls_key="$2"
+  write_proftpd_instance_config "$PROFTPD_CONFIG_LAN" "$FTP_LAN_PORT" "$FTP_LAN_PASV_MIN" "$FTP_LAN_PASV_MAX" "$SERVER_IP" lan LAN "$tls_cert" "$tls_key"
+  write_proftpd_instance_config "$PROFTPD_CONFIG_WAN" "$FTP_WAN_PORT" "$FTP_WAN_PASV_MIN" "$FTP_WAN_PASV_MAX" "$FIXED_PUBLIC_IP" wan WAN "$tls_cert" "$tls_key"
+  # Старые команды, которые читают proftpd.conf, получают LAN-конфиг.
+  ln -sfn "$(basename "$PROFTPD_CONFIG_LAN")" "$PROFTPD_DIR/proftpd.conf"
+}
+
 
 ftp_runtime_stop() {
   systemctl stop hyper-host-ftp.service hyper-host-ftp-lan.service hyper-host-ftp-wan.service hyper-host-vsftpd-lan.service hyper-host-vsftpd-wan.service vsftpd.service proftpd.service proftpd >/dev/null 2>&1 || true
   pkill -f 'hyper_ftp_runtime.py' >/dev/null 2>&1 || true
-  if [[ -s "$PROFTPD_RUN_DIR/proftpd.pid" ]]; then
-    kill "$(cat "$PROFTPD_RUN_DIR/proftpd.pid" 2>/dev/null)" >/dev/null 2>&1 || true
-  fi
-  pkill -x proftpd >/dev/null 2>&1 || true
   local pidfile pid
-  for pidfile in "$FTP_RUNTIME_RUN_DIR"/ftp-*.pid; do
+  for pidfile in "$PROFTPD_RUN_DIR/proftpd-lan.pid" "$PROFTPD_RUN_DIR/proftpd-wan.pid" "$PROFTPD_RUN_DIR/proftpd.pid" "$FTP_RUNTIME_RUN_DIR"/ftp-*.pid; do
     [[ -f "$pidfile" ]] || continue
     pid="$(cat "$pidfile" 2>/dev/null || true)"
     [[ "$pid" =~ ^[0-9]+$ ]] && kill "$pid" >/dev/null 2>&1 || true
     rm -f "$pidfile"
   done
-  rm -f /run/systemd/system/hyper-host-ftp-lan.service /run/systemd/system/hyper-host-ftp-wan.service 2>/dev/null || true
+  pkill -x proftpd >/dev/null 2>&1 || true
+  rm -f /run/systemd/system/hyper-host-ftp.service /run/systemd/system/hyper-host-ftp-lan.service /run/systemd/system/hyper-host-ftp-wan.service 2>/dev/null || true
 }
+
 
 write_ftp_runtime_unit() {
   mkdir -p /run/systemd/system "$PROFTPD_LOG_DIR" "$PROFTPD_RUN_DIR"
   ln -sfn /dev/null /run/systemd/system/proftpd.service 2>/dev/null || true
-  cat > /run/systemd/system/hyper-host-ftp.service <<EOFTPUNIT
+  cat > /run/systemd/system/hyper-host-ftp-lan.service <<EOFTPLAN
 [Unit]
-Description=HYPER-HOST ProFTPD explicit FTPS
+Description=HYPER-HOST ProFTPD LAN
 After=network-online.target
 Wants=network-online.target
+PartOf=hyper-host-ftp.service
 
 [Service]
 Type=simple
-ExecStart=${PROFTPD_BIN} -n -c ${PROFTPD_CONFIG}
+ExecStart=${PROFTPD_BIN} -n -c ${PROFTPD_CONFIG_LAN}
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=always
 RestartSec=2
 KillSignal=SIGTERM
 TimeoutStopSec=15
 LimitNOFILE=65536
+EOFTPLAN
+  cat > /run/systemd/system/hyper-host-ftp-wan.service <<EOFTPWAN
+[Unit]
+Description=HYPER-HOST ProFTPD WAN backend
+After=network-online.target
+Wants=network-online.target
+PartOf=hyper-host-ftp.service
+
+[Service]
+Type=simple
+ExecStart=${PROFTPD_BIN} -n -c ${PROFTPD_CONFIG_WAN}
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=always
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=15
+LimitNOFILE=65536
+EOFTPWAN
+  cat > /run/systemd/system/hyper-host-ftp.service <<'EOFTPMAIN'
+[Unit]
+Description=HYPER-HOST dual ProFTPD LAN/WAN
+Requires=hyper-host-ftp-lan.service hyper-host-ftp-wan.service
+After=hyper-host-ftp-lan.service hyper-host-ftp-wan.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
-EOFTPUNIT
+EOFTPMAIN
 }
 
+
 ftp_runtime_start_no_systemd() {
-  nohup "$PROFTPD_BIN" -n -c "$PROFTPD_CONFIG" >/dev/null 2>&1 &
-  echo $! > "$FTP_RUNTIME_RUN_DIR/ftp-main.pid"
+  nohup "$PROFTPD_BIN" -n -c "$PROFTPD_CONFIG_LAN" >/dev/null 2>&1 &
+  echo $! > "$FTP_RUNTIME_RUN_DIR/ftp-lan.pid"
+  nohup "$PROFTPD_BIN" -n -c "$PROFTPD_CONFIG_WAN" >/dev/null 2>&1 &
+  echo $! > "$FTP_RUNTIME_RUN_DIR/ftp-wan.pid"
 }
+
 
 install_ftp_runtime_boot_hook() {
   command -v crontab >/dev/null 2>&1 || return 0
@@ -3481,7 +3642,7 @@ install_ftp_runtime_boot_hook() {
 }
 
 configure_vsftpd_backend() {
-  # Имя функции оставлено для совместимости панели; реальный движок v62 — ProFTPD.
+  # Имя функции оставлено для совместимости панели; v67 запускает два ProFTPD-инстанса.
   ensure_ftp_virtual_dirs
   proftpd_install_dependency
   proftpd_auth_rebuild
@@ -3502,37 +3663,58 @@ configure_vsftpd_backend() {
   install_ftp_runtime_boot_hook
 }
 
+
 hyper_ftp_is_active() {
-  listen_port_tcp "$FTP_PORT"
+  listen_port_tcp "$FTP_LAN_PORT" && listen_port_tcp "$FTP_WAN_PORT"
 }
 
+
 assert_hyper_ftp_ready() {
-  local i banner
+  local i lan_banner wan_banner
   for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     if hyper_ftp_is_active; then
-      banner="$(python3 - <<'PYBANNER'
+      read -r lan_banner wan_banner < <(python3 - <<PYBANNER
 import socket
-try:
-    with socket.create_connection(('127.0.0.1', 21), timeout=2) as sock:
-        print(sock.recv(512).decode('utf-8','replace').strip())
-except Exception:
-    pass
+out=[]
+for port in (${FTP_LAN_PORT}, ${FTP_WAN_PORT}):
+    try:
+        with socket.create_connection(('127.0.0.1', port), timeout=2) as sock:
+            out.append(sock.recv(512).decode('utf-8','replace').strip().replace(' ', '_'))
+    except Exception:
+        out.append('')
+print(*out)
 PYBANNER
-)"
-      [[ "$banner" == 220* ]] && return 0
+)
+      [[ "$lan_banner" == 220* && "$wan_banner" == 220* ]] && return 0
     fi
     sleep 1
   done
-  journalctl -u hyper-host-ftp.service -n 200 --no-pager >&2 2>/dev/null || true
-  tail -n 200 "$PROFTPD_LOG_DIR/proftpd.log" "$PROFTPD_LOG_DIR/tls.log" >&2 2>/dev/null || true
-  err "ProFTPD не поднялся на TCP 21. Логи: $PROFTPD_LOG_DIR"
+  journalctl -u hyper-host-ftp-lan.service -u hyper-host-ftp-wan.service -n 200 --no-pager >&2 2>/dev/null || true
+  tail -n 200 "$PROFTPD_LOG_DIR"/proftpd-*.log "$PROFTPD_LOG_DIR"/tls-*.log >&2 2>/dev/null || true
+  err "ProFTPD LAN/WAN не поднялся на TCP ${FTP_LAN_PORT}/${FTP_WAN_PORT}. Логи: $PROFTPD_LOG_DIR"
+}
+
+
+ensure_ftp_wan_redirect() {
+  command -v iptables >/dev/null 2>&1 || err "Для разделения LAN/WAN FTP требуется iptables"
+  # Локальные клиенты 192.168.0.0/24 остаются на :21. Любой внешний источник,
+  # пришедший от роутера на :21, прозрачно уходит на WAN-backend :2121.
+  if ! iptables -t nat -C PREROUTING -p tcp --dport "$FTP_LAN_PORT" ! -s "$FTP_LAN_CIDR" -j REDIRECT --to-ports "$FTP_WAN_PORT" 2>/dev/null; then
+    iptables -t nat -I PREROUTING 1 -p tcp --dport "$FTP_LAN_PORT" ! -s "$FTP_LAN_CIDR" -j REDIRECT --to-ports "$FTP_WAN_PORT" \
+      || err "Не удалось включить перенаправление внешнего FTP на WAN-backend"
+  fi
+  if command -v netfilter-persistent >/dev/null 2>&1; then
+    netfilter-persistent save >/dev/null 2>&1 || true
+  fi
 }
 
 ensure_vsftpd_external_access() {
   configure_vsftpd_backend
   open_server_ports
+  ensure_ftp_wan_redirect
   assert_hyper_ftp_ready
 }
+
 
 cmd_ftp_fix_all() {
   ensure_vsftpd_external_access
@@ -3562,66 +3744,70 @@ PYFTPROWS
   ftp_auth_rebuild_db
   proftpd_reload_quiet
   assert_hyper_ftp_ready
-  log "FTP исправлен: ProFTPD LAN-only ${SERVER_IP}:${FTP_PORT}, PASV ${FTP_PASV_MIN}-${FTP_PASV_MAX}, TLS optional"
+  log "FTP исправлен: LAN ${SERVER_IP}:${FTP_LAN_PORT}/PASV ${FTP_LAN_PASV_MIN}-${FTP_LAN_PASV_MAX}; WAN ${FIXED_PUBLIC_IP}:21 через backend ${FTP_WAN_PORT}/PASV ${FTP_WAN_PASV_MIN}-${FTP_WAN_PASV_MAX}"
 }
 
 cmd_ftp_doctor_json() {
-  local internal listening service users_count banner owner issue hint pasv tls_source tls_ok version
-  internal="$(detect_internal_ipv4)"; listening=0
-  listen_port_tcp "$FTP_PORT" && listening=1
-  service="$(systemctl is-active hyper-host-ftp.service 2>/dev/null || true)"
-  [[ "$listening" == 1 && "$service" != active ]] && service="runtime"
-  owner="$(ss -H -ltnp 'sport = :21' 2>/dev/null | grep -oE 'users:\(\("[^"]+' | head -n1 | sed -E 's/users:\(\("//;s/"//' || true)"
-  banner="$(python3 - <<'PYBANNER'
-import socket
+  local internal public lan_listen wan_listen lan_service wan_service users_count lan_banner wan_banner issue hint tls_source version redirect_ok
+  internal="$(detect_internal_ipv4)"; public="$FIXED_PUBLIC_IP"
+  lan_listen=0; wan_listen=0; redirect_ok=0
+  listen_port_tcp "$FTP_LAN_PORT" && lan_listen=1
+  listen_port_tcp "$FTP_WAN_PORT" && wan_listen=1
+  lan_service="$(systemctl is-active hyper-host-ftp-lan.service 2>/dev/null || true)"
+  wan_service="$(systemctl is-active hyper-host-ftp-wan.service 2>/dev/null || true)"
+  lan_banner="$(python3 - "$FTP_LAN_PORT" <<'PYBANNER'
+import socket,sys
 try:
-    with socket.create_connection(('127.0.0.1',21),timeout=2) as sock:
+    with socket.create_connection(('127.0.0.1',int(sys.argv[1])),timeout=2) as sock:
         print(sock.recv(512).decode('utf-8','replace').strip())
-except Exception:
-    pass
+except Exception: pass
+PYBANNER
+)"
+  wan_banner="$(python3 - "$FTP_WAN_PORT" <<'PYBANNER'
+import socket,sys
+try:
+    with socket.create_connection(('127.0.0.1',int(sys.argv[1])),timeout=2) as sock:
+        print(sock.recv(512).decode('utf-8','replace').strip())
+except Exception: pass
 PYBANNER
 )"
   users_count="$(awk 'NF{c++} END{print int(c/2)}' "$FTP_AUTH_TXT" 2>/dev/null || echo 0)"
-  pasv="LAN=${internal}; ports=${FTP_PASV_MIN}-${FTP_PASV_MAX}"
   tls_source="$(cat "$FTP_TLS_DIR/active-source" 2>/dev/null || true)"
   version="$("$PROFTPD_BIN" -v 2>/dev/null | head -n1 || true)"
-  tls_ok=0
-  python3 - <<'PYFTPTLS' >/dev/null 2>&1 && tls_ok=1 || true
-import ftplib, ssl
-ctx=ssl._create_unverified_context()
-ctx.minimum_version=ssl.TLSVersion.TLSv1_2
-ctx.maximum_version=ssl.TLSVersion.TLSv1_2
-f=ftplib.FTP_TLS(context=ctx, timeout=5)
-f.connect('127.0.0.1',21)
-f.auth()
-assert f.sock.version() == 'TLSv1.2'
-f.close()
-PYFTPTLS
-  if [[ "$listening" != 1 || ( "$service" != active && "$service" != runtime ) ]]; then
-    issue="ProFTPD не слушает TCP 21"; hint="sudo hyper ftp fix; tail -n 200 /opt/hyper-host/logs/proftpd/*.log"
-  elif [[ "$banner" != 220* ]]; then
-    issue="FTP порт открыт, но нет корректного banner"; hint="tail -n 200 /opt/hyper-host/logs/proftpd/*.log"
+  iptables -t nat -C PREROUTING -p tcp --dport "$FTP_LAN_PORT" ! -s "$FTP_LAN_CIDR" -j REDIRECT --to-ports "$FTP_WAN_PORT" 2>/dev/null && redirect_ok=1 || true
+  if [[ "$lan_listen" != 1 || "$wan_listen" != 1 ]]; then
+    issue="Один из ProFTPD-инстансов не слушает порт"; hint="sudo hyper ftp fix; tail -n 200 /opt/hyper-host/logs/proftpd/*.log"
+  elif [[ "$lan_banner" != 220* || "$wan_banner" != 220* ]]; then
+    issue="FTP-порт открыт, но нет корректного banner"; hint="tail -n 200 /opt/hyper-host/logs/proftpd/*.log"
+  elif [[ "$redirect_ok" != 1 ]]; then
+    issue="Не включено перенаправление внешнего TCP 21 на WAN-backend 2121"; hint="sudo hyper ftp fix"
   elif [[ "${users_count:-0}" == 0 ]]; then
     issue="FTP работает, но нет пользователей"; hint="Создай FTP-аккаунт в панели"
   else
-    issue="Локальный FTP исправен"; hint="Подключайся из той же сети к ${internal}:21; PASV ${FTP_PASV_MIN}-${FTP_PASV_MAX}; обычный FTP или explicit TLS"
+    issue="LAN и публичный FTP настроены"; hint="LAN: ${internal}:21; WAN: ${public}:21; роутер TCP 21 и 40000-40100 -> ${internal}"
   fi
-  SERVER_IP="$internal" LISTENING="$listening" SERVICE="$service" OWNER="$owner" BANNER="$banner" USERS_COUNT="$users_count" PASV="$pasv" ISSUE="$issue" HINT="$hint" TLS_OK="$tls_ok" TLS_SOURCE="$tls_source" VERSION="$version" python3 - <<'PYFTP'
+  INTERNAL="$internal" PUBLIC="$public" LAN_LISTEN="$lan_listen" WAN_LISTEN="$wan_listen" LAN_SERVICE="$lan_service" WAN_SERVICE="$wan_service" LAN_BANNER="$lan_banner" WAN_BANNER="$wan_banner" USERS_COUNT="$users_count" REDIRECT_OK="$redirect_ok" ISSUE="$issue" HINT="$hint" TLS_SOURCE="$tls_source" VERSION="$version" python3 - <<'PYFTP'
 import os,json
 print(json.dumps({
- 'server_ip':os.environ.get('SERVER_IP',''),
- 'ftp_backend':'ProFTPD', 'ftp_version':os.environ.get('VERSION',''), 'service':os.environ.get('SERVICE',''),
- 'listen_21':os.environ.get('LISTENING')=='1', 'port_owner':os.environ.get('OWNER',''),
- 'banner':os.environ.get('BANNER',''), 'ftp_users':int(os.environ.get('USERS_COUNT') or 0),
- 'passive_range':'40000-40100', 'pasv_config':os.environ.get('PASV',''),
- 'tls':os.environ.get('TLS_OK')=='1', 'tls_mode':'explicit optional', 'tls_protocol':'TLSv1.2', 'tls_optional':True,
- 'tls_session_reuse_required':False, 'tls_certificate_source':os.environ.get('TLS_SOURCE',''),
- 'lan_endpoint':'192.168.0.179:21', 'internet_endpoint':'disabled in LAN-only mode', 'adaptive_pasv':False,
- 'router_rules':[],
+ 'server_ip':os.environ.get('INTERNAL',''), 'public_ip':os.environ.get('PUBLIC',''),
+ 'ftp_backend':'ProFTPD dual instance', 'ftp_version':os.environ.get('VERSION',''),
+ 'services':{'lan':os.environ.get('LAN_SERVICE',''),'wan':os.environ.get('WAN_SERVICE','')},
+ 'listen_21':os.environ.get('LAN_LISTEN')=='1', 'listen_2121':os.environ.get('WAN_LISTEN')=='1',
+ 'banners':{'lan':os.environ.get('LAN_BANNER',''),'wan':os.environ.get('WAN_BANNER','')},
+ 'ftp_users':int(os.environ.get('USERS_COUNT') or 0),
+ 'passive_ranges':{'lan':'40000-40049','internet':'40050-40100'},
+ 'pasv_addresses':{'lan':'192.168.0.179','internet':'90.189.208.25'},
+ 'external_redirect_active':os.environ.get('REDIRECT_OK')=='1',
+ 'external_redirect':'non-LAN source TCP 21 -> internal TCP 2121',
+ 'tls':True, 'tls_mode':'explicit optional', 'tls_protocol':'TLSv1.2', 'tls_session_reuse_required':False,
+ 'tls_certificate_source':os.environ.get('TLS_SOURCE',''),
+ 'lan_endpoint':'192.168.0.179:21', 'internet_endpoint':'90.189.208.25:21',
+ 'router_rules':['TCP 21 -> 192.168.0.179:21','TCP 40000-40100 -> 192.168.0.179:40000-40100'],
  'issue':os.environ.get('ISSUE',''), 'hint':os.environ.get('HINT','')
 },ensure_ascii=False))
 PYFTP
 }
+
 
 cmd_access_fix() {
   # Включает доступ к серверу с другого ПК: SSH, FTP, HTTP/HTTPS и MySQL-порт в firewall Ubuntu.
@@ -3631,7 +3817,7 @@ cmd_access_fix() {
     systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1 || true
     systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1 || true
   fi
-  log "External access fixed: SSH 22, FTP TCP 21/PASV 40000-40100, HTTP 80, HTTPS 443, MySQL 3306 opened on Ubuntu. На роутере пробрось нужные порты на $SERVER_IP."
+  log "External access fixed: SSH 22, FTP TCP 21 + backend 2121/PASV 40000-40100, HTTP 80, HTTPS 443, MySQL 3306 opened on Ubuntu. На роутере пробрось нужные порты на $SERVER_IP."
 }
 
 
@@ -4316,6 +4502,7 @@ case "${1:-}" in
   ftp-doctor-json) shift; cmd_ftp_doctor_json ;;
   connectivity-fix) shift; cmd_connectivity_fix ;;
   nginx-runtime-fix) shift; cmd_nginx_runtime_fix ;;
+  nginx-site-routing-fix) shift; cmd_nginx_site_routing_fix ;;
   connectivity-doctor-json) shift; cmd_connectivity_doctor_json ;;
   mysql-repair-accounts) shift; cmd_mysql_repair_accounts ;;
   backup-run) shift; cmd_backup_run "$@" ;;
@@ -4356,6 +4543,7 @@ Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
        hyper-host-ctl public-ip set 90.189.208.25
        hyper-host-ctl network-fix [DOMAIN] [PUBLIC_IP]
        hyper-host-ctl nginx-runtime-fix
+       hyper-host-ctl nginx-site-routing-fix
        hyper-host-ctl dns-wizard DOMAIN [PUBLIC_IP] [panel]
        hyper-host-ctl dns-status-json DOMAIN
        hyper-host-ctl panel-domain set panel.example.com

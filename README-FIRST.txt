@@ -1,19 +1,33 @@
-HYPER-HOST v66 — простой локальный FTP
+HYPER-HOST v68 — локальный + публичный FTPS и правильная маршрутизация сайтов
 
-Назначение: гарантированное подключение к FTP с компьютеров в одной сети с сервером.
+Что исправляет:
+1. LAN FTPS: 192.168.0.179:21, PASV 40000-40049.
+2. Public FTPS: 90.189.208.25:21, PASV 40050-40100.
+3. Внешний TCP 21 автоматически отправляется на отдельный WAN backend 2121.
+4. Новые домены больше не открывают панель.
+5. Каждый сайт отдаёт собственный public_html по HTTP и HTTPS.
+6. Если загружен index.html, он имеет приоритет над старой заглушкой index.php.
+7. Пароль admin, SQL, боты и пользовательские файлы не изменяются.
 
-Адрес: 192.168.0.179
-Порт: 21
-PASV: 40000-40100
+Установка после загрузки содержимого архива в корень GitHub:
 
-Поддерживаются:
-- обычный FTP без TLS;
-- explicit FTP over TLS 1.2.
+cd /tmp && sudo rm -rf hyper-host-update && git clone --depth 1 --branch main https://github.com/memes4u1337/hyper-hosting-panel.git hyper-host-update && cd hyper-host-update && sudo bash apply-v68-dual-ftp-site-routing-fix.sh beta.mystockbot.xyz
 
-Для первого подключения в FileZilla выбери «Использовать обычный FTP».
-Роутер и публичный IP для локального подключения не нужны.
+FileZilla в локальной сети:
+  host: 192.168.0.179
+  port: 21
+  encryption: Require explicit FTP over TLS
+  mode: Passive
 
-Установка:
-sudo bash apply-v66-proftpd-lan-only-fix.sh
+FileZilla из интернета:
+  host: 90.189.208.25
+  port: 21
+  encryption: Require explicit FTP over TLS
+  mode: Passive
 
-Пароль admin, SQL, Nginx, сайты и боты не изменяются.
+Роутер:
+  TCP 21 -> 192.168.0.179:21
+  TCP 40000-40100 -> 192.168.0.179:40000-40100
+
+Отчёт:
+  sudo cat /root/hyper-host-v68-dual-ftp-site-routing-report.txt
