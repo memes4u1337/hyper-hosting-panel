@@ -61,9 +61,11 @@ function default_ftp_password(): string { return 'Hh-' . bin2hex(random_bytes(5)
 function default_db_password(): string { return 'Db-' . bin2hex(random_bytes(6)) . '!'; }
 function current_public_ipv4(): string
 {
-    return '90.189.208.25';
+    $ip = trim(setting_get('public_ip_override', (string)app_config('public_ip', '')));
+    if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) return $ip;
+    $host = host_name();
+    return filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) ? $host : '';
 }
-
 function dns_panel_label(string $value): string
 {
     $value = strtolower(trim($value));
@@ -131,7 +133,7 @@ function handle_post(string $action): void
             case 'ftp_fix': {
                 hh_clear_cache();
                 $res=run_ctl(['ftp-fix'],120); if($res['code']!==0) throw new RuntimeException($res['output']);
-                flash('FTP исправлен: один сервис, порт 21, PASV 40000-40100','success'); redirect('/?page=ftp');
+                flash('FTP исправлен для FileZilla: порт 21, passive 40000-40100, plain FTP','success'); redirect('/?page=ftp');
             }
             case 'create_ftp': {
                 $username=trim((string)($_POST['username']??'')); $password=(string)($_POST['password']??''); if($username===''||!is_valid_name($username)) throw new RuntimeException('Неверный FTP логин'); if(strlen($password)<8) throw new RuntimeException('Пароль FTP минимум 8 символов');
@@ -140,7 +142,7 @@ function handle_post(string $action): void
                 $res=run_ctl($args,240); if($res['code']!==0) throw new RuntimeException($res['output']); $final=$username; $home=rtrim((string)app_config('ftp_dir','/var/www/hyper-host-ftp'),'/').'/'.$final; $ftpHostForRow=current_public_ipv4() ?: host_name(); upsert_ftp_row($final,$home,$password,$ftpHostForRow,$scope,$target); add_event('ftp','Создан FTP: '.$final.' / '.ftp_scope_label_ui($scope,$target)); flash("FTP создан. Хост: ".$ftpHostForRow." | FTP-логин: {$final} | Пароль: {$password} | Открывает: ".ftp_scope_label_ui($scope,$target),'success'); redirect('/?page=ftp');
             }
             case 'delete_ftp': {
-                $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM ftp_accounts WHERE id=?'); $st->execute([$id]); $f=$st->fetch(); if(!$f) throw new RuntimeException('FTP не найден'); $res=run_ctl(['delete-ftp',$f['username']],120); if($res['code']!==0) throw new RuntimeException($res['output']); db()->prepare('DELETE FROM ftp_accounts WHERE id=?')->execute([$id]); flash('FTP-аккаунт удалён','success'); redirect('/?page=ftp');
+                $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM ftp_accounts WHERE id=?'); $st->execute([$id]); $f=$st->fetch(); if(!$f) throw new RuntimeException('FTP не найден'); $res=run_ctl(['delete-ftp',$f['username']],120); if($res['code']!==0) throw new RuntimeException($res['output']); db()->prepare('DELETE FROM ftp_accounts WHERE id=?')->execute([$id]); redirect('/?page=ftp');
             }
             case 'reset_ftp_password': {
                 $id=(int)($_POST['id']??0); $pass=(string)($_POST['password']??''); if(strlen($pass)<8) throw new RuntimeException('Пароль минимум 8 символов'); $st=db()->prepare('SELECT * FROM ftp_accounts WHERE id=?'); $st->execute([$id]); $f=$st->fetch(); if(!$f) throw new RuntimeException('FTP не найден'); $scope=ftp_scope_clean((string)($f['access_scope']??'all')); $target=ftp_scope_target_clean($scope,(string)($f['access_target']??'')); $args=['ftp-password',$f['username'],$pass,$scope]; if($target!=='') $args[]=$target; $res=run_ctl($args,120); if($res['code']!==0) throw new RuntimeException($res['output']); upsert_ftp_row((string)$f['username'],(string)$f['target_path'],$pass,current_public_ipv4() ?: host_name(),$scope,$target); flash('FTP-логин восстановлен и пароль обновлён','success'); redirect('/?page=ftp');
@@ -180,6 +182,44 @@ function handle_post(string $action): void
                 $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM mysql_accounts WHERE id=?'); $st->execute([$id]); $a=$st->fetch(); if(!$a) throw new RuntimeException('Аккаунт не найден');
                 $res=run_ctl(['delete-mysql-account',$a['username'],$a['host_pattern']?:'localhost'],180); if($res['code']!==0) throw new RuntimeException($res['output']);
                 db()->prepare('DELETE FROM mysql_accounts WHERE id=?')->execute([$id]); flash('MySQL аккаунт удалён','success'); redirect('/?page=databases');
+            }
+            case 'deploy_config_save': {
+                $host=trim((string)($_POST['db_host']??'90.189.208.25')); $port=(int)($_POST['db_port']??3306); $user=trim((string)($_POST['db_user']??'mystock')); $pass=(string)($_POST['db_pass']??''); $name=trim((string)($_POST['db_name']??'mystock'));
+                if($host===''||$user===''||$name===''||$port<1||$port>65535) throw new RuntimeException('Проверь параметры MySQL');
+                $res=run_ctl_json(['deploy-center-config','save',$host,(string)$port,$user,$pass,$name],60); if(empty($res['ok'])) throw new RuntimeException((string)($res['error']??$res['_error']??'Не удалось сохранить MySQL'));
+                setting_set('deploy_db_host',$host); setting_set('deploy_db_port',(string)$port); setting_set('deploy_db_user',$user); setting_set('deploy_db_name',$name);
+                flash('Подключение MyStock сохранено. Пароль хранится только на сервере.','success'); redirect('/?page=bots');
+            }
+            case 'deploy_sync': {
+                $data=run_ctl_json(['deploy-center-sync'],120); sync_managed_projects_local($data);
+                flash('Проекты синхронизированы из MySQL: '.(int)($data['count']??0),'success'); redirect('/?page=bots');
+            }
+            case 'deploy_template_upload': {
+                $botTmp=bot_uploaded_tmp('template_bot_file'); $reqTmp=bot_uploaded_tmp('template_requirements_file');
+                if($botTmp==='' && $reqTmp==='') throw new RuntimeException('Выбери bot.py или requirements.txt шаблона');
+                $res=run_ctl_json(['deploy-center-template-install',$botTmp,$reqTmp],120); if(empty($res['ok'])) throw new RuntimeException((string)($res['error']??$res['_error']??'Не удалось сохранить шаблон'));
+                flash('Шаблон дочерних ботов сохранён','success'); redirect('/?page=bots');
+            }
+            case 'deploy_master_upload': {
+                $projectId=(int)($_POST['master_project_id']??0); if($projectId<1) throw new RuntimeException('Выбери проект для токена главного deploy-бота');
+                $botTmp=bot_uploaded_tmp('master_bot_file'); $reqTmp=bot_uploaded_tmp('master_requirements_file');
+                $res=run_ctl_json(['deploy-center-master-install',$botTmp,$reqTmp,(string)$projectId],1200); if(empty($res['ok'])) throw new RuntimeException((string)($res['error']??$res['_error']??'Не удалось запустить главный deploy-бот'));
+                setting_set('deploy_master_project_id',(string)$projectId);
+                flash('Главный deploy-бот установлен и запущен через PM2','success'); redirect('/?page=bots');
+            }
+            case 'deploy_master_action': {
+                $act=(string)($_POST['master_action']??'restart'); $res=run_ctl_json(['deploy-center-master-action',$act],180); if(empty($res['ok'])) throw new RuntimeException((string)($res['error']??$res['_error']??'Ошибка главного бота'));
+                flash('Главный deploy-бот: '.$act,'success'); redirect('/?page=bots');
+            }
+            case 'deploy_project_action': {
+                $pid=(int)($_POST['project_id']??0); $act=(string)($_POST['project_action']??'deploy'); $del=!empty($_POST['delete_files'])?'1':'0'; if($pid<1) throw new RuntimeException('Проект не выбран');
+                $res=run_ctl_json(['deploy-center-project-action',(string)$pid,$act,$del],1200); if(empty($res['ok'])) throw new RuntimeException((string)($res['error']??$res['_error']??'Ошибка проекта'));
+                $data=run_ctl_json(['deploy-center-sync'],120); if(!empty($data['ok'])) sync_managed_projects_local($data);
+                flash('Проект #'.$pid.': '.$act,'success'); redirect('/?page=bots');
+            }
+            case 'ssl_restore_existing': {
+                hh_clear_cache(); $res=run_ctl_json(['ssl-restore-existing'],300); if(empty($res['ok'])) throw new RuntimeException((string)($res['error']??$res['_error']??'Не удалось восстановить SSL'));
+                flash('Nginx подключил все реально найденные действующие сертификаты','success'); redirect('/?page=ssl');
             }
             case 'create_bot': {
                 $name=trim((string)($_POST['name']??''));
@@ -237,17 +277,16 @@ function handle_post(string $action): void
             case 'backup_run': { $target=(string)($_POST['target']??'all'); $res=run_ctl(['backup-run',$target],600); if($res['code']!==0) throw new RuntimeException($res['output']); add_event('backup',$res['output']); flash($res['output'],'success'); redirect('/?page=backups'); }
             case 'backup_job': { $name=trim((string)($_POST['name']??'')); $schedule=trim((string)($_POST['schedule']??'')); $target=(string)($_POST['target']??'all'); if(!is_valid_name($name)||$schedule==='') throw new RuntimeException('Неверные данные backup'); db()->prepare('INSERT INTO backup_jobs(name,target,schedule,enabled) VALUES(?,?,?,1) ON CONFLICT(name) DO UPDATE SET target=excluded.target,schedule=excluded.schedule,enabled=1')->execute([$name,$target,$schedule]); $res=run_ctl(['backup-schedule',$name,$schedule,$target],120); if($res['code']!==0) throw new RuntimeException($res['output']); redirect('/?page=backups'); }
             case 'delete_backup_job': { $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM backup_jobs WHERE id=?'); $st->execute([$id]); $j=$st->fetch(); if($j){ run_ctl(['backup-delete-schedule',$j['name']],60); db()->prepare('DELETE FROM backup_jobs WHERE id=?')->execute([$id]); } redirect('/?page=backups'); }
-            case 'network_fix': { $domain=strtolower(trim((string)($_POST['domain']??''))); $ip='90.189.208.25'; if($domain!=='' && !is_valid_domain($domain)) throw new RuntimeException('Неверный домен'); hh_clear_cache(); $res=run_ctl(['network-fix',$domain,$ip],180); if($res['code']!==0) throw new RuntimeException($res['output']); setting_set('public_ip_override',$ip); flash('Сеть исправлена: LAN 192.168.0.179, WAN 90.189.208.25','success'); redirect('/?page=network'); }
-            case 'detect_ip': { hh_clear_cache(); $res=run_ctl(['ip-detect','--apply'],180); if($res['code']!==0) throw new RuntimeException($res['output']); hh_clear_cache(); setting_set('public_ip_override','90.189.208.25'); flash('Фиксированные IP применены: LAN 192.168.0.179, WAN 90.189.208.25','success'); redirect('/?page=network'); }
+            case 'network_fix': { $domain=strtolower(trim((string)($_POST['domain']??''))); $ip=trim((string)($_POST['public_ip']??'')); if($domain!=='' && !is_valid_domain($domain)) throw new RuntimeException('Неверный домен'); if($ip!=='' && !filter_var($ip,FILTER_VALIDATE_IP,FILTER_FLAG_IPV4)) throw new RuntimeException('Неверный IP'); hh_clear_cache(); $res=run_ctl(['network-fix',$domain,$ip],180); if($res['code']!==0) throw new RuntimeException($res['output']); if($ip!=='') setting_set('public_ip_override',$ip); flash('Сеть исправлена: nginx слушает все IP, firewall открыт, DNS/ACME подготовлены','success'); redirect('/?page=network'); }
             case 'access_fix': { hh_clear_cache(); $res=run_ctl(['access-fix'],180); if($res['code']!==0) throw new RuntimeException($res['output']); flash('Доступ с других ПК включён на Ubuntu. Роутер всё равно нужно пробросить вручную.','success'); redirect('/?page=access'); }
             case 'disk_expand': { hh_clear_cache(); $res=run_ctl(['disk-expand'],600); if($res['code']!==0) throw new RuntimeException($res['output']); flash('Диск расширен. Проверь новый размер root-раздела.','success'); redirect('/?page=disk'); }
                         case 'save_panel_domain': { $domain=strtolower(trim((string)($_POST['panel_domain']??''))); if(!is_valid_domain($domain)) throw new RuntimeException('Неверный домен панели'); $res=run_ctl(['panel-domain','set',$domain],120); if($res['code']!==0) throw new RuntimeException($res['output']); setting_set('panel_domain_override',$domain); hh_clear_cache(); flash('Домен панели сохранён: '.$domain,'success'); redirect('/?page=network'); }
             case 'dns_wizard': {
                 $domain=strtolower(trim((string)($_POST['domain']??'')));
-                $ip='90.189.208.25';
+                $ip=trim((string)($_POST['public_ip']??''));
                 $panel=dns_panel_label((string)($_POST['panel_subdomain']??'panel'));
                 if(!is_valid_domain($domain)) throw new RuntimeException('Неверный домен');
-                
+                if($ip==='' ) $ip=current_public_ipv4();
                 if($ip==='' || !filter_var($ip,FILTER_VALIDATE_IP,FILTER_FLAG_IPV4)) throw new RuntimeException('Укажи публичный IPv4 для DNS');
                 // v46: используем общие NS-серверы панели (ns1/ns2.<домен панели>) для любого
                 // нового домена, если домен панели настроен и отличается от переносимого домена.
@@ -270,7 +309,7 @@ function handle_post(string $action): void
             case 'delete_dns_record': { $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT z.domain FROM dns_records r JOIN dns_zones z ON z.id=r.zone_id WHERE r.id=?'); $st->execute([$id]); $z=$st->fetch(); db()->prepare('DELETE FROM dns_records WHERE id=?')->execute([$id]); if($z) dns_apply_zone((string)$z['domain']); redirect('/?page=dns'); }
             case 'delete_dns_zone': { $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM dns_zones WHERE id=?'); $st->execute([$id]); $z=$st->fetch(); if($z){ run_ctl(['dns-delete',$z['domain']],60); db()->prepare('DELETE FROM dns_zones WHERE id=?')->execute([$id]); } redirect('/?page=dns'); }
             case 'ssl_renew_all': { hh_clear_cache(); $res=run_ctl(['ssl-renew-all'],300); if($res['code']!==0) throw new RuntimeException($res['output']); hh_clear_cache(); flash('SSL автопродление проверено','success'); redirect('/?page=ssl'); }
-            case 'save_public_ip': { $ip='90.189.208.25'; $res=run_ctl(['public-ip','set',$ip],60); if($res['code']!==0) throw new RuntimeException($res['output']); setting_set('public_ip_override',$ip); hh_clear_cache(); flash('Зафиксирован публичный IP: '.$ip,'success'); redirect('/?page=ssl'); }
+            case 'save_public_ip': { $ip=trim((string)($_POST['public_ip']??'')); if($ip!=='' && !filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) throw new RuntimeException('Неверный публичный IPv4'); $res=$ip===''?run_ctl(['public-ip','clear'],60):run_ctl(['public-ip','set',$ip],60); if($res['code']!==0) throw new RuntimeException($res['output']); setting_set('public_ip_override',$ip); hh_clear_cache(); flash($ip===''?'Публичный IP сброшен':'Публичный IP сохранён: '.$ip,'success'); redirect('/?page=ssl'); }
             case 'set_site_php': { $id=(int)($_POST['id']??0); $ver=(string)($_POST['php_version']??''); $st=db()->prepare('SELECT * FROM sites WHERE id=?'); $st->execute([$id]); $s=$st->fetch(); if(!$s) throw new RuntimeException('Сайт не найден'); $res=run_ctl(['site-php',$s['domain'],$ver],180); if($res['code']!==0) throw new RuntimeException($res['output']); db()->prepare('UPDATE sites SET php_version=? WHERE id=?')->execute([$ver,$id]); hh_clear_cache(); flash('PHP для '.$s['domain'].' сохранён: '.$ver, 'success'); redirect('/?page=php'); }
             case 'create_cron': { $name=trim((string)($_POST['name']??'')); $schedule=trim((string)($_POST['schedule']??'')); $cmd=trim((string)($_POST['command']??'')); if(!is_valid_name($name)||$schedule===''||$cmd==='') throw new RuntimeException('Неверные данные cron'); db()->prepare('INSERT INTO cron_tasks(name,schedule,command,enabled) VALUES(?,?,?,1) ON CONFLICT(name) DO UPDATE SET schedule=excluded.schedule,command=excluded.command,enabled=1')->execute([$name,$schedule,$cmd]); $res=run_ctl(['cron-set',$name,$schedule,$cmd],60); if($res['code']!==0) throw new RuntimeException($res['output']); redirect('/?page=cron'); }
             case 'delete_cron': { $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM cron_tasks WHERE id=?'); $st->execute([$id]); $c=$st->fetch(); if($c){ run_ctl(['cron-delete',$c['name']],60); db()->prepare('DELETE FROM cron_tasks WHERE id=?')->execute([$id]); } redirect('/?page=cron'); }
@@ -332,6 +371,27 @@ function bot_uploaded_tmp(string $field): string
     return $target;
 }
 
+function sync_managed_projects_local(array $payload): void
+{
+    if (empty($payload['ok']) || !isset($payload['projects']) || !is_array($payload['projects'])) {
+        throw new RuntimeException((string)($payload['error'] ?? 'Не удалось получить проекты из MySQL'));
+    }
+    $sql = 'INSERT INTO managed_projects(project_id,owner_user_id,project_name,owner_tg_id,owner_username,owner_name,subscription_status,bot_active,bot_username,bot_link,pm2_name,deploy_path,pm2_status,sql_status,last_error,token_fingerprint,synced_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now","localtime")) ON CONFLICT(project_id) DO UPDATE SET owner_user_id=excluded.owner_user_id,project_name=excluded.project_name,owner_tg_id=excluded.owner_tg_id,owner_username=excluded.owner_username,owner_name=excluded.owner_name,subscription_status=excluded.subscription_status,bot_active=excluded.bot_active,bot_username=excluded.bot_username,bot_link=excluded.bot_link,pm2_name=excluded.pm2_name,deploy_path=excluded.deploy_path,pm2_status=excluded.pm2_status,sql_status=excluded.sql_status,last_error=excluded.last_error,token_fingerprint=excluded.token_fingerprint,synced_at=excluded.synced_at';
+    $st=db()->prepare($sql);
+    foreach($payload['projects'] as $r){
+        $st->execute([
+            (int)$r['project_id'],(int)$r['owner_user_id'],(string)$r['project_name'],(string)($r['owner_tg_id']??''),(string)($r['owner_username']??''),(string)($r['owner_name']??''),(string)($r['subscription_status']??''),(string)($r['bot_active']??''),(string)($r['bot_username']??''),(string)($r['bot_link']??''),(string)($r['pm2_name']??''),(string)($r['deploy_path']??''),(string)($r['pm2']['status']??'not_found'),(string)($r['sql_status']??''),(string)($r['last_error']??''),(string)($r['token_fingerprint']??'')
+        ]);
+    }
+    setting_set('deploy_last_sync', date('Y-m-d H:i:s'));
+}
+
+function deploy_center_config(): array
+{
+    $d=run_ctl_json_live(['deploy-center-config'],15);
+    return (!empty($d['ok']) && isset($d['config'])) ? $d['config'] : ['_error'=>(string)($d['error']??$d['_error']??'Deploy Center недоступен')];
+}
+
 function fm_save_file(): void
 {
     [$rk,$root,$rel,$path]=fm_resolve((string)($_POST['root']??'sites'),(string)($_POST['path']??'')); if(is_dir($path)) throw new RuntimeException('Это папка');
@@ -377,7 +437,7 @@ function fm_delete(): void
 function rrmdir(string $path): void { if(is_dir($path)&&!is_link($path)){ foreach(scandir($path)?:[] as $i){ if($i==='.'||$i==='..') continue; rrmdir($path.'/'.$i);} if(!@rmdir($path)){ run_ctl(['repair'],180); @rmdir($path); } } else { if(!@unlink($path)){ run_ctl(['repair'],180); @unlink($path); } } }
 
 
-function hh_app_version(): string { return '1.7-v53'; }
+function hh_app_version(): string { return '1.6-v74'; }
 
 function hh_nav_config(): array
 {
@@ -400,7 +460,7 @@ function nav_item(string $id,string $icon,string $label,string $page): string { 
 function render_login(): void
 {
     $flash=flash(); $need2fa=setting_get('security_2fa_enabled','0')==='1'; ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=50" rel="stylesheet"></head><body class="login-body">
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=74" rel="stylesheet"></head><body class="login-body">
 <div class="login-orb login-orb-a"></div><div class="login-orb login-orb-b"></div><div class="login-orb login-orb-c"></div>
 <main class="login-clean">
   <section class="login-card card-glass login-clean-card">
@@ -421,14 +481,14 @@ function render_login(): void
 
 function render_page(string $page, array $user): void
 {
-    $titles=['dashboard'=>'Панель управления','files'=>'Файловый менеджер','sites'=>'Сайты и папки','ftp'=>'FTP','databases'=>'Базы данных','bots'=>'Боты PM2 24/7','bot_logs'=>'Логи бота','backups'=>'Backup','dns'=>'DNS','network'=>'Сеть и доступ','ssl'=>'SSL','php'=>'PHP-версии','cron'=>'Cron','logs'=>'Логи сайтов','security'=>'Безопасность','settings'=>'Настройки','access'=>'Внешний доступ','disk'=>'Диск и LVM']; $title=$titles[$page]??'Дашборд'; $flash=flash();
+    $titles=['dashboard'=>'Панель управления','files'=>'Файловый менеджер','sites'=>'Сайты и папки','ftp'=>'FTP','databases'=>'Базы данных','bots'=>'Боты PM2 24/7','bot_logs'=>'Логи бота','deploy_logs'=>'Логи проекта','backups'=>'Backup','dns'=>'DNS','network'=>'Сеть и доступ','ssl'=>'SSL','php'=>'PHP-версии','cron'=>'Cron','logs'=>'Логи сайтов','security'=>'Безопасность','settings'=>'Настройки','access'=>'Внешний доступ','disk'=>'Диск и LVM']; $title=$titles[$page]??'Дашборд'; $flash=flash();
     $nav=hh_nav_config(); $activeCat=hh_active_category($page);
     ?>
 <!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($title) ?> — HYPER-HOST</title>
 <link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
-<link href="/assets/style.css?v=50" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
+<link href="/assets/style.css?v=74" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
 <div class="mobile-nav-backdrop" id="mobileNavBackdrop"></div>
 <aside class="sidebar sidebar-v2">
   <div class="rail" data-active-cat="<?= e($activeCat) ?>">
@@ -459,9 +519,9 @@ function render_page(string $page, array $user): void
     </div>
   </div>
 </aside>
-<main class="content" style="--cat-accent:<?= e($nav[$activeCat]['accent']??'#4f7dff') ?>"><header class="topbar"><button type="button" class="mobile-nav-toggle" id="mobileNavToggle" aria-label="Меню" aria-expanded="false"><i class="fa-solid fa-bars"></i></button><div><div class="topbar-kicker"><i class="fa-solid <?= e($nav[$activeCat]['icon']??'fa-rocket') ?>"></i><?= e($nav[$activeCat]['label']??'') ?></div><h1><?= e($title) ?></h1><div class="small muted">Сервер: <code><?= e(host_name()) ?></code></div></div><form method="post" data-async-submit><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft" data-loading-text="Синхронизирую..."><i class="fa-solid fa-rotate me-2"></i>Обновить</button></form></header><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?><?php route_view($page); ?></main></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script><script src="/assets/app.js?v=50" defer></script></body></html><?php
+<main class="content" style="--cat-accent:<?= e($nav[$activeCat]['accent']??'#4f7dff') ?>"><header class="topbar"><button type="button" class="mobile-nav-toggle" id="mobileNavToggle" aria-label="Меню" aria-expanded="false"><i class="fa-solid fa-bars"></i></button><div><div class="topbar-kicker"><i class="fa-solid <?= e($nav[$activeCat]['icon']??'fa-rocket') ?>"></i><?= e($nav[$activeCat]['label']??'') ?></div><h1><?= e($title) ?></h1><div class="small muted">Сервер: <code><?= e(host_name()) ?></code></div></div><form method="post" data-async-submit><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft" data-loading-text="Синхронизирую..."><i class="fa-solid fa-rotate me-2"></i>Обновить</button></form></header><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?><?php route_view($page); ?></main></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script><script src="/assets/app.js?v=74" defer></script></body></html><?php
 }
-function route_view(string $page): void { match($page){ 'files'=>view_files(), 'sites'=>view_sites(), 'ftp'=>view_ftp(), 'databases'=>view_databases(), 'pma_login'=>view_pma_login(), 'bots'=>view_bots(), 'bot_logs'=>view_bot_logs(), 'backups'=>view_backups(), 'dns'=>view_dns(), 'network'=>view_network(), 'ssl'=>view_ssl(), 'php'=>view_php(), 'cron'=>view_cron(), 'logs'=>view_logs(), 'security'=>view_security(), 'settings'=>view_settings(), 'access'=>view_access(), 'disk'=>view_disk(), default=>view_dashboard(), }; }
+function route_view(string $page): void { match($page){ 'files'=>view_files(), 'sites'=>view_sites(), 'ftp'=>view_ftp(), 'databases'=>view_databases(), 'pma_login'=>view_pma_login(), 'bots'=>view_bots(), 'bot_logs'=>view_bot_logs(), 'deploy_logs'=>view_deploy_logs(), 'backups'=>view_backups(), 'dns'=>view_dns(), 'network'=>view_network(), 'ssl'=>view_ssl(), 'php'=>view_php(), 'cron'=>view_cron(), 'logs'=>view_logs(), 'security'=>view_security(), 'settings'=>view_settings(), 'access'=>view_access(), 'disk'=>view_disk(), default=>view_dashboard(), }; }
 function stat_card(string $icon,string $label,string $value,string $sub=''): void { ?><div class="stat-card"><div class="stat-icon"><i class="fa-solid <?= e($icon) ?>"></i></div><div><span><?= e($label) ?></span><b><?= e($value) ?></b><?php if($sub): ?><em><?= e($sub) ?></em><?php endif; ?></div></div><?php }
 function progress_block(string $label,float $used,float $total): string { $p=percent($used,$total); return '<div class="usage"><div class="d-flex justify-content-between"><span>'.e($label).'</span><b>'.e(human_bytes($used).' / '.human_bytes($total)).'</b></div><div class="progress"><div class="progress-bar" style="width:'.$p.'%"></div></div></div>'; }
 
@@ -637,11 +697,9 @@ function view_databases(): void
     $gen=default_db_password();
     $external=setting_get('mysql_external','0')==='1' || (($mysql['bind_address']??'')==='0.0.0.0');
     $pma=phpmyadmin_url();
-    $pmaLan='http://192.168.0.179/phpmyadmin/';
-    $pmaWan='http://90.189.208.25/phpmyadmin/';
-    $mysqlExternalHost=(string)($mysql['external_host']??mysql_external_host());
+    $mysqlExternalHost=mysql_external_host();
     $mysqlLocalHost=mysql_local_host();
-    $mysqlLanHost=(string)($mysql['lan_host']??mysql_lan_host());
+    $mysqlLanHost=(string)app_config('server_ip','192.168.0.179');
     $listen=!empty($mysql['listen_3306']);
     $accountByUser=[]; foreach($accounts as $a){ $accountByUser[$a['username']]=$a; }
     ?>
@@ -668,7 +726,6 @@ function view_databases(): void
       <div><span>Импорт</span><b><?= e((string)($pmaStatus['upload_max_filesize']??'1024M')) ?></b></div>
       <div><span>Экспорт</span><b><?= e((string)($pmaStatus['memory_limit']??'1024M')) ?></b></div>
     </div>
-    <div class="alert alert-info mt-3 mb-0"><i class="fa-solid fa-circle-info me-2"></i><b>phpMyAdmin — только веб-интерфейс, его URL нельзя указывать в коде бота.</b><br>Бот на этом сервере: <code>127.0.0.1:3306</code> · бот/ПК в LAN: <code><?= e($mysqlLanHost) ?>:3306</code> · бот на другом сервере: <code><?= e($mysqlExternalHost) ?>:3306</code>.<br>phpMyAdmin LAN: <b><?= e($pmaLan) ?></b> · Internet: <b><?= e($pmaWan) ?></b>.</div>
     <?php if(!empty($doctor['problem'])): ?><div class="alert alert-warning mt-3 mb-0"><i class="fa-solid fa-triangle-exclamation me-2"></i><?= e((string)$doctor['problem']) ?></div><?php endif; ?>
   </section>
 
@@ -724,7 +781,7 @@ function view_databases(): void
       <div class="panel-card">
         <div class="card-title-row"><h2><i class="fa-solid fa-table me-2"></i>Базы</h2><div class="d-flex gap-2"><button class="btn btn-sm btn-soft" onclick="copyText('<?= e($mysqlExternalHost) ?>')">SQL host</button><button class="btn btn-sm btn-soft" onclick="copyText('<?= e($pma) ?>')">phpMyAdmin</button></div></div>
         <div class="db-cards-list">
-        <?php foreach($rows as $r): $a=$accountByUser[$r['db_user']]??null; $hostPattern=(string)($a['host_pattern']??($r['remote_allowed']?'%':'localhost')); $connHost=(int)$r['remote_allowed']?$mysqlExternalHost:$mysqlLocalHost; ?>
+        <?php foreach($rows as $r): $a=$accountByUser[$r['db_user']]??null; $hostPattern=(string)($a['host_pattern']??($r['remote_allowed']?'%':'localhost')); $connHost=(int)$r['remote_allowed']?$mysqlLanHost:$mysqlLocalHost; ?>
           <div class="db-row-card">
             <div><span>База</span><b><?= e($r['db_name']) ?></b><small><?= (int)$r['remote_allowed']?'Внешний вход':'Локально' ?></small></div>
             <div><span>Пользователь</span><code><?= e($r['db_user']) ?></code><small><?= e(mysql_host_label($hostPattern)) ?></small></div>
@@ -742,7 +799,7 @@ function view_databases(): void
       <div class="panel-card mt-4">
         <h2><i class="fa-solid fa-users-gear me-2"></i>Аккаунты MySQL / phpMyAdmin</h2>
         <div class="db-cards-list">
-        <?php foreach($accounts as $a): $connHost=((int)$a['remote_allowed']?$mysqlExternalHost:$mysqlLocalHost); ?>
+        <?php foreach($accounts as $a): $connHost=((int)$a['remote_allowed']?$mysqlExternalHost:$mysqlLanHost); ?>
           <div class="db-row-card compact">
             <div><span>Логин</span><code><?= e($a['username']) ?></code><small><?= e(mysql_host_label((string)$a['host_pattern'])) ?></small></div>
             <div><span>Доступ</span><b><?= e($a['db_name']?:'без базы') ?></b><small><?= e($a['privileges']) ?></small></div>
@@ -802,17 +859,17 @@ function ftp_scope_label_ui(string $scope, string $target = ''): string
 }
 
 function view_ftp(): void
-{ $rows=db()->query('SELECT * FROM ftp_accounts ORDER BY id DESC')->fetchAll(); $siteOptions=db()->query('SELECT domain FROM sites ORDER BY domain ASC')->fetchAll(); $gen=default_ftp_password(); $doctor=run_ctl_json_cached(['ftp-doctor-json'],8,30); $publicHost=(string)(($doctor['configured_public_ip']??'') ?: ($doctor['public_ip']??'') ?: current_public_ipv4() ?: host_name()); $lanHost=(string)(($doctor['server_ip']??'') ?: app_config('server_ip','')); $ftpHost=$publicHost; $ftpIssue=(string)($doctor['issue']??''); $ftpHint=(string)($doctor['hint']??''); $ftpService=(string)($doctor['service']??''); $ftpActive=(!empty($doctor['listen_21']) && in_array($ftpService,['active','runtime'],true)); ?>
+{ $rows=db()->query('SELECT * FROM ftp_accounts ORDER BY id DESC')->fetchAll(); $siteOptions=db()->query('SELECT domain FROM sites ORDER BY domain ASC')->fetchAll(); $gen=default_ftp_password(); $doctor=run_ctl_json_cached(['ftp-doctor-json'],8,30); $publicHost=(string)(($doctor['configured_public_ip']??'') ?: ($doctor['public_ip']??'') ?: current_public_ipv4() ?: host_name()); $lanHost=(string)(($doctor['server_ip']??'') ?: app_config('server_ip','')); $ftpHost=$publicHost; $ftpIssue=(string)($doctor['issue']??''); $ftpHint=(string)($doctor['hint']??''); ?>
 <div class="ftp-layout-v34 row g-4">
   <div class="col-lg-4">
     <div class="panel-card ftp-create-card">
       <div class="kicker"><i class="fa-solid fa-folder-tree me-2"></i>FTP</div>
       <h2>Аккаунты доступа</h2>
       <div class="status-grid compact-status mt-3">
-        <div><span>FTP-сервис</span><b class="<?= $ftpActive?'text-success':'text-danger' ?>"><?= $ftpActive?'активен':'нужен ремонт' ?></b></div>
-        <div><span>LAN порт</span><b class="<?= !empty($doctor['listen_21'])?'text-success':'text-danger' ?>">21 / <?= !empty($doctor['listen_21'])?'слушает':'закрыт' ?></b></div>
-        <div><span>Internet порт</span><b class="<?= !empty($doctor['listen_21'])?'text-success':'text-danger' ?>">21 / <?= !empty($doctor['listen_21'])?'слушает':'закрыт' ?></b></div>
-        <div><span>Движок</span><b>pyftpdlib ×1</b></div>
+        <div><span>FTP-сервер</span><b class="<?= (($doctor['ftp_service']??'')==='active' || !empty($doctor['listen_21']))?'text-success':'text-danger' ?>"><?= e((string)(($doctor['ftp_service']??'') ?: 'runtime')) ?></b></div>
+        <div><span>порт 21</span><b class="<?= !empty($doctor['listen_21'])?'text-success':'text-danger' ?>"><?= !empty($doctor['listen_21'])?'слушает':'закрыт' ?></b></div>
+        <div><span>passive</span><b>40000-40100</b></div>
+        <div><span>движок</span><b>Hyper FTP</b></div>
       </div>
       <?php if($ftpIssue !== ''): ?><div class="ftp-health mt-3"><b><?= e($ftpIssue) ?></b><?php if($ftpHint !== ''): ?><span><?= e($ftpHint) ?></span><?php endif; ?></div><?php endif; ?>
       <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_ftp">
@@ -837,11 +894,11 @@ function view_ftp(): void
   </div>
   <div class="col-lg-8">
     <div class="panel-card mb-3 ftp-connection-card">
-      <div class="connection-line"><span>Internet</span><code>FTP <?= e($ftpHost) ?> : 21</code><b>PASV 40000-40100</b></div>
-      <div class="connection-line"><span>LAN</span><code>FTP <?= e($lanHost ?: '192.168.x.x') ?> : 21</code><b>PASV 40000-40100</b></div>
+      <div class="connection-line"><span>FileZilla</span><code>FTP <?= e($ftpHost) ?> : 21</code><b>Plain + Passive</b></div>
+      <div class="connection-line"><span>LAN</span><code>FTP <?= e($lanHost ?: '192.168.x.x') ?> : 21</code><b>для локальной сети</b></div>
       <div class="ftp-connect-grid mt-3">
-        <div><span>Из интернета</span><code><?= e($publicHost) ?>:21</code></div>
-        <div><span>В локальной сети</span><code><?= e($lanHost ?: $publicHost) ?>:21</code></div>
+        <div><span>Из интернета</span><code><?= e($publicHost) ?></code></div>
+        <div><span>В локальной сети</span><code><?= e($lanHost ?: $publicHost) ?></code></div>
         <div><span>Шифрование</span><code>Обычный FTP</code></div>
         <div><span>Режим</span><code>Пассивный</code></div>
       </div>
@@ -850,15 +907,15 @@ function view_ftp(): void
       <?php foreach($rows as $r): $cardHost=$publicHost; $scope=ftp_scope_clean((string)($r['access_scope']??'all')); $target=(string)($r['access_target']??''); $scopeLabel=ftp_scope_label_ui($scope,$target); ?>
         <div class="col-md-6"><div class="ftp-card ftp-card-v25">
           <h3><i class="fa-solid fa-user-lock me-2"></i><?= e($r['username']) ?></h3>
-          <div class="cred"><span>Internet</span><code><?= e($cardHost) ?>:21</code></div>
-          <div class="cred"><span>LAN</span><code><?= e($lanHost ?: $cardHost) ?>:21</code></div>
-          <div class="cred"><span>Passive</span><code>40000-40100</code></div>
+          <div class="cred"><span>Хост</span><code><?= e($cardHost) ?></code></div>
+          <div class="cred"><span>Локальный хост</span><code><?= e($lanHost ?: $cardHost) ?></code></div>
+          <div class="cred"><span>Порт</span><code>21</code></div>
           <div class="cred"><span>FTP-логин</span><code><?= e($r['username']) ?></code></div>
           <div class="cred"><span>Пароль</span><code><?= e($r['password_plain']?:'задать новый') ?></code></div>
           <div class="cred"><span>Открывает</span><code><?= e($scopeLabel) ?></code></div>
           <div class="ftp-tags"><span>Plain FTP</span><span>Passive</span><span><?= e($scopeLabel) ?></span></div>
           <div class="d-flex gap-2 mt-3 flex-wrap">
-            <button class="btn btn-sm btn-light" onclick="copyText('Protocol: FTP\nHost: <?= e($cardHost) ?>\nPort: 21\nEncryption: Plain FTP\nTransfer mode: Passive\nLogin: <?= e($r['username']) ?>\nPassword: <?= e($r['password_plain']) ?>')">Копировать</button>
+            <button class="btn btn-sm btn-light" onclick="copyText('Protocol: FTP\nHost: <?= e($cardHost) ?>\nPort: 21\nEncryption: Only use plain FTP\nTransfer mode: Passive\nLogin: <?= e($r['username']) ?>\nPassword: <?= e($r['password_plain']) ?>')">Копировать</button>
             <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#ftp<?= (int)$r['id'] ?>">Пароль</button>
             <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="repair_ftp_account"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-soft">Восстановить</button></form>
             <form method="post" onsubmit="return confirm('Удалить FTP?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_ftp"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-danger">Удалить</button></form>
@@ -872,11 +929,43 @@ function view_ftp(): void
 
 
 function pm2_status_map(): array { $d=run_ctl_json_live(['bot-list-json'],8); $m=[]; if(!isset($d['_error'])) foreach($d as $p) $m[(string)$p['name']]=$p; return $m; }
+function view_deploy_center(): void
+{
+  $cfg=deploy_center_config();
+  $doctor=run_ctl_json_live(['deploy-center-doctor'],20);
+  $projects=db()->query('SELECT * FROM managed_projects ORDER BY project_id DESC')->fetchAll();
+  $masterProject=(int)setting_get('deploy_master_project_id','0');
+  $lastSync=setting_get('deploy_last_sync','ещё не выполнялась');
+  $masterStatus=(string)($cfg['master_pm2']['status']??'not_found');
+  ?>
+<div class="deploy-center-v74 mb-4">
+  <div class="deploy-hero-v74 panel-card">
+    <div><div class="eyebrow"><i class="fa-solid fa-diagram-project"></i> MyStock Deploy Center</div><h2>Главный бот и магазины из SQL</h2><p class="muted mb-0">Проекты читаются из <code>projects</code>, а каждый магазин получает отдельные папку, venv, .env и PM2-процесс.</p></div><?php if(empty($doctor['ok'])): ?><div class="alert alert-warning mt-3 mb-0 py-2"><b>Не хватает:</b> <?= e(implode(', ', $doctor['missing']??[])) ?><?= !empty($doctor['db_error'])?' · '.e((string)$doctor['db_error']):'' ?></div><?php else: ?><div class="small text-success mt-2"><i class="fa-solid fa-circle-check me-1"></i>Сервер готов · проектов в SQL: <?= (int)($doctor['project_count']??0) ?></div><?php endif; ?>
+    <div class="deploy-hero-actions-v74"><span class="bot-status-v29 <?= $masterStatus==='online'?'ok':'bad' ?>"><?= e($masterStatus) ?></span><form method="post" data-async-submit><?= csrf_field() ?><input type="hidden" name="action" value="deploy_sync"><button class="btn btn-primary" data-loading-text="Читаю MySQL и Telegram getMe..."><i class="fa-solid fa-rotate me-2"></i>Синхронизировать</button></form></div>
+  </div>
+  <div class="row g-4 mt-1">
+    <div class="col-xl-4"><div class="panel-card h-100"><h3><i class="fa-solid fa-database me-2"></i>MySQL проекта</h3><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="deploy_config_save"><div class="row g-2"><div class="col-8"><input class="form-control" name="db_host" value="<?= e((string)($cfg['db_host']??'90.189.208.25')) ?>"></div><div class="col-4"><input class="form-control" type="number" name="db_port" value="<?= e((string)($cfg['db_port']??3306)) ?>"></div></div><input class="form-control" name="db_user" value="<?= e((string)($cfg['db_user']??'mystock')) ?>"><input class="form-control" type="password" name="db_pass" placeholder="<?= !empty($cfg['db_pass_set'])?'Пароль сохранён — оставь пустым':'DB_PASS' ?>"><input class="form-control" name="db_name" value="<?= e((string)($cfg['db_name']??'mystock')) ?>"><button class="btn btn-soft">Сохранить подключение</button></form><div class="deploy-paths-v74 mt-3"><span>Master</span><code><?= e((string)($cfg['master_dir']??'')) ?></code><span>Template</span><code><?= e((string)($cfg['template_dir']??'')) ?></code><span>Проекты</span><code><?= e((string)($cfg['managed_dir']??'')) ?></code></div></div></div>
+    <div class="col-xl-4"><div class="panel-card h-100"><h3><i class="fa-solid fa-crown me-2"></i>Главный deploy-бот</h3><form method="post" enctype="multipart/form-data" class="vstack gap-3" data-async-submit><?= csrf_field() ?><input type="hidden" name="action" value="deploy_master_upload"><label class="upload-mini"><span>bot.py</span><input class="form-control" type="file" name="master_bot_file" accept=".py"></label><label class="upload-mini"><span>requirements.txt</span><input class="form-control" type="file" name="master_requirements_file" accept=".txt"></label><select class="form-select" name="master_project_id" required><option value="">Токен главного бота из проекта...</option><?php foreach($projects as $p): ?><option value="<?= (int)$p['project_id'] ?>" <?= $masterProject===(int)$p['project_id']?'selected':'' ?>>#<?= (int)$p['project_id'] ?> — <?= e($p['project_name']) ?><?= $p['bot_username']?' (@'.e($p['bot_username']).')':'' ?></option><?php endforeach; ?></select><button class="btn btn-primary" data-loading-text="Создаю venv и запускаю PM2..."><i class="fa-solid fa-upload me-2"></i>Загрузить и запустить</button></form><div class="d-flex gap-2 mt-3 flex-wrap"><?php foreach(['start'=>'Start','stop'=>'Stop','restart'=>'Restart'] as $a=>$label): ?><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="deploy_master_action"><input type="hidden" name="master_action" value="<?= e($a) ?>"><button class="btn btn-sm btn-soft"><?= e($label) ?></button></form><?php endforeach; ?><a class="btn btn-sm btn-soft" href="/?page=deploy_logs&master=1">Logs</a></div></div></div>
+    <div class="col-xl-4"><div class="panel-card h-100"><h3><i class="fa-solid fa-box-open me-2"></i>Шаблон новых магазинов</h3><form method="post" enctype="multipart/form-data" class="vstack gap-3" data-async-submit><?= csrf_field() ?><input type="hidden" name="action" value="deploy_template_upload"><label class="upload-mini"><span>bot.py дочернего бота</span><input class="form-control" type="file" name="template_bot_file" accept=".py"></label><label class="upload-mini"><span>requirements.txt</span><input class="form-control" type="file" name="template_requirements_file" accept=".txt"></label><button class="btn btn-soft"><i class="fa-solid fa-floppy-disk me-2"></i>Сохранить шаблон</button></form><div class="template-state-v74 mt-3"><span class="<?= !empty($cfg['template_bot_exists'])?'ok':'bad' ?>"><i class="fa-solid <?= !empty($cfg['template_bot_exists'])?'fa-circle-check':'fa-circle-xmark' ?>"></i> bot.py</span><span class="<?= !empty($cfg['template_requirements_exists'])?'ok':'warn' ?>"><i class="fa-solid fa-file-lines"></i> requirements.txt</span></div><p class="small muted mt-3 mb-0">Папка проекта: <code>&lt;project_id&gt;-&lt;название-магазина&gt;</code>.</p></div></div>
+  </div>
+  <div class="panel-card mt-4"><div class="card-title-row flex-wrap"><div><h2><i class="fa-solid fa-store me-2"></i>Проекты / магазины</h2><div class="small muted">Последняя синхронизация: <?= e($lastSync) ?></div></div><span class="badge text-bg-info"><?= count($projects) ?> проектов</span></div><div class="table-responsive"><table class="table table-dark-soft align-middle deploy-project-table-v74"><thead><tr><th>Магазин</th><th>Создатель</th><th>Telegram</th><th>PM2 / SQL</th><th>Папка</th><th></th></tr></thead><tbody>
+  <?php foreach($projects as $p): ?><tr><td><b>#<?= (int)$p['project_id'] ?> <?= e($p['project_name']) ?></b><div class="small muted"><?= e($p['subscription_status']) ?></div></td><td><?= e($p['owner_name']?:$p['owner_username']) ?><div class="small muted"><?= $p['owner_username']?'@'.e($p['owner_username']).' · ':'' ?>TG <?= e($p['owner_tg_id']) ?></div></td><td><?php if($p['bot_link']): ?><a class="btn btn-sm btn-soft" target="_blank" rel="noopener" href="<?= e($p['bot_link']) ?>">@<?= e($p['bot_username']) ?></a><?php else: ?><span class="muted">getMe недоступен</span><?php endif; ?></td><td><span class="bot-status-v29 <?= $p['pm2_status']==='online'?'ok':'bad' ?>"><?= e($p['pm2_status']) ?></span><div class="small muted mt-1">SQL: <?= e($p['sql_status']?:'—') ?></div><?php if($p['last_error']): ?><div class="small text-danger text-truncate" style="max-width:240px" title="<?= e($p['last_error']) ?>"><?= e($p['last_error']) ?></div><?php endif; ?></td><td><code><?= e($p['deploy_path']) ?></code></td><td><div class="d-flex gap-1 flex-wrap justify-content-end"><form method="post" data-async-submit><?= csrf_field() ?><input type="hidden" name="action" value="deploy_project_action"><input type="hidden" name="project_id" value="<?= (int)$p['project_id'] ?>"><input type="hidden" name="project_action" value="deploy"><button class="btn btn-sm btn-primary" data-loading-text="Ставлю venv и зависимости...">Deploy</button></form><?php foreach(['start'=>'Start','stop'=>'Stop','restart'=>'Restart'] as $a=>$label): ?><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="deploy_project_action"><input type="hidden" name="project_id" value="<?= (int)$p['project_id'] ?>"><input type="hidden" name="project_action" value="<?= e($a) ?>"><button class="btn btn-sm btn-soft"><?= e($label) ?></button></form><?php endforeach; ?><a class="btn btn-sm btn-soft" href="/?page=deploy_logs&project_id=<?= (int)$p['project_id'] ?>">Logs</a></div></td></tr><?php endforeach; if(!$projects): ?><tr><td colspan="6" class="empty">Сохрани MySQL и нажми «Синхронизировать»</td></tr><?php endif; ?>
+  </tbody></table></div></div>
+</div>
+<?php }
+
+function view_deploy_logs(): void
+{
+  $master=!empty($_GET['master']); $pid=(int)($_GET['project_id']??0); $args=$master?['deploy-center-master-action','logs']:['deploy-center-project-action',(string)$pid,'logs','0']; $res=run_ctl_json($args,40); $text=(string)($res['output']??$res['error']??$res['_error']??'Логов нет'); ?>
+  <div class="panel-card"><div class="card-title-row"><h2><?= $master?'Логи главного deploy-бота':'Логи проекта #'.$pid ?></h2><a class="btn btn-soft" href="/?page=bots">Назад</a></div><pre class="logs"><?= e($text) ?></pre></div><?php
+}
+
 function view_bots(): void
 {
   $bots=db()->query('SELECT * FROM bots ORDER BY id DESC')->fetchAll();
   $status=pm2_status_map();
   $modals=[];
+  view_deploy_center();
   ?>
 <div class="bots-live-page-v29" data-live-bots>
   <div class="row g-4">
@@ -964,7 +1053,7 @@ function view_backups(): void { $jobs=db()->query('SELECT * FROM backup_jobs ORD
 
 function view_dns(): void {
     $zones=db()->query('SELECT * FROM dns_zones ORDER BY id DESC')->fetchAll();
-    $pub=current_public_ipv4();
+    $pub=setting_get('public_ip_override',(string)app_config('public_ip','90.189.208.25'));
     $inspectDomain=strtolower(trim((string)($_GET['inspect']??($zones[0]['domain']??''))));
     $inspect=null;
     if($inspectDomain!=='' && is_valid_domain($inspectDomain)) $inspect=run_ctl_json_cached(['dns-inspect-json',$inspectDomain],30,300);
@@ -1013,7 +1102,7 @@ function view_dns(): void {
     </div>
     <form method="post" class="dns-create-form"><?= csrf_field() ?><input type="hidden" name="action" value="dns_wizard">
       <input class="form-control" name="domain" placeholder="mystockbot.xyz" required>
-      <input class="form-control" name="public_ip" value="<?= e($pub) ?>" readonly>
+      <input class="form-control" name="public_ip" value="<?= e($pub) ?>" placeholder="90.189.208.25">
       <input class="form-control" name="panel_subdomain" value="panel" placeholder="panel">
       <button class="btn btn-primary"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Создать зону</button>
     </form>
@@ -1077,23 +1166,17 @@ function view_dns(): void {
 function view_network(): void {
     $sites=db()->query('SELECT * FROM sites ORDER BY domain')->fetchAll();
     $domain=(string)($_GET['domain']??($sites[0]['domain']??'hyper-host.pw'));
-    $ipInfo=runtime_ip_info();
-    $pub=(string)($ipInfo['external_ip']??setting_get('public_ip_override',(string)app_config('public_ip','')));
-    $lan=(string)($ipInfo['internal_ip']??mysql_lan_host());
+    $pub=setting_get('public_ip_override',(string)app_config('public_ip','90.189.208.25'));
     $doctor=run_ctl_json_cached(['network-doctor-json',$domain],8,180);
 ?>
 <div class="row g-4 network-page-v40">
   <div class="col-xxl-4"><div class="panel-card hero-mini"><div class="kicker"><i class="fa-solid fa-tower-broadcast me-2"></i>Сеть</div><h2>Доступ и домен</h2>
-    <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="network_fix"><input class="form-control" name="domain" value="<?= e($domain) ?>" placeholder="mystockbot.xyz"><input class="form-control" name="public_ip" value="<?= e($pub) ?>" readonly><button class="btn btn-primary btn-lg"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Исправить сеть</button></form>
-    <form method="post" class="mt-2"><?= csrf_field() ?><input type="hidden" name="action" value="detect_ip"><button class="btn btn-soft w-100"><i class="fa-solid fa-thumbtack me-2"></i>Применить фиксированные IP</button></form>
+    <form method="post" class="vstack gap-3 mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="network_fix"><input class="form-control" name="domain" value="<?= e($domain) ?>" placeholder="mystockbot.xyz"><input class="form-control" name="public_ip" value="<?= e($pub) ?>" placeholder="90.189.208.25"><button class="btn btn-primary btn-lg"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Исправить</button></form>
     <form method="post" class="vstack gap-2 mt-4"><?= csrf_field() ?><input type="hidden" name="action" value="save_panel_domain"><label class="form-label">Домен панели</label><input class="form-control" name="panel_domain" value="<?= e(setting_get('panel_domain_override', (string)app_config('panel_domain', ''))) ?>" placeholder="panel.hyper-host.pw"><button class="btn btn-soft"><i class="fa-solid fa-link me-2"></i>Сохранить</button></form>
   </div></div>
   <div class="col-xxl-8"><div class="panel-card"><h2>Диагностика</h2>
     <div class="network-check-grid network-check-grid-v40">
-      <div class="network-check"><span>Внешний IP</span><b><?= e((string)($ipInfo['external_ip'] ?? $doctor['public_ip'] ?? $pub)) ?></b></div>
-      <div class="network-check"><span>Внутренний IP</span><b><?= e($lan) ?></b></div>
-      <div class="network-check"><span>Интерфейс</span><b><?= e((string)($ipInfo['interface'] ?? '—')) ?></b></div>
-      <div class="network-check"><span>Шлюз</span><b><?= e((string)($ipInfo['gateway'] ?? '—')) ?></b></div>
+      <div class="network-check"><span>Публичный IP</span><b><?= e((string)($doctor['public_ip'] ?? $pub)) ?></b></div>
       <div class="network-check"><span>DNS A</span><b class="<?= (($doctor['dns_status']??'')==='ok')?'hh-ok':'hh-warn' ?>"><?= e(implode(', ', $doctor['dns_a'] ?? [])) ?: 'нет' ?></b></div>
       <div class="network-check"><span>Локальный DNS</span><b><?= e(implode(', ', $doctor['dns_a_local'] ?? [])) ?: 'нет' ?></b></div>
       <div class="network-check"><span>Nginx</span><b class="<?= !empty($doctor['nginx_ok'])?'hh-ok':'hh-bad' ?>"><?= !empty($doctor['nginx_ok'])?'ok':'bad' ?></b></div>
@@ -1108,12 +1191,8 @@ function view_network(): void {
 
 function view_ssl(): void {
     $sites=db()->query('SELECT * FROM sites ORDER BY domain')->fetchAll();
-    $certs=run_ctl_json_cached(['ssl-status-json'],8,300); $map=[]; if(!isset($certs['_error'])) foreach($certs as $c) $map[$c['domain']]=$c;
-    $ipInfo = runtime_ip_info();
-    $sslLanIp = (string)($ipInfo['internal_ip'] ?? mysql_lan_host());
-    $sslPanelDomain = trim((string)app_config('panel_domain','panel.hyper-host.pw'));
-    if ($sslPanelDomain === '' || $sslPanelDomain === '_') $sslPanelDomain = 'panel.hyper-host.pw';
-    $savedPublicIp = current_public_ipv4();
+    $audit=run_ctl_json_cached(['ssl-audit-json'],20,60); $map=[]; if(!empty($audit['ok'])) foreach(($audit['sites']??[]) as $c) $map[$c['domain']]=$c;
+    $savedPublicIp = setting_get('public_ip_override', (string)app_config('public_ip',''));
     $modals = [];
 ?>
 <div class="ssl-hero mb-4">
@@ -1124,10 +1203,10 @@ function view_ssl(): void {
   <div class="ssl-hero-actions">
     <form method="post" class="d-flex gap-2 flex-wrap">
       <?= csrf_field() ?><input type="hidden" name="action" value="save_public_ip">
-      <input class="form-control public-ip-input" name="public_ip" value="<?= e($savedPublicIp) ?>" readonly>
+      <input class="form-control public-ip-input" name="public_ip" value="<?= e($savedPublicIp) ?>" placeholder="90.189.208.25">
       <button class="btn btn-soft"><i class="fa-solid fa-floppy-disk me-2"></i>IP</button>
     </form>
-    <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_renew_all"><button class="btn btn-primary"><i class="fa-solid fa-arrows-rotate me-2"></i>Автопродление</button></form>
+    <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_restore_existing"><button class="btn btn-soft"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Подключить найденные сертификаты</button></form><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_renew_all"><button class="btn btn-primary"><i class="fa-solid fa-arrows-rotate me-2"></i>Автопродление</button></form>
   </div>
 </div>
 <div class="panel-card ssl-card">
@@ -1135,10 +1214,12 @@ function view_ssl(): void {
   <?php foreach($sites as $s):
       $c=$map[$s['domain']]??null;
       $dns=run_ctl_json_cached(['ssl-check-json',$s['domain']],8,300);
-      $hasCert = $c && (($c['status'] ?? '') === 'ok');
+      $hasCert = $c && (($c['status'] ?? '') === 'active');
+      $certOnly = $c && (($c['status'] ?? '') === 'cert_only');
       $ready=empty($dns['_error']) && !empty($dns['certbot_ready']);
       $points=empty($dns['_error']) && !empty($dns['points_here']);
-      if($hasCert){ $badge='success'; $label='SSL работает'; }
+      if($hasCert){ $badge='success'; $label='SSL реально работает'; }
+      elseif($certOnly){ $badge='warning'; $label='Сертификат есть, Nginx не отдаёт'; }
       elseif($ready){ $badge='success'; $label='Можно выпускать'; }
       elseif($points){ $badge='info'; $label='DNS OK'; }
       else { $badge='warning'; $label='Нужна настройка'; }
@@ -1166,7 +1247,7 @@ function view_ssl(): void {
         <?php if(!empty($dns['outbound_public_ip']) && !empty($dns['configured_public_ip']) && $dns['outbound_public_ip']!==$dns['configured_public_ip']): ?><div class="small text-warning">NAT режим: исходящий IP отличается, это не мешает SSL при пробросе портов.</div><?php endif; ?>
         <?php if(!$hasCert && !empty($dns['problem'])): ?><div class="small text-danger mt-1"><?= e((string)$dns['problem']) ?></div><?php endif; ?>
       </td>
-      <td><?= $hasCert?'<span class="badge rounded-pill text-bg-success">'.e((string)($c['days_left']??'?')).' дней</span>':'<span class="badge rounded-pill text-bg-secondary">нет SSL</span>' ?><div class="small muted"><?= e((string)($c['expires']??'')) ?></div></td>
+      <td><?= $hasCert?'<span class="badge rounded-pill text-bg-success">'.e((string)($c['certificate']['days_left']??'?')).' дней</span>':($certOnly?'<span class="badge rounded-pill text-bg-warning">найден, не подключён</span>':'<span class="badge rounded-pill text-bg-secondary">нет SSL</span>') ?><div class="small muted"><?= e((string)($c['certificate']['expires']??'')) ?></div></td>
       <td class="text-end"><div class="d-inline-flex gap-2 flex-wrap justify-content-end"><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_fix_site"><input type="hidden" name="id" value="<?= (int)$s['id'] ?>"><button class="btn btn-sm btn-outline-info"><i class="fa-solid fa-wand-magic-sparkles me-1"></i>Fix ACME</button></form><button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#ssl<?= (int)$s['id'] ?>"><i class="fa-solid fa-certificate me-1"></i><?= $hasCert?'Перевыпустить':'Выпустить' ?></button></div></td>
     </tr>
   <?php endforeach; if(!$sites): ?><tr><td colspan="4" class="empty">Сайтов пока нет</td></tr><?php endif; ?>
@@ -1177,19 +1258,19 @@ function view_ssl(): void {
   <div class="col-lg-6">
     <div class="panel-card h-100">
       <h2><i class="fa-solid fa-gauge-high me-2"></i>SSL для панели</h2>
-      <p class="muted">Домен <code><?= e($sslPanelDomain) ?></code> должен открывать именно панель, а не обычный сайт.</p>
+      <p class="muted">Домен <code>panel.hyper-host.pw</code> должен открывать именно панель, а не обычный сайт.</p>
       <div class="cmd-stack">
-        <button type="button" class="cmd-copy" onclick="copyText('sudo hyper panel domain <?= e($sslPanelDomain) ?>')"><i class="fa-solid fa-copy"></i><code>sudo hyper panel domain <?= e($sslPanelDomain) ?></code></button>
-        <button type="button" class="cmd-copy" onclick="copyText('sudo hyper ssl panel <?= e($sslPanelDomain) ?> memes4u1337@mail.ru')"><i class="fa-solid fa-copy"></i><code>sudo hyper ssl panel <?= e($sslPanelDomain) ?> memes4u1337@mail.ru</code></button>
+        <button type="button" class="cmd-copy" onclick="copyText('sudo hyper panel domain panel.hyper-host.pw')"><i class="fa-solid fa-copy"></i><code>sudo hyper panel domain panel.hyper-host.pw</code></button>
+        <button type="button" class="cmd-copy" onclick="copyText('sudo hyper ssl panel panel.hyper-host.pw memes4u1337@mail.ru')"><i class="fa-solid fa-copy"></i><code>sudo hyper ssl panel panel.hyper-host.pw memes4u1337@mail.ru</code></button>
       </div>
     </div>
   </div>
   <div class="col-lg-6">
     <div class="panel-card h-100">
       <h2><i class="fa-solid fa-network-wired me-2"></i>SSL на внутренний IP</h2>
-      <p class="muted">Для IP нельзя получить обычный зелёный Let’s Encrypt. Панель поставит локальный self-signed SSL на <code><?= e($sslLanIp) ?></code>.</p>
+      <p class="muted">Для IP нельзя получить обычный зелёный Let’s Encrypt. Панель поставит локальный self-signed SSL на <code>192.168.0.179</code>.</p>
       <div class="cmd-stack">
-        <button type="button" class="cmd-copy" onclick="copyText('sudo hyper ssl ip <?= e($sslLanIp) ?>')"><i class="fa-solid fa-copy"></i><code>sudo hyper ssl ip <?= e($sslLanIp) ?></code></button>
+        <button type="button" class="cmd-copy" onclick="copyText('sudo hyper ssl ip 192.168.0.179')"><i class="fa-solid fa-copy"></i><code>sudo hyper ssl ip 192.168.0.179</code></button>
       </div>
     </div>
   </div>
@@ -1221,5 +1302,5 @@ function view_disk(): void
 <div class="row g-4"><div class="col-xl-5"><div class="panel-card"><h2><i class="fa-solid fa-hard-drive me-2"></i>Диск и LVM</h2><div class="network-check-grid mb-3"><div class="network-check"><span>Root</span><b><?= e((string)($j['root_total']??'')) ?></b></div><div class="network-check"><span>Свободно</span><b><?= e((string)($j['root_free']??'')) ?></b></div><div class="network-check"><span>VG</span><b><?= e((string)($j['root_vg']??'—')) ?></b></div></div><form method="post" onsubmit="return confirm('Расширить root LVM на всё свободное место диска?')"><?= csrf_field() ?><input type="hidden" name="action" value="disk_expand"><button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-up-right-and-down-left-from-center me-2"></i>Расширить диск автоматически</button></form><div class="mt-3 vstack gap-2"><button class="cmd-copy" type="button" data-copy="sudo hyper disk doctor"><i class="fa-regular fa-copy"></i><code>sudo hyper disk doctor</code></button><button class="cmd-copy" type="button" data-copy="sudo hyper disk expand"><i class="fa-regular fa-copy"></i><code>sudo hyper disk expand</code></button></div></div></div><div class="col-xl-7"><div class="panel-card"><h2>Диагностика</h2><pre class="logs"><?= e(json_encode($j, JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT)) ?></pre></div></div></div><?php }
 
 function view_settings(): void { $dbStatus=db_writable_status(); ?>
-<div class="row g-4"><div class="col-lg-6"><div class="panel-card"><h2>Ремонт панели</h2><form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="repair_panel"><button class="btn btn-primary">Починить права и сервисы</button></form><form method="post" class="d-inline ms-2"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft">Синхронизировать</button></form><hr><form method="post" class="row g-2"><?= csrf_field() ?><input type="hidden" name="action" value="save_public_ip"><div class="col-8"><input class="form-control" name="public_ip" value="90.189.208.25" readonly></div><div class="col-4"><button class="btn btn-soft w-100">Сохранить IP</button></div></form></div></div><div class="col-lg-6"><div class="panel-card"><h2>Сменить пароль</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="change_password"><input class="form-control" type="password" name="current_password" placeholder="Текущий пароль" required><input class="form-control" type="password" name="new_password" placeholder="Новый пароль" minlength="10" required><button class="btn btn-primary">Сменить пароль</button></form></div></div><div class="col-12"><div class="panel-card"><h2>Системные пути</h2><div class="hardware-grid"><div><span>SQLite</span><b><?= e($dbStatus['file_writable']?'writable':'not writable') ?></b></div><div><span>Панель</span><b><?= e((string)app_config('panel_dir')) ?></b></div><div><span>Сайты</span><b><?= e((string)app_config('sites_dir')) ?></b></div><div><span>FTP</span><b><?= e((string)app_config('ftp_dir','/var/www/hyper-host-ftp')) ?></b></div><div><span>Боты</span><b><?= e((string)app_config('bots_dir')) ?></b></div></div></div></div></div><?php }
+<div class="row g-4"><div class="col-lg-6"><div class="panel-card"><h2>Ремонт панели</h2><form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="repair_panel"><button class="btn btn-primary">Починить права и сервисы</button></form><form method="post" class="d-inline ms-2"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft">Синхронизировать</button></form><hr><form method="post" class="row g-2"><?= csrf_field() ?><input type="hidden" name="action" value="save_public_ip"><div class="col-8"><input class="form-control" name="public_ip" value="<?= e(setting_get('public_ip_override', (string)app_config('public_ip',''))) ?>" placeholder="Публичный IP"></div><div class="col-4"><button class="btn btn-soft w-100">Сохранить IP</button></div></form></div></div><div class="col-lg-6"><div class="panel-card"><h2>Сменить пароль</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="change_password"><input class="form-control" type="password" name="current_password" placeholder="Текущий пароль" required><input class="form-control" type="password" name="new_password" placeholder="Новый пароль" minlength="10" required><button class="btn btn-primary">Сменить пароль</button></form></div></div><div class="col-12"><div class="panel-card"><h2>Системные пути</h2><div class="hardware-grid"><div><span>SQLite</span><b><?= e($dbStatus['file_writable']?'writable':'not writable') ?></b></div><div><span>Панель</span><b><?= e((string)app_config('panel_dir')) ?></b></div><div><span>Сайты</span><b><?= e((string)app_config('sites_dir')) ?></b></div><div><span>FTP</span><b><?= e((string)app_config('ftp_dir','/var/www/hyper-host-ftp')) ?></b></div><div><span>Боты</span><b><?= e((string)app_config('bots_dir')) ?></b></div></div></div></div></div><?php }
 

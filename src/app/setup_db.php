@@ -82,6 +82,36 @@ CREATE TABLE IF NOT EXISTS bots (
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
+
+CREATE TABLE IF NOT EXISTS managed_projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL UNIQUE,
+    owner_user_id INTEGER NOT NULL DEFAULT 0,
+    project_name TEXT NOT NULL DEFAULT '',
+    owner_tg_id TEXT NOT NULL DEFAULT '',
+    owner_username TEXT NOT NULL DEFAULT '',
+    owner_name TEXT NOT NULL DEFAULT '',
+    subscription_status TEXT NOT NULL DEFAULT '',
+    bot_active TEXT NOT NULL DEFAULT '',
+    bot_username TEXT NOT NULL DEFAULT '',
+    bot_link TEXT NOT NULL DEFAULT '',
+    pm2_name TEXT NOT NULL DEFAULT '',
+    deploy_path TEXT NOT NULL DEFAULT '',
+    pm2_status TEXT NOT NULL DEFAULT 'not_found',
+    sql_status TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    token_fingerprint TEXT NOT NULL DEFAULT '',
+    synced_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS deploy_uploads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL UNIQUE,
+    bot_path TEXT NOT NULL DEFAULT '',
+    requirements_path TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
 CREATE TABLE IF NOT EXISTS backup_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
@@ -180,7 +210,12 @@ $defaults = [
     'security_2fa_secret' => '',
     'security_ip_allowlist' => '',
     'backup_dir' => '/opt/hyper-host/backups',
-    'public_ip_override' => '90.189.208.25',
+    'public_ip_override' => '',
+    'deploy_db_host' => '90.189.208.25',
+    'deploy_db_port' => '3306',
+    'deploy_db_user' => 'mystock',
+    'deploy_db_name' => 'mystock',
+    'deploy_master_project_id' => '0',
 ];
 foreach ($defaults as $k => $v) {
     $stmt = $pdo->prepare('INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)');

@@ -125,7 +125,7 @@ cmd_ftp() {
   if [[ "$sub" == "public-ip" ]]; then shift || true; local act="${1:-get}"; shift || true; $CTL public-ip "$act" "$@"; $CTL ftp-fix; return; fi
   if [[ "$sub" == "user" || "$sub" == "create" ]]; then shift || true; [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper ftp user LOGIN PASSWORD [all|sites|site|bots|backups|files] [DOMAIN]"; $CTL create-ftp "$@"; return; fi
   if [[ "$sub" == "reset" || "$sub" == "password" ]]; then shift || true; [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper ftp reset LOGIN NEW_PASSWORD [all|sites|site|bots|backups|files] [DOMAIN]"; $CTL ftp-password "$@"; return; fi
-  if [[ "$sub" == "test" ]]; then shift || true; [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper ftp test LOGIN PASSWORD [HOST] [PORT]"; $CTL ftp-test-login "$@"; return; fi
+  if [[ "$sub" == "test" ]]; then shift || true; [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper ftp test LOGIN PASSWORD [HOST]"; $CTL ftp-test-login "$@"; return; fi
   local json
   json="$($CTL sync-json 2>/dev/null || echo '{}')"
   JSON="$json" python3 - <<'PYFTPCLI'
@@ -136,16 +136,13 @@ print('📁 HYPER-HOST — FTP')
 print('──────────────────')
 if not items:
     print('FTP-пользователей пока нет.'); raise SystemExit
-print(f"{'USER':<28} {'INTERNET':<24} {'LAN':<22} HOME")
+print(f"{'USER':<28} {'PUBLIC HOST':<18} {'LAN HOST':<16} HOME")
 for x in items:
-    print(f"{x.get('username',''):<28} {(str(x.get('host_public') or x.get('host',''))+':'+str(x.get('public_port',x.get('port',21)))):<24} {(str(x.get('host_lan',''))+':'+str(x.get('lan_port',21))):<22} {x.get('target_path','')}")
+    print(f"{x.get('username',''):<28} {x.get('host_public') or x.get('host',''):<18} {x.get('host_lan',''):<16} {x.get('target_path','')}")
 print('')
-print('FileZilla LAN: host=192.168.0.179 port=21 passive 40000-40100')
-print('FileZilla Internet: host=90.189.208.25 port=21 passive 40000-40100')
-print('Encryption: Plain FTP, Transfer mode=Passive')
+print('FileZilla: Protocol=FTP, Port=21, Encryption=Only use plain FTP, Transfer mode=Passive')
 print('Создать/починить логин: sudo hyper ftp user LOGIN PASSWORD или sudo hyper ftp reset LOGIN NEW_PASSWORD')
-print('Проверка LAN: sudo hyper ftp test LOGIN PASSWORD 127.0.0.1 21')
-print('Проверка: sudo hyper ftp test LOGIN PASSWORD 127.0.0.1 21')
+print('Проверка входа: sudo hyper ftp test LOGIN PASSWORD 127.0.0.1')
 PYFTPCLI
 }
 
@@ -178,7 +175,7 @@ PY
     external) [[ "${1:-}" == enable || "${1:-}" == disable ]] || err "Используй: sudo hyper db external enable|disable"; $CTL mysql-external "$1"; $CTL mysql-status-json | json_pretty ;;
     doctor) $CTL mysql-doctor-json | json_pretty ;;
     pma-fix) $CTL phpmyadmin-fix ;;
-    test) [[ -n "${1:-}" && -n "${2:-}" && -n "${3:-}" ]] || err "Используй: sudo hyper db test HOST USER PASS [DB]"; $CTL mysql-test "$@" ;;
+    test) shift || true; [[ -n "${1:-}" && -n "${2:-}" && -n "${3:-}" ]] || err "Используй: sudo hyper db test HOST USER PASS [DB]"; $CTL mysql-test "$@" ;;
     user) [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper db user USER PASS [DB] [HOST]"; $CTL create-mysql-account "$1" "$2" "${4:-%}" "${3:-}" ALL ;;
     *) err "Используй: sudo hyper db list | doctor | pma-fix | external enable|disable | user USER PASS [DB] [%|IP] | test HOST USER PASS [DB]" ;;
   esac
@@ -277,46 +274,6 @@ cmd_update() {
 }
 
 
-cmd_ip() {
-  local action="${1:-show}"
-  case "$action" in
-    fix|apply|detect|refresh)
-      $CTL ip-detect --apply >/dev/null
-      ;;
-    show|status|info|'')
-      ;;
-    *) err "Используй: sudo hyper ip [show|fix]" ;;
-  esac
-  local json
-  json="$($CTL ip-info-json 2>/dev/null || echo '{}')"
-  JSON="$json" python3 - <<'PYIP'
-import json, os
-try:
-    j=json.loads(os.environ.get('JSON','{}') or '{}')
-except Exception:
-    j={}
-print('🌐 HYPER-HOST — IP И ПОДКЛЮЧЕНИЯ')
-print('────────────────────────────────')
-print(f"Внутренний IP:  {j.get('internal_ip') or 'не определён'}")
-print(f"Внешний IP:     {j.get('external_ip') or 'не определён'}")
-print(f"Интерфейс:      {j.get('interface') or 'не определён'}")
-print(f"Шлюз:           {j.get('gateway') or 'не определён'}")
-print(f"NAT:            {'да' if j.get('nat') else 'нет/не определён'}")
-print(f"Домен панели:   {j.get('panel_domain') or 'не задан'}")
-print('')
-print('Готовые адреса:')
-print(f"  FTP из LAN:       {j.get('ftp_lan_endpoint') or '-'}")
-print(f"  FTP из интернета: {j.get('ftp_external_endpoint') or '-'}")
-print(f"  SQL локально:     {j.get('mysql_local_endpoint') or '127.0.0.1:3306'}")
-print(f"  SQL из LAN:       {j.get('mysql_lan_endpoint') or '-'}")
-print(f"  SQL из интернета: {j.get('mysql_external_endpoint') or '-'}")
-print(f"  phpMyAdmin LAN:   {j.get('phpmyadmin_url') or '-'}")
-print(f"  phpMyAdmin WAN:   {j.get('phpmyadmin_external') or '-'}")
-print('')
-print('Повторно применить фиксированные IP: sudo hyper ip fix')
-PYIP
-}
-
 cmd_network() {
   local sub="${1:-doctor}"; shift || true
   case "$sub" in
@@ -330,17 +287,14 @@ cmd_network() {
       local act="${1:-get}"; shift || true
       $CTL public-ip "$act" "$@"
       ;;
-    ip|info|detect)
-      cmd_ip show
-      ;;
-    apply|auto|ip-fix|ip-watch)
-      cmd_ip fix
+    ip-fix|ip-watch)
+      $CTL ip-autofix
       ;;
     panel-domain)
       local act="${1:-get}"; shift || true
       $CTL panel-domain "$act" "$@"
       ;;
-    *) err "Network команды: sudo hyper network ip | apply | doctor [DOMAIN] | fix DOMAIN PUBLIC_IP | public-ip set IP | panel-domain set DOMAIN" ;;
+    *) err "Network команды: sudo hyper network doctor [DOMAIN] | fix DOMAIN PUBLIC_IP | open DOMAIN PUBLIC_IP | public-ip set IP | ip-fix | panel-domain set DOMAIN" ;;
   esac
 }
 
@@ -433,8 +387,6 @@ cmd_help() {
 Основные команды:
   sudo hyper dev                     кто разработчик
   sudo hyper stats                   вся информация о сервере
-  sudo hyper ip                      реальные внутренний/внешний IP и адреса сервисов
-  sudo hyper ip fix                  переопределить IP и применить к FTP/MySQL/phpMyAdmin
   sudo hyper status                  dev + stats + bots
   sudo hyper bots                    список ботов и статус
   sudo hyper sites                   список сайтов
@@ -503,10 +455,6 @@ DNS:
   sudo hyper dns status hyper-host.pw
   sudo hyper dns guide
 
-FTP + MySQL полный ремонт:
-  sudo hyper connectivity fix
-  sudo hyper connectivity doctor
-
 Доступ с другого ПК/интернета:
   sudo hyper access guide
   sudo hyper access fix
@@ -530,23 +478,6 @@ EOF
 }
 
 
-
-
-cmd_connectivity() {
-  local sub="${1:-doctor}"; shift || true
-  case "$sub" in
-    fix|repair|apply) $CTL connectivity-fix ;;
-    doctor|status|check) $CTL connectivity-doctor-json | json_pretty ;;
-    test)
-      say "FTP — сохранённые аккаунты"
-      $CTL ftp-test-saved-json | json_pretty
-      echo
-      say "MySQL — сохранённые аккаунты"
-      $CTL mysql-test-saved-json | json_pretty
-      ;;
-    *) err "Используй: sudo hyper connectivity fix|doctor|test" ;;
-  esac
-}
 
 cmd_access() {
   local sub="${1:-guide}"; shift || true
@@ -589,11 +520,7 @@ cmd_db_user() {
   local user="${1:-}" pass="${2:-}" db="${3:-}" host="${4:-%}"
   [[ -n "$user" && -n "$pass" ]] || err "Используй: sudo hyper db user USER PASS [DB] [HOST]"
   $CTL create-mysql-account "$user" "$pass" "$host" "$db" ALL
-  local info external internal
-  info="$($CTL ip-info-json 2>/dev/null || echo '{}')"
-  external="$(JSON="$info" python3 -c "import json,os; print(json.loads(os.environ.get('JSON','{}')).get('external_ip',''))" 2>/dev/null || true)"
-  internal="$(JSON="$info" python3 -c "import json,os; print(json.loads(os.environ.get('JSON','{}')).get('internal_ip',''))" 2>/dev/null || true)"
-  say "Готово. SQL из интернета: ${external:-не определён}:3306; из LAN: ${internal:-не определён}:3306; локально: 127.0.0.1:3306."
+  say "Готово. Для внешнего бота host=${host}. В .env используй MYSQL_HOST=panel.hyper-host.pw или 192.168.0.179 если бот в локальной сети."
 }
 cmd_db_test() {
   local host="${1:-127.0.0.1}" user="${2:-}" pass="${3:-}" db="${4:-}"
@@ -608,13 +535,11 @@ case "${1:-help}" in
   bot) shift; cmd_bot "$@" ;;
   sites) shift; cmd_sites "$@" ;;
   ftp) shift; cmd_ftp "$@" ;;
-  connectivity|connect) shift; cmd_connectivity "$@" ;;
   access) shift; cmd_access "$@" ;;
   disk) shift; cmd_disk "$@" ;;
   db|dbs|databases) shift; cmd_dbs "$@" ;;
   ssl) shift; cmd_ssl "$@" ;;
   panel) shift; cmd_panel "$@" ;;
-  ip) shift; cmd_ip "$@" ;;
   network|net) shift; cmd_network "$@" ;;
   dns) shift; cmd_dns "$@" ;;
   backup|backups) shift; cmd_backup "$@" ;;
