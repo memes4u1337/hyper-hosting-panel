@@ -43,8 +43,9 @@ NGINX_BOOT_SCRIPT="${NGINX_BOOT_SCRIPT:-$BASE_DIR/bin/hyper-host-nginx-runtime}"
 NGINX_RUNTIME_UNIT="${NGINX_RUNTIME_UNIT:-/run/systemd/system/hyper-host-nginx-runtime.service}"
 NGINX_REBOOT_MARKER="HYPER-HOST-NGINX-RUNTIME"
 NGINX_RUNTIME_LOG="${NGINX_RUNTIME_LOG:-$BASE_DIR/logs/nginx-runtime-boot.log}"
-# v68: неизвестные домены больше не должны открывать панель. Для HTTP/HTTPS
-# используется отдельный нейтральный default vhost, а сайты получают свой TLS vhost.
+# v69: неизвестные домены больше не открывают панель. Старые panel-конфиги
+# с server_name _ отключаются, панель закрепляется только за точным доменом/IP,
+# а каждый сайт обслуживается из собственного public_html.
 NGINX_DEFAULT_ROOT="${NGINX_DEFAULT_ROOT:-$BASE_DIR/default-site}"
 NGINX_DEFAULT_TLS_DIR="${NGINX_DEFAULT_TLS_DIR:-$BASE_DIR/data/nginx-default-tls}"
 NGINX_DEFAULT_TLS_CERT="${NGINX_DEFAULT_TLS_CERT:-$NGINX_DEFAULT_TLS_DIR/fullchain.pem}"
@@ -402,8 +403,14 @@ nginx_reload() {
   ensure_nginx_runtime_overlay
   write_nginx_default_catchall
   nginx_repair_site_vhosts
+  if [[ -n "${PANEL_DOMAIN:-}" && "${PANEL_DOMAIN:-_}" != "_" ]] && valid_domain "$PANEL_DOMAIN"; then
+    panel_domain_conflict_cleanup "$PANEL_DOMAIN"
+  fi
+  nginx_pin_panel_to_exact_names
+  nginx_disable_legacy_panel_catchalls
   nginx_remove_other_defaults
-  nginx_repair_duplicate_panel_name
+  ln -sfn "$NGINX_AVAILABLE/hyper-host-default.conf" "$NGINX_ENABLED/00-hyper-host-default.conf"
+  ln -sfn "$NGINX_AVAILABLE/hyper-host-panel.conf" "$NGINX_ENABLED/10-hyper-host-panel.conf"
   nginx_repair_log_paths
   nginx -t >/dev/null
   systemctl reload nginx
@@ -622,6 +629,60 @@ PYVHOST
   shopt -u nullglob
 }
 
+panel_exact_server_names() {
+  local domain="${PANEL_DOMAIN:-_}"
+  if [[ -n "$domain" && "$domain" != "_" ]] && valid_domain "$domain"; then
+    printf '%s\n' "$domain"
+  else
+    # Если домен панели не настроен, панель доступна только по известным IP,
+    # но никогда не становится catch-all для чужих доменов.
+    printf '%s %s localhost\n' "$SERVER_IP" "$FIXED_PUBLIC_IP"
+  fi
+}
+
+nginx_pin_panel_to_exact_names() {
+  local conf="$NGINX_AVAILABLE/hyper-host-panel.conf" names
+  names="$(panel_exact_server_names)"
+  if [[ ! -f "$conf" ]]; then
+    write_panel_nginx_conf "${PANEL_DOMAIN:-_}"
+  fi
+  [[ -f "$conf" ]] || err "Не найден конфиг панели Nginx: $conf"
+  python3 - "$conf" "$names" <<'PYPINPANEL'
+import pathlib,re,sys
+p=pathlib.Path(sys.argv[1]); names=sys.argv[2].strip()
+text=p.read_text(encoding='utf-8',errors='ignore')
+# Панель никогда не должна быть default_server и не должна иметь server_name _.
+text=re.sub(r'(listen\s+(?:\[::\]:)?(?:80|443)(?:\s+ssl)?)[^;]*\bdefault_server\b([^;]*;)', r'\1\2', text)
+text=re.sub(r'(^\s*server_name\s+)[^;]+;', lambda m: m.group(1)+names+';', text, flags=re.M)
+p.write_text(text,encoding='utf-8')
+PYPINPANEL
+  rm -f "$NGINX_ENABLED/00-hyper-host-panel.conf" "$NGINX_ENABLED/hyper-host-panel.conf" 2>/dev/null || true
+  ln -sfn "$conf" "$NGINX_ENABLED/10-hyper-host-panel.conf"
+}
+
+nginx_disable_legacy_panel_catchalls() {
+  local path real base
+  shopt -s nullglob
+  for path in "$NGINX_ENABLED"/*; do
+    base="${path##*/}"
+    [[ "$base" == "00-hyper-host-default.conf" || "$base" == "10-hyper-host-panel.conf" ]] && continue
+    real="$(readlink -f "$path" 2>/dev/null || echo "$path")"
+    [[ -f "$real" ]] || continue
+    # Любой старый server_name _ конкурирует с единственным нейтральным
+    # 00-hyper-host-default.conf и может отправить новый домен в панель.
+    if python3 - "$real" <<'PYLEGACYPANEL'
+import pathlib,re,sys
+text=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8',errors='ignore')
+is_legacy_catch=bool(re.search(r'(^|\s)server_name\s+_[^;]*;',text,re.M))
+raise SystemExit(0 if is_legacy_catch else 1)
+PYLEGACYPANEL
+    then
+      rm -f "$path" 2>/dev/null || true
+    fi
+  done
+  shopt -u nullglob
+}
+
 nginx_remove_other_defaults() {
   local path real
   shopt -s nullglob
@@ -629,16 +690,12 @@ nginx_remove_other_defaults() {
     [[ "${path##*/}" == "00-hyper-host-default.conf" ]] && continue
     real="$(readlink -f "$path" 2>/dev/null || echo "$path")"
     [[ -f "$real" ]] || continue
-    case "${real##*/}" in
-      hyper-host-panel.conf|hyper-host-site-*.conf|hyper-host-ip-*.conf)
-        python3 - "$real" <<'PYDEFAULT'
+    python3 - "$real" <<'PYDEFAULT'
 import pathlib,re,sys
 p=pathlib.Path(sys.argv[1]); text=p.read_text(encoding='utf-8',errors='ignore')
 text=re.sub(r'(listen\s+(?:\[::\]:)?(?:80|443)(?:\s+ssl)?)[^;]*\bdefault_server\b([^;]*;)', r'\1\2', text)
 p.write_text(text,encoding='utf-8')
 PYDEFAULT
-        ;;
-    esac
   done
   shopt -u nullglob
 }
@@ -648,18 +705,19 @@ cmd_nginx_site_routing_fix() {
   ensure_acme_webroot
   write_nginx_default_catchall
   nginx_repair_site_vhosts
-  nginx_remove_other_defaults
-  if [[ -n "${PANEL_DOMAIN:-}" && "${PANEL_DOMAIN:-_}" != "_" ]]; then
-    if [[ -f "$NGINX_AVAILABLE/hyper-host-panel.conf" ]]; then
-      rm -f "$NGINX_ENABLED/00-hyper-host-panel.conf" "$NGINX_ENABLED/hyper-host-panel.conf" 2>/dev/null || true
-      ln -sfn "$NGINX_AVAILABLE/hyper-host-panel.conf" "$NGINX_ENABLED/10-hyper-host-panel.conf"
-    else
-      write_panel_nginx_conf "$PANEL_DOMAIN"
-    fi
+  if [[ -n "${PANEL_DOMAIN:-}" && "${PANEL_DOMAIN:-_}" != "_" ]] && valid_domain "$PANEL_DOMAIN"; then
+    panel_domain_conflict_cleanup "$PANEL_DOMAIN"
   fi
+  nginx_pin_panel_to_exact_names
+  nginx_disable_legacy_panel_catchalls
+  nginx_remove_other_defaults
+  # После удаления старых catch-all ещё раз гарантируем единственные ссылки.
+  ln -sfn "$NGINX_AVAILABLE/hyper-host-default.conf" "$NGINX_ENABLED/00-hyper-host-default.conf"
+  ln -sfn "$NGINX_AVAILABLE/hyper-host-panel.conf" "$NGINX_ENABLED/10-hyper-host-panel.conf"
+  nginx_repair_log_paths
   nginx -t >/dev/null
   systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1
-  log "Nginx site routing fixed: panel only on exact panel domain; sites serve their own public_html on HTTP/HTTPS"
+  log "Nginx site routing fixed: panel pinned to exact domain/IP; sites serve their own public_html"
 }
 
 write_panel_nginx_conf() {
@@ -668,9 +726,11 @@ write_panel_nginx_conf() {
   local domain="${1:-$PANEL_DOMAIN}" named_domain
   [[ -n "$domain" ]] || domain="_"
   named_domain="$domain"
-  # Когда домен панели не задан, первый и default server раньше оба имели
-  # server_name _, из-за чего nginx писал conflicting server name "_".
-  [[ "$named_domain" == "_" ]] && named_domain="hyper-host-panel.invalid"
+  # Без настроенного домена панель привязывается только к IP/localhost,
+  # но не перехватывает произвольные Host-заголовки.
+  if [[ -z "$named_domain" || "$named_domain" == "_" ]] || ! valid_domain "$named_domain"; then
+    named_domain="$SERVER_IP $FIXED_PUBLIC_IP localhost"
+  fi
   mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled "$PANEL_DIR/public/.well-known/acme-challenge"
   chown -R www-data:www-data "$PANEL_DIR/public/.well-known" 2>/dev/null || true
   chmod -R a+rX "$PANEL_DIR/public/.well-known" 2>/dev/null || true
