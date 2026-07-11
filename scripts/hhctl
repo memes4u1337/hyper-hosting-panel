@@ -658,16 +658,16 @@ PYVHOST
 }
 
 panel_exact_server_names() {
-  local domain="${PANEL_DOMAIN:-_}"
-  if [[ -n "$domain" && "$domain" != "_" ]] && valid_domain "$domain"; then
-    printf '%s\n' "$domain"
-  else
-    # Если домен панели не настроен, панель доступна только по известным IP,
-    # но никогда не становится catch-all для чужих доменов.
-    printf '%s %s localhost\n' "$SERVER_IP" "$FIXED_PUBLIC_IP"
+  # Панель всегда доступна по IP сервера и по выделенному panel-домену.
+  # Ни один пользовательский домен сайта сюда не добавляется.
+  local configured="${PANEL_DOMAIN:-}"
+  printf '%s %s localhost panel.hyper-host.pw www.panel.hyper-host.pw' "$SERVER_IP" "$FIXED_PUBLIC_IP"
+  if [[ -n "$configured" && "$configured" != "_" ]] && valid_domain "$configured" \
+      && [[ "$configured" != "panel.hyper-host.pw" && "$configured" != "www.panel.hyper-host.pw" ]]; then
+    printf ' %s' "$configured"
   fi
+  printf '\n'
 }
-
 nginx_pin_panel_to_exact_names() {
   local conf="$NGINX_AVAILABLE/hyper-host-panel.conf" names
   names="$(panel_exact_server_names)"
@@ -728,71 +728,231 @@ PYDEFAULT
   shopt -u nullglob
 }
 
-cmd_nginx_site_routing_fix() {
-  ensure_nginx_runtime_overlay
-  ensure_acme_webroot
-  write_nginx_default_catchall
-  nginx_repair_site_vhosts
-  if [[ -n "${PANEL_DOMAIN:-}" && "${PANEL_DOMAIN:-_}" != "_" ]] && valid_domain "$PANEL_DOMAIN"; then
-    panel_domain_conflict_cleanup "$PANEL_DOMAIN"
-  fi
-  nginx_pin_panel_to_exact_names
-  nginx_disable_legacy_panel_catchalls
-  nginx_remove_other_defaults
-  # После удаления старых catch-all ещё раз гарантируем единственные ссылки.
-  ln -sfn "$NGINX_AVAILABLE/hyper-host-default.conf" "$NGINX_ENABLED/00-hyper-host-default.conf"
-  ln -sfn "$NGINX_AVAILABLE/hyper-host-panel.conf" "$NGINX_ENABLED/10-hyper-host-panel.conf"
-  nginx_repair_log_paths
-  nginx -t >/dev/null
-  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1
-  log "Nginx site routing fixed: panel pinned to exact domain/IP; sites serve their own public_html"
+nginx_reserved_panel_name() {
+  local name="$1" configured="${PANEL_DOMAIN:-}"
+  [[ "$name" == "$SERVER_IP" || "$name" == "$FIXED_PUBLIC_IP" || "$name" == "localhost" \
+     || "$name" == "panel.hyper-host.pw" || "$name" == "www.panel.hyper-host.pw" \
+     || ( -n "$configured" && "$configured" != "_" && "$name" == "$configured" ) ]]
 }
 
-write_panel_nginx_conf() {
-  ensure_nginx_runtime_overlay
-  write_nginx_default_catchall
-  local domain="${1:-$PANEL_DOMAIN}" named_domain
-  [[ -n "$domain" ]] || domain="_"
-  named_domain="$domain"
-  # Без настроенного домена панель привязывается только к IP/localhost,
-  # но не перехватывает произвольные Host-заголовки.
-  if [[ -z "$named_domain" || "$named_domain" == "_" ]] || ! valid_domain "$named_domain"; then
-    named_domain="$SERVER_IP $FIXED_PUBLIC_IP localhost"
+nginx_existing_site_aliases() {
+  local domain="$1" conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf" name
+  printf '%s\n' "$domain"
+  [[ -f "$conf" ]] || return 0
+  while IFS= read -r name; do
+    [[ -n "$name" && "$name" != "_" ]] || continue
+    valid_domain "$name" || continue
+    nginx_reserved_panel_name "$name" && continue
+    printf '%s\n' "$name"
+  done < <(awk '/^[[:space:]]*server_name[[:space:]]+/ {for(i=2;i<=NF;i++){gsub(";", "", $i); print $i}}' "$conf" 2>/dev/null)
+}
+
+nginx_existing_php_sock() {
+  local domain="$1" conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf" sock
+  sock="$(sed -nE 's/^[[:space:]]*fastcgi_pass[[:space:]]+unix:([^;]+);/\1/p' "$conf" 2>/dev/null | head -n1 || true)"
+  [[ -n "$sock" && -S "$sock" ]] || sock="$(php_sock_for_version '')"
+  printf '%s\n' "$sock"
+}
+
+nginx_write_site_vhost_exact() {
+  local domain="$1" aliases="${2:-}" phpv="${3:-}" root conf enabled sock names item
+  valid_domain "$domain" || err "Invalid domain: $domain"
+  nginx_reserved_panel_name "$domain" && err "Домен закреплён за панелью: $domain"
+  root="$SITES_DIR/$domain/public_html"
+  conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
+  enabled="$NGINX_ENABLED/hyper-host-site-$domain.conf"
+  prepare_site_runtime_dirs "$domain"
+  [[ -f "$root/index.html" || -f "$root/index.php" ]] || php_index_template_file "$domain работает" "$root/index.html"
+  chown -R www-data:www-data "$SITES_DIR/$domain" 2>/dev/null || true
+  fix_web_permissions "$SITES_DIR/$domain"
+  ensure_acme_webroot
+  ensure_nginx_default_tls
+  if [[ -n "$phpv" ]]; then sock="$(php_sock_for_version "$phpv")"; else sock="$(nginx_existing_php_sock "$domain")"; fi
+  names="$domain"
+  if [[ -n "$aliases" ]]; then
+    IFS=',' read -ra _aliases <<< "$aliases"
+    for item in "${_aliases[@]}"; do
+      item="$(echo "$item" | xargs)"; [[ -n "$item" ]] || continue
+      valid_domain "$item" || err "Invalid alias: $item"
+      nginx_reserved_panel_name "$item" && continue
+      [[ " $names " == *" $item "* ]] || names="$names $item"
+    done
+  else
+    while IFS= read -r item; do
+      [[ -n "$item" ]] || continue
+      [[ " $names " == *" $item "* ]] || names="$names $item"
+    done < <(nginx_existing_site_aliases "$domain")
   fi
-  mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled "$PANEL_DIR/public/.well-known/acme-challenge"
-  chown -R www-data:www-data "$PANEL_DIR/public/.well-known" 2>/dev/null || true
-  chmod -R a+rX "$PANEL_DIR/public/.well-known" 2>/dev/null || true
-  {
-  cat > /etc/nginx/sites-available/hyper-host-panel.conf <<EOPANELNGINX
+  cat > "$conf" <<EOSITENGINX
 server {
     listen 80;
     listen [::]:80;
-    server_name ${named_domain};
-
-    root ${PANEL_DIR}/public;
-    index index.php index.html;
+    server_name ${names};
+    root ${root};
+    index index.html index.htm index.php;
     client_max_body_size 1024M;
-
-    access_log /var/log/nginx/hyper-host-panel.access.log;
-    error_log /var/log/nginx/hyper-host-panel.error.log;
-
-    # HYPER-HOST PANEL ACME CHALLENGE
+    access_log ${SITES_DIR}/${domain}/logs/access.log;
+    error_log ${SITES_DIR}/${domain}/logs/error.log;
     location ^~ /.well-known/acme-challenge/ {
-        root ${PANEL_DIR}/public;
+        root ${ACME_WEBROOT};
         default_type "text/plain";
         try_files \$uri =404;
         allow all;
+        access_log off;
+        log_not_found off;
     }
-
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_read_timeout 600;
+        fastcgi_send_timeout 600;
+        fastcgi_connect_timeout 60;
+        fastcgi_pass unix:${sock};
     }
+    location ~ /\. { deny all; }
+}
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name ${names};
+    ssl_certificate ${NGINX_DEFAULT_TLS_CERT};
+    ssl_certificate_key ${NGINX_DEFAULT_TLS_KEY};
+    root ${root};
+    index index.html index.htm index.php;
+    client_max_body_size 1024M;
+    access_log ${SITES_DIR}/${domain}/logs/ssl-access.log;
+    error_log ${SITES_DIR}/${domain}/logs/ssl-error.log;
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_read_timeout 600;
+        fastcgi_send_timeout 600;
+        fastcgi_connect_timeout 60;
+        fastcgi_pass unix:${sock};
+    }
+    location ~ /\. { deny all; }
+}
+EOSITENGINX
+  ln -sfn "$conf" "$enabled"
+}
 
+nginx_rebuild_all_sites_from_disk() {
+  local dir domain aliases
+  mkdir -p "$SITES_DIR" "$NGINX_AVAILABLE" "$NGINX_ENABLED"
+  shopt -s nullglob
+  for dir in "$SITES_DIR"/*; do
+    [[ -d "$dir" ]] || continue
+    domain="${dir##*/}"
+    valid_domain "$domain" || continue
+    nginx_reserved_panel_name "$domain" && continue
+    aliases="$(nginx_existing_site_aliases "$domain" | tail -n +2 | paste -sd, - || true)"
+    nginx_write_site_vhost_exact "$domain" "$aliases" ''
+  done
+  for item in "$NGINX_ENABLED"/hyper-host-site-*.conf; do
+    [[ -e "$item" || -L "$item" ]] || continue
+    domain="${item##*/hyper-host-site-}"; domain="${domain%.conf}"
+    [[ -d "$SITES_DIR/$domain" ]] || rm -f "$item"
+  done
+  shopt -u nullglob
+}
+
+nginx_disable_old_panel_ip_configs() {
+  rm -f "$NGINX_ENABLED"/hyper-host-ip-*.conf 2>/dev/null || true
+  rm -f "$NGINX_ENABLED"/00-hyper-host-panel.conf "$NGINX_ENABLED"/hyper-host-panel.conf 2>/dev/null || true
+}
+
+nginx_restart_guaranteed() {
+  nginx -t >/dev/null || return 1
+  if ! systemctl restart nginx >/dev/null 2>&1; then
+    nginx -s reload >/dev/null 2>&1 || systemctl reload nginx >/dev/null 2>&1 || return 1
+  fi
+  sleep 1
+  systemctl is-active --quiet nginx
+}
+
+nginx_probe_host_root() {
+  local host="$1" root="$2" token probe body i
+  token="HYPER-HOST-V71-${host}-$(date +%s)-$$-$RANDOM"
+  probe="$root/.hyper-host-v71-probe-$$-$RANDOM.txt"
+  printf '%s' "$token" > "$probe" || return 1
+  chown www-data:www-data "$probe" 2>/dev/null || true
+  chmod 0644 "$probe" 2>/dev/null || true
+  for i in $(seq 1 20); do
+    body="$(curl --noproxy '*' -fsS --max-time 4 -H "Host: $host" "http://$SERVER_IP/${probe##*/}" 2>/dev/null || true)"
+    if [[ "$body" == "$token" ]]; then rm -f "$probe"; return 0; fi
+    sleep 0.25
+  done
+  rm -f "$probe"
+  return 1
+}
+
+cmd_nginx_full_recover() {
+  ensure_nginx_runtime_overlay
+  ensure_acme_webroot
+  ensure_nginx_default_tls
+  write_nginx_default_catchall
+  write_panel_nginx_conf
+  nginx_disable_old_panel_ip_configs
+  nginx_rebuild_all_sites_from_disk
+  nginx_disable_legacy_panel_catchalls
+  nginx_remove_other_defaults
+  ln -sfn "$NGINX_AVAILABLE/hyper-host-default.conf" "$NGINX_ENABLED/00-hyper-host-default.conf"
+  ln -sfn "$NGINX_AVAILABLE/hyper-host-panel.conf" "$NGINX_ENABLED/10-hyper-host-panel.conf"
+  nginx_repair_log_paths
+  nginx_restart_guaranteed || err 'Nginx не перезапустился после полного восстановления vhost'
+  nginx_probe_host_root "$SERVER_IP" "$PANEL_DIR/public" || err 'Панель не открывается по LAN IP после восстановления'
+  local dir domain
+  shopt -s nullglob
+  for dir in "$SITES_DIR"/*; do
+    [[ -d "$dir/public_html" ]] || continue
+    domain="${dir##*/}"
+    valid_domain "$domain" || continue
+    nginx_reserved_panel_name "$domain" && continue
+    nginx_probe_host_root "$domain" "$dir/public_html" || err "Домен $domain не попадает в свой public_html"
+  done
+  shopt -u nullglob
+  log 'Nginx полностью восстановлен: панель по IP/panel-домену, каждый сайт из собственного public_html'
+}
+
+cmd_nginx_site_routing_fix() {
+  cmd_nginx_full_recover
+}
+write_panel_nginx_conf() {
+  ensure_nginx_runtime_overlay
+  ensure_nginx_default_tls
+  ensure_acme_webroot
+  local names conf
+  names="$(panel_exact_server_names)"
+  conf="$NGINX_AVAILABLE/hyper-host-panel.conf"
+  if [[ -z "${PHP_FPM_SOCK:-}" || ! -S "${PHP_FPM_SOCK:-/nonexistent}" ]]; then
+    PHP_FPM_SOCK="$(php_sock_for_version '')"
+  fi
+  mkdir -p "$NGINX_AVAILABLE" "$NGINX_ENABLED" "$PANEL_DIR/public/.well-known/acme-challenge" /var/log/nginx
+  chown -R www-data:www-data "$PANEL_DIR/public/.well-known" 2>/dev/null || true
+  chmod -R a+rX "$PANEL_DIR/public/.well-known" 2>/dev/null || true
+  cat > "$conf" <<EOPANELNGINX
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${names};
+    root ${PANEL_DIR}/public;
+    index index.php index.html;
+    client_max_body_size 1024M;
+    access_log /var/log/nginx/hyper-host-panel.access.log;
+    error_log /var/log/nginx/hyper-host-panel.error.log;
+    location ^~ /.well-known/acme-challenge/ {
+        root ${ACME_WEBROOT};
+        default_type "text/plain";
+        try_files \$uri =404;
+        allow all;
+        access_log off;
+        log_not_found off;
+    }
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
     location /phpmyadmin {
         alias /usr/share/phpmyadmin/;
         index index.php index.html;
     }
-
     location ~ ^/phpmyadmin/(.+\.php)$ {
         alias /usr/share/phpmyadmin/\$1;
         include fastcgi_params;
@@ -802,11 +962,7 @@ server {
         fastcgi_connect_timeout 60;
         fastcgi_pass unix:${PHP_FPM_SOCK};
     }
-
-    location ~ ^/phpmyadmin/(.+)$ {
-        alias /usr/share/phpmyadmin/\$1;
-    }
-
+    location ~ ^/phpmyadmin/(.+)$ { alias /usr/share/phpmyadmin/\$1; }
     location ~ \.php$ {
         include snippets/fastcgi-php.conf;
         fastcgi_read_timeout 600;
@@ -814,20 +970,47 @@ server {
         fastcgi_connect_timeout 60;
         fastcgi_pass unix:${PHP_FPM_SOCK};
     }
-
-    location ~ /\. {
-        deny all;
+    location ~ /\. { deny all; }
+}
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name ${names};
+    ssl_certificate ${NGINX_DEFAULT_TLS_CERT};
+    ssl_certificate_key ${NGINX_DEFAULT_TLS_KEY};
+    root ${PANEL_DIR}/public;
+    index index.php index.html;
+    client_max_body_size 1024M;
+    access_log /var/log/nginx/hyper-host-panel.ssl.access.log;
+    error_log /var/log/nginx/hyper-host-panel.ssl.error.log;
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+    location /phpmyadmin {
+        alias /usr/share/phpmyadmin/;
+        index index.php index.html;
     }
+    location ~ ^/phpmyadmin/(.+\.php)$ {
+        alias /usr/share/phpmyadmin/\$1;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /usr/share/phpmyadmin/\$1;
+        fastcgi_read_timeout 600;
+        fastcgi_send_timeout 600;
+        fastcgi_connect_timeout 60;
+        fastcgi_pass unix:${PHP_FPM_SOCK};
+    }
+    location ~ ^/phpmyadmin/(.+)$ { alias /usr/share/phpmyadmin/\$1; }
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_read_timeout 600;
+        fastcgi_send_timeout 600;
+        fastcgi_connect_timeout 60;
+        fastcgi_pass unix:${PHP_FPM_SOCK};
+    }
+    location ~ /\. { deny all; }
 }
-
 EOPANELNGINX
-  } 2>/dev/null || warn "Не удалось записать /etc/nginx/sites-available/hyper-host-panel.conf (read-only /etc?) — конфиг nginx для домена панели не обновлён."
-  # Панель открывается только по точному PANEL_DOMAIN. Default vhost теперь
-  # отдельный и никогда не показывает интерфейс панели для нового домена.
-  rm -f /etc/nginx/sites-enabled/00-hyper-host-panel.conf /etc/nginx/sites-enabled/hyper-host-panel.conf 2>/dev/null || true
-  ln -sf /etc/nginx/sites-available/hyper-host-panel.conf /etc/nginx/sites-enabled/10-hyper-host-panel.conf 2>/dev/null || true
+  rm -f "$NGINX_ENABLED/00-hyper-host-panel.conf" "$NGINX_ENABLED/hyper-host-panel.conf" 2>/dev/null || true
+  ln -sfn "$conf" "$NGINX_ENABLED/10-hyper-host-panel.conf"
 }
-
 panel_domain_conflict_cleanup() {
   local domain="$1" path real target
   # Disable the exact HYPER-HOST site config for the panel domain.
@@ -1033,71 +1216,18 @@ cmd_delete_folder() { local name="${1:-}"; [[ -n "$name" ]] || err "Folder name 
 cmd_add_site() {
   ensure_dirs
   ensure_nginx_runtime_overlay
-  local domain="${1:-}" aliases="${2:-}" phpv="${3:-}"
-  [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain: $domain"
-  if [[ -n "$PANEL_DOMAIN" && "$PANEL_DOMAIN" != "_" && "$domain" == "$PANEL_DOMAIN" ]]; then
-    err "Этот домен закреплён за панелью: $domain. Используй другой домен для сайта или сначала смени panel-domain."
-  fi
-  local root="$SITES_DIR/$domain/public_html" sock conf enabled
-  sock="$(php_sock_for_version "$phpv")"
-  conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
-  enabled="$NGINX_ENABLED/hyper-host-site-$domain.conf"
-
-  # ВАЖНО: сначала создаём public_html + logs + сами log-файлы,
-  # и только потом публикуем конфиг. Иначе nginx -t падает на open(access.log).
-  prepare_site_runtime_dirs "$domain"
-  [[ -f "$root/index.php" || -f "$root/index.html" ]] || php_index_template_file "$domain работает" "$root/index.html"
-  chown -R www-data:www-data "$SITES_DIR/$domain" 2>/dev/null || true
-  fix_web_permissions "$SITES_DIR/$domain"
-  prepare_site_runtime_dirs "$domain"
-  ensure_acme_webroot
-  ensure_nginx_default_tls
-  local server_names="$domain"
-  if [[ -n "$aliases" ]]; then
-    IFS=',' read -ra arr <<< "$aliases"
-    for a in "${arr[@]}"; do a="$(echo "$a" | xargs)"; [[ -z "$a" ]] && continue; valid_domain "$a" || err "Invalid alias: $a"; server_names="$server_names $a"; done
-  fi
-  {
-  cat > "$conf" <<EONGINX
-server {
-    listen 80;
-    listen [::]:80;
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    server_name ${server_names};
-    ssl_certificate ${NGINX_DEFAULT_TLS_CERT};
-    ssl_certificate_key ${NGINX_DEFAULT_TLS_KEY};
-    root ${root};
-    index index.html index.htm index.php;
-    client_max_body_size 1024M;
-    access_log ${SITES_DIR}/${domain}/logs/access.log;
-    error_log ${SITES_DIR}/${domain}/logs/error.log;
-    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
-    # HYPER-HOST ACME CHALLENGE
-    location ^~ /.well-known/acme-challenge/ {
-        root ${ACME_WEBROOT};
-        default_type "text/plain";
-        try_files \$uri =404;
-        allow all;
-        access_log off;
-        log_not_found off;
-    }
-    location ~ \.php$ { include snippets/fastcgi-php.conf; fastcgi_read_timeout 600; fastcgi_send_timeout 600; fastcgi_connect_timeout 60; fastcgi_pass unix:${sock}; }
-    location ~ /\. { deny all; }
-}
-EONGINX
-  } 2>/dev/null || err "Не удалось записать конфиг nginx для $domain (read-only /etc/nginx?) — сайт не создан."
-  ln -sf "$conf" "$enabled"
-  if ! nginx_reload; then
-    rm -f "$enabled" "$conf" 2>/dev/null || true
-    nginx_reload >/dev/null 2>&1 || true
-    err "Конфиг сайта $domain не прошёл nginx -t; конфиг откатан, файлы сайта сохранены"
-  fi
-  if ! nginx_verify_site_vhost "$domain" "$root"; then
-    rm -f "$enabled" "$conf" 2>/dev/null || true
-    nginx_reload >/dev/null 2>&1 || true
-    err "Nginx загрузил конфиг, но Host $domain не попал в $root; конфиг откатан, файлы сайта сохранены"
-  fi
+  local domain="${1:-}" aliases="${2:-}" phpv="${3:-}" root
+  [[ -n "$domain" ]] || err "Domain required"
+  valid_domain "$domain" || err "Invalid domain: $domain"
+  nginx_reserved_panel_name "$domain" && err "Этот домен закреплён за панелью: $domain"
+  root="$SITES_DIR/$domain/public_html"
+  nginx_write_site_vhost_exact "$domain" "$aliases" "$phpv"
+  nginx_restart_guaranteed || {
+    rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" 2>/dev/null || true
+    nginx_restart_guaranteed >/dev/null 2>&1 || true
+    err "Конфиг сайта $domain не прошёл проверку; файлы сайта сохранены"
+  }
+  nginx_probe_host_root "$domain" "$root" || err "Сайт создан, но Host $domain не попал в $root"
   log "Site created and verified: $domain -> $root"
 }
 cmd_delete_site() { local domain="${1:-}" mode="${2:---keep-files}"; [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain"; ensure_nginx_runtime_overlay; rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"; nginx_reload; [[ "$mode" == "--delete-files" ]] && rm -rf "$SITES_DIR/$domain"; log "Site deleted: $domain / $mode"; }
@@ -4596,6 +4726,7 @@ case "${1:-}" in
   connectivity-fix) shift; cmd_connectivity_fix ;;
   nginx-runtime-fix) shift; cmd_nginx_runtime_fix ;;
   nginx-site-routing-fix) shift; cmd_nginx_site_routing_fix ;;
+  nginx-full-recover) shift; cmd_nginx_full_recover ;;
   connectivity-doctor-json) shift; cmd_connectivity_doctor_json ;;
   mysql-repair-accounts) shift; cmd_mysql_repair_accounts ;;
   backup-run) shift; cmd_backup_run "$@" ;;
@@ -4637,6 +4768,7 @@ Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
        hyper-host-ctl network-fix [DOMAIN] [PUBLIC_IP]
        hyper-host-ctl nginx-runtime-fix
        hyper-host-ctl nginx-site-routing-fix
+       hyper-host-ctl nginx-full-recover
        hyper-host-ctl dns-wizard DOMAIN [PUBLIC_IP] [panel]
        hyper-host-ctl dns-status-json DOMAIN
        hyper-host-ctl panel-domain set panel.example.com
