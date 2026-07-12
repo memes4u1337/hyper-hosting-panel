@@ -1,17 +1,19 @@
-# HYPER-HOST v80
+# HYPER-HOST v81
 
-Патч восстанавливает отображение файлов на всех существующих сайтах и aliases.
-
-Он не меняет FTP, SQL, ботов, Deploy Manager, содержимое сайтов и пароль admin.
-
-Запуск:
+Загрузите содержимое архива в корень репозитория и выполните:
 
 ```bash
-sudo bash apply-v80-all-sites-routing-final.sh
+cd /tmp && sudo rm -rf hyper-host-update && git clone --depth 1 --branch main https://github.com/memes4u1337/hyper-hosting-panel.git hyper-host-update && cd hyper-host-update && sudo bash apply-v81-exact-host-routing.sh
 ```
 
-После установки смотри:
+Отчёт:
 
 ```bash
-sudo cat /root/hyper-host-v80-all-sites-routing-report.txt
+sudo cat /root/hyper-host-v81-exact-host-routing-report.txt
+```
+
+Точная карта доменов:
+
+```bash
+sudo cat /opt/hyper-host/data/site-routing-exact.tsv
 ```

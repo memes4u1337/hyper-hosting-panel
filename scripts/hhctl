@@ -911,6 +911,146 @@ EOVHOSTSSL
   fix_web_permissions "$SITES_DIR/$domain"
 }
 
+# v81: writes every hostname as its own exact server block in one managed file.
+# This avoids alias loss and cross-site routing: one Host -> one public_html.
+site_write_exact_managed_config() {
+  local plan_file="$1"
+  local managed_available="$NGINX_AVAILABLE/20-hyper-host-sites-managed.conf"
+  local managed_enabled="$NGINX_ENABLED/20-hyper-host-sites-managed.conf"
+  local tmp domain aliases phpv root sock hosts host pair cert key site_count=0 host_count=0
+  local map_file="$BASE_DIR/data/site-routing-exact.tsv"
+  declare -A seen_hosts=()
+
+  [[ -s "$plan_file" ]] || err "Routing plan is empty: $plan_file"
+  mkdir -p "$NGINX_AVAILABLE" "$NGINX_ENABLED" "$BASE_DIR/data" /opt/hyper-host/acme-webroot/.well-known/acme-challenge
+  tmp="$(mktemp "$NGINX_AVAILABLE/.20-hyper-host-sites-managed.XXXXXX")"
+  : > "$tmp"
+  : > "$map_file"
+
+  while IFS='|' read -r domain aliases phpv; do
+    [[ -n "$domain" ]] || continue
+    valid_domain "$domain" || err "Invalid domain in routing plan: $domain"
+    root="$SITES_DIR/$domain/public_html"
+    [[ -d "$root" ]] || err "Missing public_html for $domain: $root"
+    mkdir -p "$SITES_DIR/$domain/logs"
+    touch "$SITES_DIR/$domain/logs/access.log" "$SITES_DIR/$domain/logs/error.log" \
+          "$SITES_DIR/$domain/logs/ssl-access.log" "$SITES_DIR/$domain/logs/ssl-error.log"
+    sock="$(php_sock_for_version "$phpv")"
+    [[ -S "$sock" ]] || sock="$(site_existing_php_socket "$domain")"
+
+    hosts="$domain"
+    [[ -n "$aliases" ]] && hosts+=" ${aliases//,/ }"
+    site_count=$((site_count+1))
+
+    for host in $hosts; do
+      host="$(printf '%s' "$host" | xargs)"
+      [[ -n "$host" ]] || continue
+      valid_domain "$host" || err "Invalid hostname in routing plan: $host"
+      [[ -n "${PANEL_DOMAIN:-}" && "$host" == "$PANEL_DOMAIN" ]] && continue
+      [[ -z "${seen_hosts[$host]:-}" ]] || err "Duplicate hostname in exact routing plan: $host"
+      seen_hosts["$host"]="$domain"
+      host_count=$((host_count+1))
+      printf '%s|%s|%s\n' "$host" "$domain" "$root" >> "$map_file"
+
+      cat >> "$tmp" <<EOV81HTTP
+# HYPER-HOST v81 exact route: $host -> $root
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $host;
+    root $root;
+    index index.html index.htm index.php;
+    client_max_body_size 1024M;
+    access_log $SITES_DIR/$domain/logs/access.log;
+    error_log $SITES_DIR/$domain/logs/error.log;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /opt/hyper-host/acme-webroot;
+        default_type text/plain;
+        try_files \$uri =404;
+        allow all;
+    }
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_read_timeout 600;
+        fastcgi_send_timeout 600;
+        fastcgi_connect_timeout 60;
+        fastcgi_pass unix:$sock;
+    }
+
+    location ~ /\. {
+        deny all;
+    }
+}
+
+EOV81HTTP
+
+      pair="$(site_find_certificate "$host" 2>/dev/null || true)"
+      if [[ -n "$pair" ]]; then
+        cert="${pair%%|*}"
+        key="${pair#*|}"
+        cat >> "$tmp" <<EOV81HTTPS
+# HYPER-HOST v81 exact TLS route: $host -> $root
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $host;
+    root $root;
+    index index.html index.htm index.php;
+    client_max_body_size 1024M;
+    access_log $SITES_DIR/$domain/logs/ssl-access.log;
+    error_log $SITES_DIR/$domain/logs/ssl-error.log;
+
+    ssl_certificate $cert;
+    ssl_certificate_key $key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /opt/hyper-host/acme-webroot;
+        default_type text/plain;
+        try_files \$uri =404;
+        allow all;
+    }
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_read_timeout 600;
+        fastcgi_send_timeout 600;
+        fastcgi_connect_timeout 60;
+        fastcgi_pass unix:$sock;
+    }
+
+    location ~ /\. {
+        deny all;
+    }
+}
+
+EOV81HTTPS
+      fi
+    done
+  done < "$plan_file"
+
+  (( site_count > 0 )) || { rm -f "$tmp"; err "No sites found for exact routing"; }
+  (( host_count > 0 )) || { rm -f "$tmp"; err "No hostnames found for exact routing"; }
+
+  # Disable only old HYPER-HOST generated site links. Panel/default/custom configs remain untouched.
+  site_disable_all_generated_links
+  rm -f "$managed_enabled"
+  mv -f "$tmp" "$managed_available"
+  ln -sfn "$managed_available" "$managed_enabled"
+  chmod 0644 "$managed_available" "$map_file"
+  log "Exact host routing generated: sites=$site_count hosts=$host_count"
+}
+
 cmd_site_repair() {
   ensure_dirs
   local domain="${1:-}" requested_aliases="${2-__AUTO__}" requested_php="${3-__AUTO__}" row aliases="" phpv=""
@@ -925,34 +1065,37 @@ cmd_site_repair() {
   [[ "$requested_aliases" == "__AUTO__" ]] || aliases="$requested_aliases"
   [[ "$requested_php" == "__AUTO__" ]] || phpv="$requested_php"
 
+  # First preserve requested metadata in the old per-site config, then rebuild one exact map for all hosts.
   write_site_nginx_vhost "$domain" "$aliases" "$phpv"
-  nginx -t >/dev/null || { nginx -t; err "Nginx config failed for $domain"; }
-  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
-  log "Site vhost repaired: $domain -> $SITES_DIR/$domain/public_html"
+  cmd_sites_rebuild
+  log "Site vhost repaired with exact routing: $domain -> $SITES_DIR/$domain/public_html"
 }
 
 cmd_sites_rebuild() {
   ensure_dirs
-  local plan dir domain aliases phpv count=0
+  local plan count=0 host_count=0 domain aliases phpv
   plan="$(mktemp /tmp/hyper-host-site-plan.XXXXXX)"
   site_routing_plan_tsv > "$plan"
-
-  # Сначала отключаем только сгенерированные site-vhost ссылки. Панель/default не трогаются.
-  site_disable_all_generated_links
+  [[ -s "$plan" ]] || { rm -f "$plan"; err "No sites found for routing rebuild"; }
 
   while IFS='|' read -r domain aliases phpv; do
     [[ -n "$domain" ]] || continue
-    write_site_nginx_vhost "$domain" "$aliases" "$phpv"
     count=$((count+1))
+    host_count=$((host_count+1))
+    if [[ -n "$aliases" ]]; then
+      IFS=',' read -ra _v81_aliases <<< "$aliases"
+      host_count=$((host_count+${#_v81_aliases[@]}))
+    fi
   done < "$plan"
 
+  site_write_exact_managed_config "$plan"
   site_sync_db_from_plan "$plan"
   cp -f "$plan" "$BASE_DIR/data/site-routing-plan.txt" 2>/dev/null || true
   rm -f "$plan"
 
-  nginx -t >/dev/null || { nginx -t; err "Nginx config failed while rebuilding sites"; }
+  nginx -t >/dev/null || { nginx -t; err "Nginx config failed while rebuilding exact site routes"; }
   systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
-  log "Site vhosts rebuilt without alias conflicts: $count"
+  log "Site vhosts rebuilt with exact Host routing: sites=$count hosts=$host_count"
 }
 
 cmd_add_site() {
@@ -966,10 +1109,10 @@ cmd_add_site() {
   local root="$SITES_DIR/$domain/public_html"
   mkdir -p "$root" "$SITES_DIR/$domain/logs"
   [[ -f "$root/index.html" || -f "$root/index.htm" || -f "$root/index.php" ]] || php_index_template_file "$domain работает" "$root/index.php"
+  # Keep the requested aliases/php in a temporary per-site config so the deterministic planner can read them.
   write_site_nginx_vhost "$domain" "$aliases" "$phpv"
-  nginx -t >/dev/null || { nginx -t; err "Nginx config failed for $domain"; }
-  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
-  log "Site created: $domain -> $root"
+  cmd_sites_rebuild
+  log "Site created with exact routing: $domain -> $root"
 }
 cmd_delete_site() { local domain="${1:-}" mode="${2:---keep-files}"; [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain"; rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"; nginx_reload; [[ "$mode" == "--delete-files" ]] && rm -rf "$SITES_DIR/$domain"; log "Site deleted: $domain / $mode"; }
 is_private_ipv4() {
