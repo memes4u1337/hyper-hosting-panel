@@ -572,547 +572,50 @@ cmd_create_folder() {
 }
 cmd_delete_folder() { local name="${1:-}"; [[ -n "$name" ]] || err "Folder name required"; valid_folder "$name" || err "Invalid folder name"; rm -rf "$SITES_DIR/$name"; log "Folder deleted: $name"; }
 
-site_existing_server_names() {
-  local domain="$1" conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
-  if [[ -f "$conf" ]]; then
-    awk '/^[[:space:]]*server_name[[:space:]]+/ {for(i=2;i<=NF;i++){gsub(";", "", $i); if($i!="_") print $i}}' "$conf" 2>/dev/null | sort -u | tr '\n' ' '
-  else
-    printf '%s' "$domain"
-  fi
-}
-
-site_existing_php_socket() {
-  local domain="$1" conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf" sock=""
-  if [[ -f "$conf" ]]; then
-    sock="$(sed -nE 's#.*fastcgi_pass[[:space:]]+unix:([^;]+);.*#\1#p' "$conf" | head -n1)"
-  fi
-  [[ -n "$sock" && -S "$sock" ]] || sock="${PHP_FPM_SOCK:-}"
-  if [[ -z "$sock" || ! -S "$sock" ]]; then
-    sock="$(find /run/php -maxdepth 1 -type s -name 'php*-fpm.sock' 2>/dev/null | sort -V | tail -n1 || true)"
-  fi
-  [[ -n "$sock" ]] || sock="/run/php/php8.2-fpm.sock"
-  printf '%s' "$sock"
-}
-
-# v80: строит единый детерминированный план маршрутизации всех сайтов.
-# Главный принцип: папка /sites/<domain>/public_html всегда владеет своим доменом.
-# Ни один alias не может перехватить домен, для которого существует отдельная папка.
-site_routing_plan_tsv() {
-  python3 - "$SITES_DIR" "$BASE_DIR/data/hyperhost.sqlite" "$NGINX_AVAILABLE" "${PANEL_DOMAIN:-_}" "${SERVER_IP:-}" "${PUBLIC_IP:-}" <<'PYROUTEPLAN'
-from __future__ import annotations
-import os,re,sqlite3,sys
-from pathlib import Path
-
-sites_dir=Path(sys.argv[1])
-db_path=Path(sys.argv[2])
-nginx_available=Path(sys.argv[3])
-panel=(sys.argv[4] or '').strip().lower()
-server_ip=(sys.argv[5] or '').strip().lower()
-public_ip=(sys.argv[6] or '').strip().lower()
-valid=re.compile(r'^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$',re.I)
-
-canonical=sorted({p.name.lower() for p in sites_dir.iterdir() if p.is_dir() and (p/'public_html').is_dir() and valid.match(p.name) and p.name.lower()!=panel}) if sites_dir.exists() else []
-canon_set=set(canonical)
-db={}
-if db_path.is_file():
-    try:
-        con=sqlite3.connect(str(db_path))
-        con.row_factory=sqlite3.Row
-        for row in con.execute("SELECT domain, aliases, php_version FROM sites"):
-            d=str(row['domain'] or '').strip().lower()
-            if d:
-                db[d]={'aliases':str(row['aliases'] or ''),'php':str(row['php_version'] or '')}
-        con.close()
-    except Exception:
-        pass
-
-def parse_conf(domain:str):
-    conf=nginx_available/f'hyper-host-site-{domain}.conf'
-    aliases=[]; php=''
-    if conf.is_file():
-        try: text=conf.read_text(encoding='utf-8',errors='ignore')
-        except Exception: text=''
-        m=re.search(r'\bserver_name\s+([^;]+);',text,re.I)
-        if m:
-            aliases=[x.strip().lower() for x in m.group(1).split() if x.strip() and x.strip().lower()!=domain]
-        m=re.search(r'fastcgi_pass\s+unix:/run/php/php([0-9]+\.[0-9]+)-fpm\.sock',text,re.I)
-        if m: php=m.group(1)
-    return aliases,php
-
-def split_aliases(raw):
-    if isinstance(raw,(list,tuple)): parts=list(raw)
-    else: parts=re.split(r'[\s,;]+',str(raw or ''))
-    out=[]
-    for x in parts:
-        x=x.strip().lower().rstrip('.')
-        if x and x not in out: out.append(x)
-    return out
-
-candidates={}; php_versions={}
-for d in canonical:
-    conf_raw,conf_php=parse_conf(d)
-    if d in db:
-        db_raw=split_aliases(db[d]['aliases'])
-        # Если aliases в БД не заполнены, восстанавливаем безопасные имена из старого vhost.
-        # Отдельные папки и panel-domain всё равно будут отфильтрованы ниже.
-        raw=db_raw if db_raw else split_aliases(conf_raw)
-        php=db[d]['php'].strip() or conf_php
-    else:
-        raw=split_aliases(conf_raw)
-        php=conf_php
-    cleaned=[]
-    for a in raw:
-        if not valid.match(a): continue
-        if a==d: continue
-        if a in canon_set: continue  # отдельная папка всегда важнее alias
-        if a in {panel,'localhost',server_ip,public_ip}: continue
-        if a not in cleaned: cleaned.append(a)
-    candidates[d]=cleaned
-    php_versions[d]=php
-
-# Один alias может принадлежать только одному vhost. www.<domain> получает приоритет.
-owner={}
-for d in canonical:
-    preferred='www.'+d
-    if preferred in candidates[d] and preferred not in owner:
-        owner[preferred]=d
-for d in canonical:
-    for a in candidates[d]:
-        owner.setdefault(a,d)
-
-for d in canonical:
-    aliases=[a for a in candidates[d] if owner.get(a)==d]
-    # Формат без пробелов/pipe позволяет безопасно читать из Bash.
-    print(f"{d}|{','.join(aliases)}|{php_versions[d]}")
-PYROUTEPLAN
-}
-
-site_plan_row() {
-  local wanted="$1"
-  site_routing_plan_tsv | awk -F'|' -v d="$wanted" '$1==d {print; exit}'
-}
-
-site_find_certificate() {
-  local domain="$1" cert key
-  shopt -s nullglob
-  for cert in \
-    /opt/hyper-host/letsencrypt/live/*/fullchain.pem \
-    /etc/letsencrypt/live/*/fullchain.pem; do
-    [[ -f "$cert" ]] || continue
-    key="${cert%/fullchain.pem}/privkey.pem"
-    [[ -f "$key" ]] || continue
-    openssl x509 -in "$cert" -noout -checkend 0 >/dev/null 2>&1 || continue
-    openssl x509 -in "$cert" -noout -checkhost "$domain" >/dev/null 2>&1 || continue
-    printf '%s|%s\n' "$cert" "$key"
-    shopt -u nullglob
-    return 0
-  done
-  shopt -u nullglob
-  return 1
-}
-
-site_disable_duplicate_vhosts() {
-  local domain="$1" keep="${2:-$NGINX_ENABLED/hyper-host-site-$domain.conf}" path real
-  shopt -s nullglob
-  for path in "$NGINX_ENABLED"/*; do
-    [[ -e "$path" || -L "$path" ]] || continue
-    [[ "$path" == "$keep" ]] && continue
-    real="$(readlink -f "$path" 2>/dev/null || printf '%s' "$path")"
-    [[ -f "$real" ]] || continue
-    if python3 - "$real" "$domain" <<'PYVHOSTMATCH'
-import pathlib,re,sys
-text=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8',errors='ignore')
-domain=sys.argv[2]
-for m in re.finditer(r'\bserver_name\s+([^;]+);', text):
-    if domain in m.group(1).split():
-        raise SystemExit(0)
-raise SystemExit(1)
-PYVHOSTMATCH
-    then
-      rm -f "$path"
-    fi
-  done
-  shopt -u nullglob
-}
-
-site_disable_all_generated_links() {
-  local path
-  shopt -s nullglob
-  for path in "$NGINX_ENABLED"/hyper-host-site-*.conf; do
-    rm -f "$path"
-  done
-  shopt -u nullglob
-}
-
-site_sync_db_from_plan() {
-  local plan_file="$1"
-  [[ -f "$BASE_DIR/data/hyperhost.sqlite" ]] || return 0
-  python3 - "$BASE_DIR/data/hyperhost.sqlite" "$SITES_DIR" "$plan_file" <<'PYSYNCDB'
-import sqlite3,sys
-from pathlib import Path
-p=Path(sys.argv[1]); sites=Path(sys.argv[2]); plan=Path(sys.argv[3])
-try:
-    con=sqlite3.connect(str(p))
-    has=con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sites'").fetchone()
-    if not has: raise SystemExit(0)
-    for line in plan.read_text(encoding='utf-8').splitlines():
-        parts=line.split('|',2)
-        if len(parts)!=3: continue
-        d,a,php=parts
-        root=str(sites/d/'public_html')
-        row=con.execute("SELECT id,php_version,disk_limit_mb,ssl_enabled FROM sites WHERE domain=?",(d,)).fetchone()
-        if row:
-            final_php=php or (row[1] or '')
-            con.execute("UPDATE sites SET aliases=?,root_path=?,php_version=? WHERE domain=?",(a,root,final_php,d))
-        else:
-            con.execute("INSERT INTO sites(domain,aliases,root_path,php_version,ssl_enabled) VALUES(?,?,?,?,0)",(d,a,root,php))
-    con.commit(); con.close()
-except Exception:
-    pass
-PYSYNCDB
-}
-
-write_site_nginx_vhost() {
-  local domain="$1" aliases="${2:-}" phpv="${3:-}" root sock names tmp keep_link
-  valid_domain "$domain" || err "Invalid domain: $domain"
-  root="$SITES_DIR/$domain/public_html"
-  keep_link="$NGINX_ENABLED/hyper-host-site-$domain.conf"
-  mkdir -p "$root" "$SITES_DIR/$domain/logs" /opt/hyper-host/acme-webroot/.well-known/acme-challenge
-  touch "$SITES_DIR/$domain/logs/access.log" "$SITES_DIR/$domain/logs/error.log"
-
-  sock="$(php_sock_for_version "$phpv")"
-  [[ -S "$sock" ]] || sock="$(site_existing_php_socket "$domain")"
-  names="$domain"
-  if [[ -n "$aliases" ]]; then
-    IFS=',' read -ra _site_aliases <<< "$aliases"
-    local a
-    for a in "${_site_aliases[@]}"; do
-      a="$(printf '%s' "$a" | xargs)"
-      [[ -n "$a" ]] || continue
-      valid_domain "$a" || err "Invalid alias: $a"
-      # Защита v80: alias никогда не перехватывает отдельную папку сайта.
-      [[ -d "$SITES_DIR/$a/public_html" ]] && continue
-      [[ -n "${PANEL_DOMAIN:-}" && "$a" == "$PANEL_DOMAIN" ]] && continue
-      [[ " $names " == *" $a "* ]] || names="$names $a"
-    done
-  fi
-
-  # Удаляем дубли не только для главного домена, но и для всех его aliases.
-  local host
-  for host in $names; do
-    site_disable_duplicate_vhosts "$host" "$keep_link"
-  done
-
-  tmp="$(mktemp "$NGINX_AVAILABLE/.hyper-host-site-$domain.XXXXXX")"
-  cat > "$tmp" <<EOVHOST
-server {
-    listen 80;
-    listen [::]:80;
-    server_name $names;
-    root $root;
-    index index.html index.htm index.php;
-    client_max_body_size 1024M;
-    access_log $SITES_DIR/$domain/logs/access.log;
-    error_log $SITES_DIR/$domain/logs/error.log;
-
-    location ^~ /.well-known/acme-challenge/ {
-        root /opt/hyper-host/acme-webroot;
-        default_type text/plain;
-        try_files \$uri =404;
-        allow all;
-    }
-
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
-
-    location ~ \.php$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_read_timeout 600;
-        fastcgi_send_timeout 600;
-        fastcgi_connect_timeout 60;
-        fastcgi_pass unix:$sock;
-    }
-
-    location ~ /\. {
-        deny all;
-    }
-}
-EOVHOST
-
-  # v80: HTTPS строится по каждому имени отдельно. Если alias имеет свой сертификат,
-  # он больше не падает в общий SSL/default vhost и отдаёт тот же public_html.
-  declare -A _ssl_names=()
-  declare -A _ssl_keys=()
-  local pair cert key cert_id
-  for host in $names; do
-    pair="$(site_find_certificate "$host" 2>/dev/null || true)"
-    [[ -n "$pair" ]] || continue
-    cert="${pair%%|*}"
-    key="${pair#*|}"
-    cert_id="$cert"
-    _ssl_keys["$cert_id"]="$key"
-    if [[ -n "${_ssl_names[$cert_id]:-}" ]]; then
-      [[ " ${_ssl_names[$cert_id]} " == *" $host "* ]] || _ssl_names["$cert_id"]+=" $host"
-    else
-      _ssl_names["$cert_id"]="$host"
-    fi
-  done
-
-  for cert_id in "${!_ssl_names[@]}"; do
-    cert="$cert_id"
-    key="${_ssl_keys[$cert_id]}"
-    local ssl_server_names="${_ssl_names[$cert_id]}"
-    cat >> "$tmp" <<EOVHOSTSSL
-
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name $ssl_server_names;
-    root $root;
-    index index.html index.htm index.php;
-    client_max_body_size 1024M;
-    access_log $SITES_DIR/$domain/logs/ssl-access.log;
-    error_log $SITES_DIR/$domain/logs/ssl-error.log;
-
-    ssl_certificate $cert;
-    ssl_certificate_key $key;
-    ssl_protocols TLSv1.2 TLSv1.3;
-
-    location ^~ /.well-known/acme-challenge/ {
-        root /opt/hyper-host/acme-webroot;
-        default_type text/plain;
-        try_files \$uri =404;
-        allow all;
-    }
-
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
-
-    location ~ \.php$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_read_timeout 600;
-        fastcgi_send_timeout 600;
-        fastcgi_connect_timeout 60;
-        fastcgi_pass unix:$sock;
-    }
-
-    location ~ /\. {
-        deny all;
-    }
-}
-EOVHOSTSSL
-  done
-
-  mv -f "$tmp" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
-  ln -sfn "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" "$keep_link"
-  chown -R www-data:www-data "$SITES_DIR/$domain" 2>/dev/null || true
-  fix_web_permissions "$SITES_DIR/$domain"
-}
-
-# v81: writes every hostname as its own exact server block in one managed file.
-# This avoids alias loss and cross-site routing: one Host -> one public_html.
-site_write_exact_managed_config() {
-  local plan_file="$1"
-  local managed_available="$NGINX_AVAILABLE/20-hyper-host-sites-managed.conf"
-  local managed_enabled="$NGINX_ENABLED/20-hyper-host-sites-managed.conf"
-  local tmp domain aliases phpv root sock hosts host pair cert key site_count=0 host_count=0
-  local map_file="$BASE_DIR/data/site-routing-exact.tsv"
-  declare -A seen_hosts=()
-
-  [[ -s "$plan_file" ]] || err "Routing plan is empty: $plan_file"
-  mkdir -p "$NGINX_AVAILABLE" "$NGINX_ENABLED" "$BASE_DIR/data" /opt/hyper-host/acme-webroot/.well-known/acme-challenge
-  tmp="$(mktemp "$NGINX_AVAILABLE/.20-hyper-host-sites-managed.XXXXXX")"
-  : > "$tmp"
-  : > "$map_file"
-
-  while IFS='|' read -r domain aliases phpv; do
-    [[ -n "$domain" ]] || continue
-    valid_domain "$domain" || err "Invalid domain in routing plan: $domain"
-    root="$SITES_DIR/$domain/public_html"
-    [[ -d "$root" ]] || err "Missing public_html for $domain: $root"
-    mkdir -p "$SITES_DIR/$domain/logs"
-    touch "$SITES_DIR/$domain/logs/access.log" "$SITES_DIR/$domain/logs/error.log" \
-          "$SITES_DIR/$domain/logs/ssl-access.log" "$SITES_DIR/$domain/logs/ssl-error.log"
-    sock="$(php_sock_for_version "$phpv")"
-    [[ -S "$sock" ]] || sock="$(site_existing_php_socket "$domain")"
-
-    hosts="$domain"
-    [[ -n "$aliases" ]] && hosts+=" ${aliases//,/ }"
-    site_count=$((site_count+1))
-
-    for host in $hosts; do
-      host="$(printf '%s' "$host" | xargs)"
-      [[ -n "$host" ]] || continue
-      valid_domain "$host" || err "Invalid hostname in routing plan: $host"
-      [[ -n "${PANEL_DOMAIN:-}" && "$host" == "$PANEL_DOMAIN" ]] && continue
-      [[ -z "${seen_hosts[$host]:-}" ]] || err "Duplicate hostname in exact routing plan: $host"
-      seen_hosts["$host"]="$domain"
-      host_count=$((host_count+1))
-      printf '%s|%s|%s\n' "$host" "$domain" "$root" >> "$map_file"
-
-      cat >> "$tmp" <<EOV81HTTP
-# HYPER-HOST v81 exact route: $host -> $root
-server {
-    listen 80;
-    listen [::]:80;
-    server_name $host;
-    root $root;
-    index index.html index.htm index.php;
-    client_max_body_size 1024M;
-    access_log $SITES_DIR/$domain/logs/access.log;
-    error_log $SITES_DIR/$domain/logs/error.log;
-
-    location ^~ /.well-known/acme-challenge/ {
-        root /opt/hyper-host/acme-webroot;
-        default_type text/plain;
-        try_files \$uri =404;
-        allow all;
-    }
-
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
-
-    location ~ \.php$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_read_timeout 600;
-        fastcgi_send_timeout 600;
-        fastcgi_connect_timeout 60;
-        fastcgi_pass unix:$sock;
-    }
-
-    location ~ /\. {
-        deny all;
-    }
-}
-
-EOV81HTTP
-
-      pair="$(site_find_certificate "$host" 2>/dev/null || true)"
-      if [[ -n "$pair" ]]; then
-        cert="${pair%%|*}"
-        key="${pair#*|}"
-        cat >> "$tmp" <<EOV81HTTPS
-# HYPER-HOST v81 exact TLS route: $host -> $root
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name $host;
-    root $root;
-    index index.html index.htm index.php;
-    client_max_body_size 1024M;
-    access_log $SITES_DIR/$domain/logs/ssl-access.log;
-    error_log $SITES_DIR/$domain/logs/ssl-error.log;
-
-    ssl_certificate $cert;
-    ssl_certificate_key $key;
-    ssl_protocols TLSv1.2 TLSv1.3;
-
-    location ^~ /.well-known/acme-challenge/ {
-        root /opt/hyper-host/acme-webroot;
-        default_type text/plain;
-        try_files \$uri =404;
-        allow all;
-    }
-
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
-
-    location ~ \.php$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_read_timeout 600;
-        fastcgi_send_timeout 600;
-        fastcgi_connect_timeout 60;
-        fastcgi_pass unix:$sock;
-    }
-
-    location ~ /\. {
-        deny all;
-    }
-}
-
-EOV81HTTPS
-      fi
-    done
-  done < "$plan_file"
-
-  (( site_count > 0 )) || { rm -f "$tmp"; err "No sites found for exact routing"; }
-  (( host_count > 0 )) || { rm -f "$tmp"; err "No hostnames found for exact routing"; }
-
-  # Disable only old HYPER-HOST generated site links. Panel/default/custom configs remain untouched.
-  site_disable_all_generated_links
-  rm -f "$managed_enabled"
-  mv -f "$tmp" "$managed_available"
-  ln -sfn "$managed_available" "$managed_enabled"
-  chmod 0644 "$managed_available" "$map_file"
-  log "Exact host routing generated: sites=$site_count hosts=$host_count"
-}
-
-cmd_site_repair() {
-  ensure_dirs
-  local domain="${1:-}" requested_aliases="${2-__AUTO__}" requested_php="${3-__AUTO__}" row aliases="" phpv=""
-  [[ -n "$domain" ]] || err "Domain required"
-  valid_domain "$domain" || err "Invalid domain: $domain"
-  [[ -d "$SITES_DIR/$domain/public_html" ]] || mkdir -p "$SITES_DIR/$domain/public_html"
-
-  row="$(site_plan_row "$domain" || true)"
-  if [[ -n "$row" ]]; then
-    IFS='|' read -r _ aliases phpv <<< "$row"
-  fi
-  [[ "$requested_aliases" == "__AUTO__" ]] || aliases="$requested_aliases"
-  [[ "$requested_php" == "__AUTO__" ]] || phpv="$requested_php"
-
-  # First preserve requested metadata in the old per-site config, then rebuild one exact map for all hosts.
-  write_site_nginx_vhost "$domain" "$aliases" "$phpv"
-  cmd_sites_rebuild
-  log "Site vhost repaired with exact routing: $domain -> $SITES_DIR/$domain/public_html"
-}
-
-cmd_sites_rebuild() {
-  ensure_dirs
-  local plan count=0 host_count=0 domain aliases phpv
-  plan="$(mktemp /tmp/hyper-host-site-plan.XXXXXX)"
-  site_routing_plan_tsv > "$plan"
-  [[ -s "$plan" ]] || { rm -f "$plan"; err "No sites found for routing rebuild"; }
-
-  while IFS='|' read -r domain aliases phpv; do
-    [[ -n "$domain" ]] || continue
-    count=$((count+1))
-    host_count=$((host_count+1))
-    if [[ -n "$aliases" ]]; then
-      IFS=',' read -ra _v81_aliases <<< "$aliases"
-      host_count=$((host_count+${#_v81_aliases[@]}))
-    fi
-  done < "$plan"
-
-  site_write_exact_managed_config "$plan"
-  site_sync_db_from_plan "$plan"
-  cp -f "$plan" "$BASE_DIR/data/site-routing-plan.txt" 2>/dev/null || true
-  rm -f "$plan"
-
-  nginx -t >/dev/null || { nginx -t; err "Nginx config failed while rebuilding exact site routes"; }
-  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
-  log "Site vhosts rebuilt with exact Host routing: sites=$count hosts=$host_count"
-}
-
 cmd_add_site() {
   ensure_dirs
   local domain="${1:-}" aliases="${2:-}" phpv="${3:-}"
-  [[ -n "$domain" ]] || err "Domain required"
-  valid_domain "$domain" || err "Invalid domain: $domain"
+  [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain: $domain"
   if [[ -n "$PANEL_DOMAIN" && "$PANEL_DOMAIN" != "_" && "$domain" == "$PANEL_DOMAIN" ]]; then
     err "Этот домен закреплён за панелью: $domain. Используй другой домен для сайта или сначала смени panel-domain."
   fi
-  local root="$SITES_DIR/$domain/public_html"
+  local root="$SITES_DIR/$domain/public_html" sock; sock="$(php_sock_for_version "$phpv")"
   mkdir -p "$root" "$SITES_DIR/$domain/logs"
-  [[ -f "$root/index.html" || -f "$root/index.htm" || -f "$root/index.php" ]] || php_index_template_file "$domain работает" "$root/index.php"
-  # Keep the requested aliases/php in a temporary per-site config so the deterministic planner can read them.
-  write_site_nginx_vhost "$domain" "$aliases" "$phpv"
-  cmd_sites_rebuild
-  log "Site created with exact routing: $domain -> $root"
+  [[ -f "$root/index.php" || -f "$root/index.html" ]] || php_index_template_file "$domain работает" "$root/index.php"
+  chown -R www-data:www-data "$SITES_DIR/$domain" 2>/dev/null || true
+  fix_web_permissions "$SITES_DIR/$domain"
+  local server_names="$domain"
+  if [[ -n "$aliases" ]]; then
+    IFS=',' read -ra arr <<< "$aliases"
+    for a in "${arr[@]}"; do a="$(echo "$a" | xargs)"; [[ -z "$a" ]] && continue; valid_domain "$a" || err "Invalid alias: $a"; server_names="$server_names $a"; done
+  fi
+  {
+  cat > "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" <<EONGINX
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${server_names};
+    root ${root};
+    index index.php index.html index.htm;
+    client_max_body_size 1024M;
+    access_log ${SITES_DIR}/${domain}/logs/access.log;
+    error_log ${SITES_DIR}/${domain}/logs/error.log;
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+    # HYPER-HOST ACME CHALLENGE
+    location ^~ /.well-known/acme-challenge/ {
+        root ${root};
+        default_type "text/plain";
+        try_files \$uri =404;
+        allow all;
+    }
+    location ~ \.php$ { include snippets/fastcgi-php.conf; fastcgi_read_timeout 600; fastcgi_send_timeout 600; fastcgi_connect_timeout 60; fastcgi_pass unix:${sock}; }
+    location ~ /\. { deny all; }
+}
+EONGINX
+  } 2>/dev/null || err "Не удалось записать конфиг nginx для $domain (read-only /etc/nginx?) — сайт не создан."
+  ln -sf "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" "$NGINX_ENABLED/hyper-host-site-$domain.conf"
+  nginx_reload
+  log "Site created: $domain -> $root"
 }
 cmd_delete_site() { local domain="${1:-}" mode="${2:---keep-files}"; [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain"; rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"; nginx_reload; [[ "$mode" == "--delete-files" ]] && rm -rf "$SITES_DIR/$domain"; log "Site deleted: $domain / $mode"; }
 is_private_ipv4() {
@@ -4227,8 +3730,6 @@ case "${1:-}" in
   create-folder) shift; cmd_create_folder "$@" ;;
   delete-folder) shift; cmd_delete_folder "$@" ;;
   add-site) shift; cmd_add_site "$@" ;;
-  site-repair) shift; cmd_site_repair "$@" ;;
-  sites-rebuild) shift; cmd_sites_rebuild "$@" ;;
   delete-site) shift; cmd_delete_site "$@" ;;
   ssl-site) shift; cmd_ssl_site "$@" ;;
   ssl-fix-site) shift; cmd_ssl_fix_site "$@" ;;
@@ -4303,8 +3804,6 @@ case "${1:-}" in
   repair) shift; cmd_repair "$@" ;;
   *) cat >&2 <<EOHELP
 Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
-       hyper-host-ctl site-repair DOMAIN [ALIASES] [PHP_VERSION]
-       hyper-host-ctl sites-rebuild
        hyper-host-ctl create-ftp USER PASS [all|sites|site|bots|backups|files] [DOMAIN]
        hyper-host-ctl ftp-test-login USER PASS [HOST]
        hyper-host-ctl bot-create NAME python|node|php|custom MAIN_FILE [MEM_MB]
