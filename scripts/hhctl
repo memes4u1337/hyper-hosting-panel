@@ -284,42 +284,59 @@ ensure_acme_locations_all() {
 }
 
 write_panel_nginx_conf() {
-  local domain="${1:-$PANEL_DOMAIN}"
-  [[ -n "$domain" ]] || domain="_"
-  mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled "$PANEL_DIR/public/.well-known/acme-challenge"
-  chown -R www-data:www-data "$PANEL_DIR/public/.well-known" 2>/dev/null || true
-  chmod -R a+rX "$PANEL_DIR/public/.well-known" 2>/dev/null || true
-  {
+  local domain="${1:-$PANEL_DOMAIN}" names="" item cert="" key="" candidate candidate_key
+  local panel_root="${PANEL_DIR}/public"
+
+  # Панель должна отвечать только на свои точные имена/IP. Она больше не является
+  # default_server и не перехватывает сайты.
+  for item in "$domain" "$SERVER_IP" "$PUBLIC_IP" localhost; do
+    item="$(printf '%s' "$item" | xargs)"
+    [[ -n "$item" && "$item" != "_" ]] || continue
+    [[ " $names " == *" $item "* ]] || names="${names:+$names }$item"
+  done
+  [[ -n "$names" ]] || names="127.0.0.1 localhost"
+
+  mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled \
+    "$panel_root/.well-known/acme-challenge"
+  chown -R www-data:www-data "$panel_root/.well-known" 2>/dev/null || true
+  chmod -R a+rX "$panel_root/.well-known" 2>/dev/null || true
+
+  # Подключаем существующий реальный сертификат панели, если он ещё есть.
+  if valid_domain "$domain"; then
+    shopt -s nullglob
+    for candidate in /opt/hyper-host/letsencrypt/live/*/fullchain.pem /etc/letsencrypt/live/*/fullchain.pem; do
+      [[ -f "$candidate" ]] || continue
+      candidate_key="${candidate%/fullchain.pem}/privkey.pem"
+      [[ -f "$candidate_key" ]] || continue
+      openssl x509 -in "$candidate" -noout -checkend 0 >/dev/null 2>&1 || continue
+      openssl x509 -in "$candidate" -noout -checkhost "$domain" >/dev/null 2>&1 || continue
+      cert="$candidate"; key="$candidate_key"; break
+    done
+    shopt -u nullglob
+  fi
+
   cat > /etc/nginx/sites-available/hyper-host-panel.conf <<EOPANELNGINX
 server {
     listen 80;
     listen [::]:80;
-    server_name ${domain};
+    server_name ${names};
 
-    root ${PANEL_DIR}/public;
+    root ${panel_root};
     index index.php index.html;
     client_max_body_size 1024M;
 
     access_log /var/log/nginx/hyper-host-panel.access.log;
     error_log /var/log/nginx/hyper-host-panel.error.log;
 
-    # HYPER-HOST PANEL ACME CHALLENGE
     location ^~ /.well-known/acme-challenge/ {
-        root ${PANEL_DIR}/public;
-        default_type "text/plain";
+        root ${panel_root};
+        default_type text/plain;
         try_files \$uri =404;
         allow all;
     }
 
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
-
-    location /phpmyadmin {
-        alias /usr/share/phpmyadmin/;
-        index index.php index.html;
-    }
-
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+    location /phpmyadmin { alias /usr/share/phpmyadmin/; index index.php index.html; }
     location ~ ^/phpmyadmin/(.+\.php)$ {
         alias /usr/share/phpmyadmin/\$1;
         include fastcgi_params;
@@ -329,11 +346,7 @@ server {
         fastcgi_connect_timeout 60;
         fastcgi_pass unix:${PHP_FPM_SOCK};
     }
-
-    location ~ ^/phpmyadmin/(.+)$ {
-        alias /usr/share/phpmyadmin/\$1;
-    }
-
+    location ~ ^/phpmyadmin/(.+)$ { alias /usr/share/phpmyadmin/\$1; }
     location ~ \.php$ {
         include snippets/fastcgi-php.conf;
         fastcgi_read_timeout 600;
@@ -341,39 +354,52 @@ server {
         fastcgi_connect_timeout 60;
         fastcgi_pass unix:${PHP_FPM_SOCK};
     }
-
-    location ~ /\. {
-        deny all;
-    }
+    location ~ /\. { deny all; }
 }
+EOPANELNGINX
+
+  if [[ -n "$cert" && -n "$key" ]]; then
+    cat >> /etc/nginx/sites-available/hyper-host-panel.conf <<EOPANELSSL
 
 server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name _;
-
-    root ${PANEL_DIR}/public;
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${domain};
+    root ${panel_root};
     index index.php index.html;
     client_max_body_size 1024M;
+    access_log /var/log/nginx/hyper-host-panel-ssl.access.log;
+    error_log /var/log/nginx/hyper-host-panel-ssl.error.log;
+    ssl_certificate ${cert};
+    ssl_certificate_key ${key};
+    ssl_protocols TLSv1.2 TLSv1.3;
 
     location ^~ /.well-known/acme-challenge/ {
-        root ${PANEL_DIR}/public;
-        default_type "text/plain";
+        root ${panel_root};
+        default_type text/plain;
         try_files \$uri =404;
         allow all;
     }
-
     location / { try_files \$uri \$uri/ /index.php?\$query_string; }
     location /phpmyadmin { alias /usr/share/phpmyadmin/; index index.php index.html; }
-    location ~ ^/phpmyadmin/(.+\.php)$ { alias /usr/share/phpmyadmin/\$1; include fastcgi_params; fastcgi_param SCRIPT_FILENAME /usr/share/phpmyadmin/\$1; fastcgi_pass unix:${PHP_FPM_SOCK}; }
-    location ~ \.php$ { include snippets/fastcgi-php.conf; fastcgi_pass unix:${PHP_FPM_SOCK}; }
+    location ~ ^/phpmyadmin/(.+\.php)$ {
+        alias /usr/share/phpmyadmin/\$1;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /usr/share/phpmyadmin/\$1;
+        fastcgi_pass unix:${PHP_FPM_SOCK};
+    }
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:${PHP_FPM_SOCK};
+    }
+    location ~ /\. { deny all; }
 }
-EOPANELNGINX
-  } 2>/dev/null || warn "Не удалось записать /etc/nginx/sites-available/hyper-host-panel.conf (read-only /etc?) — конфиг nginx для домена панели не обновлён."
-  # Load panel config first. If panel.hyper-host.pw was accidentally created as a site,
-  # this plus duplicate cleanup makes the exact domain open the panel, not site stub.
-  ln -sf /etc/nginx/sites-available/hyper-host-panel.conf /etc/nginx/sites-enabled/00-hyper-host-panel.conf 2>/dev/null || true
-  rm -f /etc/nginx/sites-enabled/hyper-host-panel.conf 2>/dev/null || true
+EOPANELSSL
+  fi
+
+  ln -sfn /etc/nginx/sites-available/hyper-host-panel.conf /etc/nginx/sites-enabled/00-hyper-host-panel.conf
+  rm -f /etc/nginx/sites-enabled/10-hyper-host-panel.conf \
+        /etc/nginx/sites-enabled/hyper-host-panel.conf 2>/dev/null || true
 }
 
 panel_domain_conflict_cleanup() {
@@ -596,7 +622,7 @@ server {
     listen [::]:80;
     server_name ${server_names};
     root ${root};
-    index index.php index.html index.htm;
+    index index.html index.htm index.php;
     client_max_body_size 1024M;
     access_log ${SITES_DIR}/${domain}/logs/access.log;
     error_log ${SITES_DIR}/${domain}/logs/error.log;

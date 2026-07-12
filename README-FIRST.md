@@ -1,17 +1,13 @@
-# HYPER-HOST v82
+# Сначала прочитай
 
-This release rolls back only the global Nginx/site-routing changes introduced in v79-v81, using the server-side backup created before v79.
-
-It then creates one isolated vhost for `beta.mystockbot.xyz` without rebuilding any other site.
-
-Install:
+Загрузи содержимое этой папки в корень репозитория HYPER-HOST и выполни:
 
 ```bash
-sudo bash apply-v82-restore-old-sites-beta-only.sh beta.mystockbot.xyz
+cd /tmp && sudo rm -rf hyper-host-update && git clone --depth 1 --branch main https://github.com/memes4u1337/hyper-hosting-panel.git hyper-host-update && cd hyper-host-update && sudo bash apply-v83-panel-sites-beta-final-recovery.sh beta.mystockbot.xyz
 ```
 
-Report:
+Отчёт после установки:
 
 ```bash
-sudo cat /root/hyper-host-v82-restore-old-sites-beta-report.txt
+sudo cat /root/hyper-host-v83-panel-sites-beta-recovery-report.txt
 ```
