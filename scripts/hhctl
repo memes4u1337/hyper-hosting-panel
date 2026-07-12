@@ -572,49 +572,233 @@ cmd_create_folder() {
 }
 cmd_delete_folder() { local name="${1:-}"; [[ -n "$name" ]] || err "Folder name required"; valid_folder "$name" || err "Invalid folder name"; rm -rf "$SITES_DIR/$name"; log "Folder deleted: $name"; }
 
-cmd_add_site() {
-  ensure_dirs
-  local domain="${1:-}" aliases="${2:-}" phpv="${3:-}"
-  [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain: $domain"
-  if [[ -n "$PANEL_DOMAIN" && "$PANEL_DOMAIN" != "_" && "$domain" == "$PANEL_DOMAIN" ]]; then
-    err "Этот домен закреплён за панелью: $domain. Используй другой домен для сайта или сначала смени panel-domain."
+site_existing_server_names() {
+  local domain="$1" conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
+  if [[ -f "$conf" ]]; then
+    awk '/^[[:space:]]*server_name[[:space:]]+/ {for(i=2;i<=NF;i++){gsub(";", "", $i); if($i!="_") print $i}}' "$conf" 2>/dev/null | sort -u | tr '\n' ' '
+  else
+    printf '%s' "$domain"
   fi
-  local root="$SITES_DIR/$domain/public_html" sock; sock="$(php_sock_for_version "$phpv")"
-  mkdir -p "$root" "$SITES_DIR/$domain/logs"
-  [[ -f "$root/index.php" || -f "$root/index.html" ]] || php_index_template_file "$domain работает" "$root/index.php"
-  chown -R www-data:www-data "$SITES_DIR/$domain" 2>/dev/null || true
-  fix_web_permissions "$SITES_DIR/$domain"
-  local server_names="$domain"
+}
+
+site_existing_php_socket() {
+  local domain="$1" conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf" sock=""
+  if [[ -f "$conf" ]]; then
+    sock="$(sed -nE 's#.*fastcgi_pass[[:space:]]+unix:([^;]+);.*#\1#p' "$conf" | head -n1)"
+  fi
+  [[ -n "$sock" && -S "$sock" ]] || sock="${PHP_FPM_SOCK:-}"
+  if [[ -z "$sock" || ! -S "$sock" ]]; then
+    sock="$(find /run/php -maxdepth 1 -type s -name 'php*-fpm.sock' 2>/dev/null | sort -V | tail -n1 || true)"
+  fi
+  [[ -n "$sock" ]] || sock="/run/php/php8.2-fpm.sock"
+  printf '%s' "$sock"
+}
+
+site_find_certificate() {
+  local domain="$1" cert key
+  shopt -s nullglob
+  for cert in \
+    /opt/hyper-host/letsencrypt/live/*/fullchain.pem \
+    /etc/letsencrypt/live/*/fullchain.pem; do
+    [[ -f "$cert" ]] || continue
+    key="${cert%/fullchain.pem}/privkey.pem"
+    [[ -f "$key" ]] || continue
+    openssl x509 -in "$cert" -noout -checkend 0 >/dev/null 2>&1 || continue
+    openssl x509 -in "$cert" -noout -checkhost "$domain" >/dev/null 2>&1 || continue
+    printf '%s|%s\n' "$cert" "$key"
+    shopt -u nullglob
+    return 0
+  done
+  shopt -u nullglob
+  return 1
+}
+
+site_disable_duplicate_vhosts() {
+  local domain="$1" keep="$NGINX_ENABLED/hyper-host-site-$domain.conf" path real
+  shopt -s nullglob
+  for path in "$NGINX_ENABLED"/*; do
+    [[ -e "$path" || -L "$path" ]] || continue
+    [[ "$path" == "$keep" ]] && continue
+    real="$(readlink -f "$path" 2>/dev/null || printf '%s' "$path")"
+    [[ -f "$real" ]] || continue
+    if python3 - "$real" "$domain" <<'PYVHOSTMATCH'
+import pathlib,re,sys
+text=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8',errors='ignore')
+domain=sys.argv[2]
+for m in re.finditer(r'\bserver_name\s+([^;]+);', text):
+    if domain in m.group(1).split():
+        raise SystemExit(0)
+raise SystemExit(1)
+PYVHOSTMATCH
+    then
+      rm -f "$path"
+    fi
+  done
+  shopt -u nullglob
+}
+
+write_site_nginx_vhost() {
+  local domain="$1" aliases="${2:-}" phpv="${3:-}" root sock names cert_pair="" cert="" key="" tmp
+  valid_domain "$domain" || err "Invalid domain: $domain"
+  root="$SITES_DIR/$domain/public_html"
+  mkdir -p "$root" "$SITES_DIR/$domain/logs" /opt/hyper-host/acme-webroot/.well-known/acme-challenge
+  touch "$SITES_DIR/$domain/logs/access.log" "$SITES_DIR/$domain/logs/error.log"
+
+  sock="$(php_sock_for_version "$phpv")"
+  [[ -S "$sock" ]] || sock="$(site_existing_php_socket "$domain")"
+  names="$domain"
   if [[ -n "$aliases" ]]; then
-    IFS=',' read -ra arr <<< "$aliases"
-    for a in "${arr[@]}"; do a="$(echo "$a" | xargs)"; [[ -z "$a" ]] && continue; valid_domain "$a" || err "Invalid alias: $a"; server_names="$server_names $a"; done
+    IFS=',' read -ra _site_aliases <<< "$aliases"
+    local a
+    for a in "${_site_aliases[@]}"; do
+      a="$(printf '%s' "$a" | xargs)"
+      [[ -n "$a" ]] || continue
+      valid_domain "$a" || err "Invalid alias: $a"
+      [[ " $names " == *" $a "* ]] || names="$names $a"
+    done
+  else
+    local old_names
+    old_names="$(site_existing_server_names "$domain")"
+    [[ -n "$old_names" ]] && names="$old_names"
+    [[ " $names " == *" $domain "* ]] || names="$domain $names"
   fi
-  {
-  cat > "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" <<EONGINX
+
+  cert_pair="$(site_find_certificate "$domain" 2>/dev/null || true)"
+  if [[ -n "$cert_pair" ]]; then
+    cert="${cert_pair%%|*}"
+    key="${cert_pair#*|}"
+  fi
+
+  tmp="$(mktemp "$NGINX_AVAILABLE/.hyper-host-site-$domain.XXXXXX")"
+  cat > "$tmp" <<EOVHOST
 server {
     listen 80;
     listen [::]:80;
-    server_name ${server_names};
-    root ${root};
-    index index.php index.html index.htm;
+    server_name $names;
+    root $root;
+    index index.html index.htm index.php;
     client_max_body_size 1024M;
-    access_log ${SITES_DIR}/${domain}/logs/access.log;
-    error_log ${SITES_DIR}/${domain}/logs/error.log;
-    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
-    # HYPER-HOST ACME CHALLENGE
+    access_log $SITES_DIR/$domain/logs/access.log;
+    error_log $SITES_DIR/$domain/logs/error.log;
+
     location ^~ /.well-known/acme-challenge/ {
-        root ${root};
-        default_type "text/plain";
+        root /opt/hyper-host/acme-webroot;
+        default_type text/plain;
         try_files \$uri =404;
         allow all;
     }
-    location ~ \.php$ { include snippets/fastcgi-php.conf; fastcgi_read_timeout 600; fastcgi_send_timeout 600; fastcgi_connect_timeout 60; fastcgi_pass unix:${sock}; }
-    location ~ /\. { deny all; }
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_read_timeout 600;
+        fastcgi_send_timeout 600;
+        fastcgi_connect_timeout 60;
+        fastcgi_pass unix:$sock;
+    }
+
+    location ~ /\. {
+        deny all;
+    }
 }
-EONGINX
-  } 2>/dev/null || err "Не удалось записать конфиг nginx для $domain (read-only /etc/nginx?) — сайт не создан."
-  ln -sf "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" "$NGINX_ENABLED/hyper-host-site-$domain.conf"
-  nginx_reload
+EOVHOST
+
+  if [[ -n "$cert" && -n "$key" ]]; then
+    cat >> "$tmp" <<EOVHOSTSSL
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $names;
+    root $root;
+    index index.html index.htm index.php;
+    client_max_body_size 1024M;
+    access_log $SITES_DIR/$domain/logs/ssl-access.log;
+    error_log $SITES_DIR/$domain/logs/ssl-error.log;
+
+    ssl_certificate $cert;
+    ssl_certificate_key $key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /opt/hyper-host/acme-webroot;
+        default_type text/plain;
+        try_files \$uri =404;
+        allow all;
+    }
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_read_timeout 600;
+        fastcgi_send_timeout 600;
+        fastcgi_connect_timeout 60;
+        fastcgi_pass unix:$sock;
+    }
+
+    location ~ /\. {
+        deny all;
+    }
+}
+EOVHOSTSSL
+  fi
+
+  site_disable_duplicate_vhosts "$domain"
+  mv -f "$tmp" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
+  ln -sfn "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" "$NGINX_ENABLED/hyper-host-site-$domain.conf"
+  chown -R www-data:www-data "$SITES_DIR/$domain" 2>/dev/null || true
+  fix_web_permissions "$SITES_DIR/$domain"
+}
+
+cmd_site_repair() {
+  ensure_dirs
+  local domain="${1:-}" aliases="${2:-}" phpv="${3:-}"
+  [[ -n "$domain" ]] || err "Domain required"
+  valid_domain "$domain" || err "Invalid domain: $domain"
+  [[ -d "$SITES_DIR/$domain/public_html" ]] || mkdir -p "$SITES_DIR/$domain/public_html"
+  write_site_nginx_vhost "$domain" "$aliases" "$phpv"
+  nginx -t >/dev/null || { nginx -t; err "Nginx config failed for $domain"; }
+  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
+  log "Site vhost repaired: $domain -> $SITES_DIR/$domain/public_html"
+}
+
+cmd_sites_rebuild() {
+  ensure_dirs
+  local dir domain count=0
+  shopt -s nullglob
+  for dir in "$SITES_DIR"/*; do
+    [[ -d "$dir/public_html" ]] || continue
+    domain="${dir##*/}"
+    valid_domain "$domain" || continue
+    write_site_nginx_vhost "$domain" "" ""
+    count=$((count+1))
+  done
+  shopt -u nullglob
+  nginx -t >/dev/null || { nginx -t; err "Nginx config failed while rebuilding sites"; }
+  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
+  log "Site vhosts rebuilt: $count"
+}
+
+cmd_add_site() {
+  ensure_dirs
+  local domain="${1:-}" aliases="${2:-}" phpv="${3:-}"
+  [[ -n "$domain" ]] || err "Domain required"
+  valid_domain "$domain" || err "Invalid domain: $domain"
+  if [[ -n "$PANEL_DOMAIN" && "$PANEL_DOMAIN" != "_" && "$domain" == "$PANEL_DOMAIN" ]]; then
+    err "Этот домен закреплён за панелью: $domain. Используй другой домен для сайта или сначала смени panel-domain."
+  fi
+  local root="$SITES_DIR/$domain/public_html"
+  mkdir -p "$root" "$SITES_DIR/$domain/logs"
+  [[ -f "$root/index.html" || -f "$root/index.htm" || -f "$root/index.php" ]] || php_index_template_file "$domain работает" "$root/index.php"
+  write_site_nginx_vhost "$domain" "$aliases" "$phpv"
+  nginx -t >/dev/null || { nginx -t; err "Nginx config failed for $domain"; }
+  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
   log "Site created: $domain -> $root"
 }
 cmd_delete_site() { local domain="${1:-}" mode="${2:---keep-files}"; [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain"; rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"; nginx_reload; [[ "$mode" == "--delete-files" ]] && rm -rf "$SITES_DIR/$domain"; log "Site deleted: $domain / $mode"; }
@@ -3730,6 +3914,8 @@ case "${1:-}" in
   create-folder) shift; cmd_create_folder "$@" ;;
   delete-folder) shift; cmd_delete_folder "$@" ;;
   add-site) shift; cmd_add_site "$@" ;;
+  site-repair) shift; cmd_site_repair "$@" ;;
+  sites-rebuild) shift; cmd_sites_rebuild "$@" ;;
   delete-site) shift; cmd_delete_site "$@" ;;
   ssl-site) shift; cmd_ssl_site "$@" ;;
   ssl-fix-site) shift; cmd_ssl_fix_site "$@" ;;
@@ -3804,6 +3990,8 @@ case "${1:-}" in
   repair) shift; cmd_repair "$@" ;;
   *) cat >&2 <<EOHELP
 Usage: hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
+       hyper-host-ctl site-repair DOMAIN [ALIASES] [PHP_VERSION]
+       hyper-host-ctl sites-rebuild
        hyper-host-ctl create-ftp USER PASS [all|sites|site|bots|backups|files] [DOMAIN]
        hyper-host-ctl ftp-test-login USER PASS [HOST]
        hyper-host-ctl bot-create NAME python|node|php|custom MAIN_FILE [MEM_MB]
