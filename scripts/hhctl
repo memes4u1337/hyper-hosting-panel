@@ -397,8 +397,9 @@ server {
 EOPANELSSL
   fi
 
-  ln -sfn /etc/nginx/sites-available/hyper-host-panel.conf /etc/nginx/sites-enabled/00-hyper-host-panel.conf
-  rm -f /etc/nginx/sites-enabled/10-hyper-host-panel.conf \
+  ln -sfn /etc/nginx/sites-available/hyper-host-panel.conf /etc/nginx/sites-enabled/01-hyper-host-panel.conf
+  rm -f /etc/nginx/sites-enabled/00-hyper-host-panel.conf \
+        /etc/nginx/sites-enabled/10-hyper-host-panel.conf \
         /etc/nginx/sites-enabled/hyper-host-panel.conf 2>/dev/null || true
 }
 
@@ -406,34 +407,36 @@ panel_domain_conflict_cleanup() {
   local domain="$1" path real target
   # Disable the exact HYPER-HOST site config for the panel domain.
   local site_conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf" enabled_conf="$NGINX_ENABLED/hyper-host-site-$domain.conf"
-  [[ -e "$enabled_conf" || -L "$enabled_conf" ]] && rm -f "$enabled_conf"
+  rm -f "$enabled_conf" "$NGINX_ENABLED/20-hyper-host-site-$domain.conf" 2>/dev/null || true
   [[ -f "$site_conf" ]] && mv -f "$site_conf" "$site_conf.disabled-for-panel" 2>/dev/null || true
 
-  # Disable any other enabled nginx config that contains this exact server_name, except panel config.
+  # Remove the panel name only from aliases of other sites. Do not disable the
+  # whole website just because panel.hyper-host.pw was once listed as its alias.
   shopt -s nullglob
   for path in "$NGINX_ENABLED"/*; do
     [[ -e "$path" || -L "$path" ]] || continue
-    [[ "${path##*/}" == "00-hyper-host-panel.conf" || "${path##*/}" == "hyper-host-panel.conf" ]] && continue
+    case "${path##*/}" in
+      00-hyper-host-panel.conf|01-hyper-host-panel.conf|10-hyper-host-panel.conf|hyper-host-panel.conf) continue ;;
+    esac
     real="$(readlink -f "$path" 2>/dev/null || echo "$path")"
     [[ -f "$real" ]] || continue
-    if python3 - "$real" "$domain" <<'PYCHECK'
-import re,sys,pathlib
-text=pathlib.Path(sys.argv[1]).read_text(errors='ignore')
-d=sys.argv[2]
-found=False
-for m in re.finditer(r'server_name\s+([^;]+);', text):
-    names=m.group(1).split()
-    if d in names:
-        found=True
-        break
-sys.exit(0 if found else 1)
-PYCHECK
-    then
-      rm -f "$path" 2>/dev/null || true
-      case "$real" in
-        "$NGINX_AVAILABLE"/*) mv -f "$real" "$real.disabled-for-panel" 2>/dev/null || true ;;
-      esac
-    fi
+    python3 - "$real" "$domain" <<'PYCLEAN'
+import hashlib,re,sys,pathlib
+p=pathlib.Path(sys.argv[1]); d=sys.argv[2].lower().rstrip('.')
+text=p.read_text(encoding='utf-8',errors='ignore'); changed=False; n=0
+def repl(m):
+    global changed,n
+    prefix,raw,suffix=m.group(1),m.group(2),m.group(3)
+    items=raw.split(); kept=[x for x in items if x.lower().rstrip('.') != d]
+    if len(kept)==len(items): return m.group(0)
+    changed=True; n+=1
+    if not kept:
+        tag=hashlib.sha1((str(p)+d+str(n)).encode()).hexdigest()[:10]
+        kept=[f'panel-alias-removed-{tag}.invalid']
+    return prefix+' '.join(kept)+suffix
+out=re.sub(r'(^[ \t]*server_name[ \t]+)([^;]+)(;)',repl,text,flags=re.I|re.M)
+if changed: p.write_text(out,encoding='utf-8')
+PYCLEAN
   done
   shopt -u nullglob
 }
@@ -610,10 +613,17 @@ cmd_add_site() {
   [[ -f "$root/index.php" || -f "$root/index.html" ]] || php_index_template_file "$domain работает" "$root/index.php"
   chown -R www-data:www-data "$SITES_DIR/$domain" 2>/dev/null || true
   fix_web_permissions "$SITES_DIR/$domain"
-  local server_names="$domain"
+  local server_names="$domain" a
   if [[ -n "$aliases" ]]; then
     IFS=',' read -ra arr <<< "$aliases"
-    for a in "${arr[@]}"; do a="$(echo "$a" | xargs)"; [[ -z "$a" ]] && continue; valid_domain "$a" || err "Invalid alias: $a"; server_names="$server_names $a"; done
+    for a in "${arr[@]}"; do
+      a="$(echo "$a" | xargs | tr '[:upper:]' '[:lower:]')"
+      [[ -z "$a" ]] && continue
+      valid_domain "$a" || err "Invalid alias: $a"
+      [[ "$a" != "$PANEL_DOMAIN" ]] || err "Alias $a закреплён за панелью и не может быть добавлен сайту."
+      [[ ! -d "$SITES_DIR/$a/public_html" || "$a" == "$domain" ]] || err "Alias $a уже является отдельным сайтом."
+      [[ " $server_names " == *" $a "* ]] || server_names="$server_names $a"
+    done
   fi
   {
   cat > "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" <<EONGINX
@@ -639,11 +649,13 @@ server {
 }
 EONGINX
   } 2>/dev/null || err "Не удалось записать конфиг nginx для $domain (read-only /etc/nginx?) — сайт не создан."
-  ln -sf "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" "$NGINX_ENABLED/hyper-host-site-$domain.conf"
+  rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" \
+        "$NGINX_ENABLED/20-hyper-host-site-$domain.conf" 2>/dev/null || true
+  ln -sfn "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" "$NGINX_ENABLED/20-hyper-host-site-$domain.conf"
   nginx_reload
   log "Site created: $domain -> $root"
 }
-cmd_delete_site() { local domain="${1:-}" mode="${2:---keep-files}"; [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain"; rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"; nginx_reload; [[ "$mode" == "--delete-files" ]] && rm -rf "$SITES_DIR/$domain"; log "Site deleted: $domain / $mode"; }
+cmd_delete_site() { local domain="${1:-}" mode="${2:---keep-files}"; [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain"; rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" "$NGINX_ENABLED/20-hyper-host-site-$domain.conf" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"; nginx_reload; [[ "$mode" == "--delete-files" ]] && rm -rf "$SITES_DIR/$domain"; log "Site deleted: $domain / $mode"; }
 is_private_ipv4() {
   local ip="$1"
   [[ "$ip" =~ ^10\. ]] && return 0
