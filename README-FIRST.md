@@ -1,13 +1,17 @@
-# HYPER-HOST v79
+# HYPER-HOST v80
 
-Загрузите содержимое архива в корень репозитория, затем выполните:
+Патч восстанавливает отображение файлов на всех существующих сайтах и aliases.
+
+Он не меняет FTP, SQL, ботов, Deploy Manager, содержимое сайтов и пароль admin.
+
+Запуск:
 
 ```bash
-cd /tmp && sudo rm -rf hyper-host-update && git clone --depth 1 --branch main https://github.com/memes4u1337/hyper-hosting-panel.git hyper-host-update && cd hyper-host-update && sudo bash apply-v79-site-vhost-content-fix.sh beta.mystockbot.xyz
+sudo bash apply-v80-all-sites-routing-final.sh
 ```
 
-Отчёт:
+После установки смотри:
 
 ```bash
-sudo cat /root/hyper-host-v79-site-vhost-content-report.txt
+sudo cat /root/hyper-host-v80-all-sites-routing-report.txt
 ```

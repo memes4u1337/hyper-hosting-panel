@@ -1,13 +1,16 @@
-# Deploy v79
+# Deploy v80
+
+1. Загрузи всё содержимое архива в корень ветки `main`.
+2. Выполни:
 
 ```bash
-cd /tmp && sudo rm -rf hyper-host-update && git clone --depth 1 --branch main https://github.com/memes4u1337/hyper-hosting-panel.git hyper-host-update && cd hyper-host-update && sudo bash apply-v79-site-vhost-content-fix.sh beta.mystockbot.xyz
+cd /tmp && sudo rm -rf hyper-host-update && git clone --depth 1 --branch main https://github.com/memes4u1337/hyper-hosting-panel.git hyper-host-update && cd hyper-host-update && sudo bash apply-v80-all-sites-routing-final.sh
 ```
 
-Manual repair commands:
+3. Проверь:
 
 ```bash
-sudo hyper-host-ctl site-repair beta.mystockbot.xyz
-sudo hyper-host-ctl sites-rebuild
 sudo nginx -t
+sudo cat /root/hyper-host-v80-all-sites-routing-report.txt
+sudo cat /opt/hyper-host/data/site-routing-plan.txt
 ```

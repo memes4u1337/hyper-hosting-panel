@@ -594,6 +594,104 @@ site_existing_php_socket() {
   printf '%s' "$sock"
 }
 
+# v80: строит единый детерминированный план маршрутизации всех сайтов.
+# Главный принцип: папка /sites/<domain>/public_html всегда владеет своим доменом.
+# Ни один alias не может перехватить домен, для которого существует отдельная папка.
+site_routing_plan_tsv() {
+  python3 - "$SITES_DIR" "$BASE_DIR/data/hyperhost.sqlite" "$NGINX_AVAILABLE" "${PANEL_DOMAIN:-_}" "${SERVER_IP:-}" "${PUBLIC_IP:-}" <<'PYROUTEPLAN'
+from __future__ import annotations
+import os,re,sqlite3,sys
+from pathlib import Path
+
+sites_dir=Path(sys.argv[1])
+db_path=Path(sys.argv[2])
+nginx_available=Path(sys.argv[3])
+panel=(sys.argv[4] or '').strip().lower()
+server_ip=(sys.argv[5] or '').strip().lower()
+public_ip=(sys.argv[6] or '').strip().lower()
+valid=re.compile(r'^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$',re.I)
+
+canonical=sorted({p.name.lower() for p in sites_dir.iterdir() if p.is_dir() and (p/'public_html').is_dir() and valid.match(p.name) and p.name.lower()!=panel}) if sites_dir.exists() else []
+canon_set=set(canonical)
+db={}
+if db_path.is_file():
+    try:
+        con=sqlite3.connect(str(db_path))
+        con.row_factory=sqlite3.Row
+        for row in con.execute("SELECT domain, aliases, php_version FROM sites"):
+            d=str(row['domain'] or '').strip().lower()
+            if d:
+                db[d]={'aliases':str(row['aliases'] or ''),'php':str(row['php_version'] or '')}
+        con.close()
+    except Exception:
+        pass
+
+def parse_conf(domain:str):
+    conf=nginx_available/f'hyper-host-site-{domain}.conf'
+    aliases=[]; php=''
+    if conf.is_file():
+        try: text=conf.read_text(encoding='utf-8',errors='ignore')
+        except Exception: text=''
+        m=re.search(r'\bserver_name\s+([^;]+);',text,re.I)
+        if m:
+            aliases=[x.strip().lower() for x in m.group(1).split() if x.strip() and x.strip().lower()!=domain]
+        m=re.search(r'fastcgi_pass\s+unix:/run/php/php([0-9]+\.[0-9]+)-fpm\.sock',text,re.I)
+        if m: php=m.group(1)
+    return aliases,php
+
+def split_aliases(raw):
+    if isinstance(raw,(list,tuple)): parts=list(raw)
+    else: parts=re.split(r'[\s,;]+',str(raw or ''))
+    out=[]
+    for x in parts:
+        x=x.strip().lower().rstrip('.')
+        if x and x not in out: out.append(x)
+    return out
+
+candidates={}; php_versions={}
+for d in canonical:
+    conf_raw,conf_php=parse_conf(d)
+    if d in db:
+        db_raw=split_aliases(db[d]['aliases'])
+        # Если aliases в БД не заполнены, восстанавливаем безопасные имена из старого vhost.
+        # Отдельные папки и panel-domain всё равно будут отфильтрованы ниже.
+        raw=db_raw if db_raw else split_aliases(conf_raw)
+        php=db[d]['php'].strip() or conf_php
+    else:
+        raw=split_aliases(conf_raw)
+        php=conf_php
+    cleaned=[]
+    for a in raw:
+        if not valid.match(a): continue
+        if a==d: continue
+        if a in canon_set: continue  # отдельная папка всегда важнее alias
+        if a in {panel,'localhost',server_ip,public_ip}: continue
+        if a not in cleaned: cleaned.append(a)
+    candidates[d]=cleaned
+    php_versions[d]=php
+
+# Один alias может принадлежать только одному vhost. www.<domain> получает приоритет.
+owner={}
+for d in canonical:
+    preferred='www.'+d
+    if preferred in candidates[d] and preferred not in owner:
+        owner[preferred]=d
+for d in canonical:
+    for a in candidates[d]:
+        owner.setdefault(a,d)
+
+for d in canonical:
+    aliases=[a for a in candidates[d] if owner.get(a)==d]
+    # Формат без пробелов/pipe позволяет безопасно читать из Bash.
+    print(f"{d}|{','.join(aliases)}|{php_versions[d]}")
+PYROUTEPLAN
+}
+
+site_plan_row() {
+  local wanted="$1"
+  site_routing_plan_tsv | awk -F'|' -v d="$wanted" '$1==d {print; exit}'
+}
+
 site_find_certificate() {
   local domain="$1" cert key
   shopt -s nullglob
@@ -614,7 +712,7 @@ site_find_certificate() {
 }
 
 site_disable_duplicate_vhosts() {
-  local domain="$1" keep="$NGINX_ENABLED/hyper-host-site-$domain.conf" path real
+  local domain="$1" keep="${2:-$NGINX_ENABLED/hyper-host-site-$domain.conf}" path real
   shopt -s nullglob
   for path in "$NGINX_ENABLED"/*; do
     [[ -e "$path" || -L "$path" ]] || continue
@@ -637,10 +735,48 @@ PYVHOSTMATCH
   shopt -u nullglob
 }
 
+site_disable_all_generated_links() {
+  local path
+  shopt -s nullglob
+  for path in "$NGINX_ENABLED"/hyper-host-site-*.conf; do
+    rm -f "$path"
+  done
+  shopt -u nullglob
+}
+
+site_sync_db_from_plan() {
+  local plan_file="$1"
+  [[ -f "$BASE_DIR/data/hyperhost.sqlite" ]] || return 0
+  python3 - "$BASE_DIR/data/hyperhost.sqlite" "$SITES_DIR" "$plan_file" <<'PYSYNCDB'
+import sqlite3,sys
+from pathlib import Path
+p=Path(sys.argv[1]); sites=Path(sys.argv[2]); plan=Path(sys.argv[3])
+try:
+    con=sqlite3.connect(str(p))
+    has=con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sites'").fetchone()
+    if not has: raise SystemExit(0)
+    for line in plan.read_text(encoding='utf-8').splitlines():
+        parts=line.split('|',2)
+        if len(parts)!=3: continue
+        d,a,php=parts
+        root=str(sites/d/'public_html')
+        row=con.execute("SELECT id,php_version,disk_limit_mb,ssl_enabled FROM sites WHERE domain=?",(d,)).fetchone()
+        if row:
+            final_php=php or (row[1] or '')
+            con.execute("UPDATE sites SET aliases=?,root_path=?,php_version=? WHERE domain=?",(a,root,final_php,d))
+        else:
+            con.execute("INSERT INTO sites(domain,aliases,root_path,php_version,ssl_enabled) VALUES(?,?,?,?,0)",(d,a,root,php))
+    con.commit(); con.close()
+except Exception:
+    pass
+PYSYNCDB
+}
+
 write_site_nginx_vhost() {
-  local domain="$1" aliases="${2:-}" phpv="${3:-}" root sock names cert_pair="" cert="" key="" tmp
+  local domain="$1" aliases="${2:-}" phpv="${3:-}" root sock names tmp keep_link
   valid_domain "$domain" || err "Invalid domain: $domain"
   root="$SITES_DIR/$domain/public_html"
+  keep_link="$NGINX_ENABLED/hyper-host-site-$domain.conf"
   mkdir -p "$root" "$SITES_DIR/$domain/logs" /opt/hyper-host/acme-webroot/.well-known/acme-challenge
   touch "$SITES_DIR/$domain/logs/access.log" "$SITES_DIR/$domain/logs/error.log"
 
@@ -654,20 +790,18 @@ write_site_nginx_vhost() {
       a="$(printf '%s' "$a" | xargs)"
       [[ -n "$a" ]] || continue
       valid_domain "$a" || err "Invalid alias: $a"
+      # Защита v80: alias никогда не перехватывает отдельную папку сайта.
+      [[ -d "$SITES_DIR/$a/public_html" ]] && continue
+      [[ -n "${PANEL_DOMAIN:-}" && "$a" == "$PANEL_DOMAIN" ]] && continue
       [[ " $names " == *" $a "* ]] || names="$names $a"
     done
-  else
-    local old_names
-    old_names="$(site_existing_server_names "$domain")"
-    [[ -n "$old_names" ]] && names="$old_names"
-    [[ " $names " == *" $domain "* ]] || names="$domain $names"
   fi
 
-  cert_pair="$(site_find_certificate "$domain" 2>/dev/null || true)"
-  if [[ -n "$cert_pair" ]]; then
-    cert="${cert_pair%%|*}"
-    key="${cert_pair#*|}"
-  fi
+  # Удаляем дубли не только для главного домена, но и для всех его aliases.
+  local host
+  for host in $names; do
+    site_disable_duplicate_vhosts "$host" "$keep_link"
+  done
 
   tmp="$(mktemp "$NGINX_AVAILABLE/.hyper-host-site-$domain.XXXXXX")"
   cat > "$tmp" <<EOVHOST
@@ -706,13 +840,35 @@ server {
 }
 EOVHOST
 
-  if [[ -n "$cert" && -n "$key" ]]; then
+  # v80: HTTPS строится по каждому имени отдельно. Если alias имеет свой сертификат,
+  # он больше не падает в общий SSL/default vhost и отдаёт тот же public_html.
+  declare -A _ssl_names=()
+  declare -A _ssl_keys=()
+  local pair cert key cert_id
+  for host in $names; do
+    pair="$(site_find_certificate "$host" 2>/dev/null || true)"
+    [[ -n "$pair" ]] || continue
+    cert="${pair%%|*}"
+    key="${pair#*|}"
+    cert_id="$cert"
+    _ssl_keys["$cert_id"]="$key"
+    if [[ -n "${_ssl_names[$cert_id]:-}" ]]; then
+      [[ " ${_ssl_names[$cert_id]} " == *" $host "* ]] || _ssl_names["$cert_id"]+=" $host"
+    else
+      _ssl_names["$cert_id"]="$host"
+    fi
+  done
+
+  for cert_id in "${!_ssl_names[@]}"; do
+    cert="$cert_id"
+    key="${_ssl_keys[$cert_id]}"
+    local ssl_server_names="${_ssl_names[$cert_id]}"
     cat >> "$tmp" <<EOVHOSTSSL
 
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
-    server_name $names;
+    server_name $ssl_server_names;
     root $root;
     index index.html index.htm index.php;
     client_max_body_size 1024M;
@@ -747,21 +903,28 @@ server {
     }
 }
 EOVHOSTSSL
-  fi
+  done
 
-  site_disable_duplicate_vhosts "$domain"
   mv -f "$tmp" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
-  ln -sfn "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" "$NGINX_ENABLED/hyper-host-site-$domain.conf"
+  ln -sfn "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" "$keep_link"
   chown -R www-data:www-data "$SITES_DIR/$domain" 2>/dev/null || true
   fix_web_permissions "$SITES_DIR/$domain"
 }
 
 cmd_site_repair() {
   ensure_dirs
-  local domain="${1:-}" aliases="${2:-}" phpv="${3:-}"
+  local domain="${1:-}" requested_aliases="${2-__AUTO__}" requested_php="${3-__AUTO__}" row aliases="" phpv=""
   [[ -n "$domain" ]] || err "Domain required"
   valid_domain "$domain" || err "Invalid domain: $domain"
   [[ -d "$SITES_DIR/$domain/public_html" ]] || mkdir -p "$SITES_DIR/$domain/public_html"
+
+  row="$(site_plan_row "$domain" || true)"
+  if [[ -n "$row" ]]; then
+    IFS='|' read -r _ aliases phpv <<< "$row"
+  fi
+  [[ "$requested_aliases" == "__AUTO__" ]] || aliases="$requested_aliases"
+  [[ "$requested_php" == "__AUTO__" ]] || phpv="$requested_php"
+
   write_site_nginx_vhost "$domain" "$aliases" "$phpv"
   nginx -t >/dev/null || { nginx -t; err "Nginx config failed for $domain"; }
   systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
@@ -770,19 +933,26 @@ cmd_site_repair() {
 
 cmd_sites_rebuild() {
   ensure_dirs
-  local dir domain count=0
-  shopt -s nullglob
-  for dir in "$SITES_DIR"/*; do
-    [[ -d "$dir/public_html" ]] || continue
-    domain="${dir##*/}"
-    valid_domain "$domain" || continue
-    write_site_nginx_vhost "$domain" "" ""
+  local plan dir domain aliases phpv count=0
+  plan="$(mktemp /tmp/hyper-host-site-plan.XXXXXX)"
+  site_routing_plan_tsv > "$plan"
+
+  # Сначала отключаем только сгенерированные site-vhost ссылки. Панель/default не трогаются.
+  site_disable_all_generated_links
+
+  while IFS='|' read -r domain aliases phpv; do
+    [[ -n "$domain" ]] || continue
+    write_site_nginx_vhost "$domain" "$aliases" "$phpv"
     count=$((count+1))
-  done
-  shopt -u nullglob
+  done < "$plan"
+
+  site_sync_db_from_plan "$plan"
+  cp -f "$plan" "$BASE_DIR/data/site-routing-plan.txt" 2>/dev/null || true
+  rm -f "$plan"
+
   nginx -t >/dev/null || { nginx -t; err "Nginx config failed while rebuilding sites"; }
   systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
-  log "Site vhosts rebuilt: $count"
+  log "Site vhosts rebuilt without alias conflicts: $count"
 }
 
 cmd_add_site() {

@@ -100,19 +100,24 @@ def panel_domain() -> str:
 
 def site_rows() -> list[dict[str, Any]]:
     rows=[]
+    panel=panel_domain().strip().lower()
     if SQLITE.exists():
         try:
             con=sqlite3.connect(SQLITE)
             con.row_factory=sqlite3.Row
             for r in con.execute('SELECT domain, aliases, root_path FROM sites ORDER BY domain'):
-                rows.append(dict(r))
+                row=dict(r)
+                if str(row.get('domain') or '').strip().lower()==panel:
+                    continue
+                rows.append(row)
             con.close()
         except Exception:
             pass
-    known={r['domain'] for r in rows}
+    known={str(r['domain']).lower() for r in rows}
     if SITES_DIR.exists():
         for p in SITES_DIR.iterdir():
-            if not p.is_dir() or not (p/'public_html').is_dir() or '.' not in p.name or p.name in known: continue
+            if not p.is_dir() or not (p/'public_html').is_dir() or '.' not in p.name or p.name.lower() in known or p.name.lower()==panel:
+                continue
             rows.append({'domain':p.name,'aliases':'','root_path':str(p/'public_html')})
     return rows
 
@@ -256,22 +261,34 @@ def audit() -> dict[str,Any]:
 
 
 def restore() -> dict[str,Any]:
+    # v80: сайты всегда восстанавливаются единым маршрутизатором hhctl.
+    # Так aliases с отдельными папками не перехватывают друг друга, а каждый hostname
+    # получает HTTPS-блок именно со своим существующим сертификатом.
+    ctl=Path('/usr/local/sbin/hyper-host-ctl')
+    if not ctl.exists():
+        raise RuntimeError(f'hyper-host-ctl not found: {ctl}')
+    cp=subprocess.run([str(ctl),'sites-rebuild'],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+    if cp.returncode != 0:
+        raise RuntimeError(cp.stdout)
+    rebuild_output=cp.stdout
+
     certs=all_certs(); restored=[]; skipped=[]
     for row in site_rows():
         d=row['domain']; cert=choose_cert(d,certs)
-        if not cert:
-            skipped.append({'domain':d,'reason':'certificate missing'}); continue
-        Path(row['root_path']).mkdir(parents=True,exist_ok=True)
-        (Path(row['root_path']).parent/'logs').mkdir(parents=True,exist_ok=True)
-        restored.append(repair_one(d,row.get('aliases') or '',row['root_path'],cert,False))
+        if cert:
+            restored.append({'domain':d,'config':str(NG_AVAIL/f'hyper-host-site-{d}.conf'),'cert':cert['cert']})
+        else:
+            skipped.append({'domain':d,'reason':'certificate missing'})
+
     pd=panel_domain(); pc=choose_cert(pd,certs)
     if pc:
         restored.append(repair_one(pd,'',str(PANEL_ROOT),pc,True))
+
     cp=subprocess.run(['nginx','-t'],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
     if cp.returncode != 0:
         raise RuntimeError(cp.stdout)
     subprocess.run(['systemctl','reload','nginx'],check=False)
-    return {'ok':True,'restored':restored,'skipped':skipped,'audit':audit()}
+    return {'ok':True,'restored':restored,'skipped':skipped,'site_rebuild_output':rebuild_output,'audit':audit()}
 
 
 def main():
