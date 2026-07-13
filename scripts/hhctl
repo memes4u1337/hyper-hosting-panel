@@ -181,7 +181,14 @@ print(json.dumps({
 PYST
 }
 
-nginx_reload() { nginx -t >/dev/null; systemctl reload nginx; }
+nginx_reload() {
+  if [[ -x /usr/local/sbin/hyper-host-nginx-reconcile ]]; then
+    /usr/local/sbin/hyper-host-nginx-reconcile >/dev/null
+  else
+    nginx -t >/dev/null
+    systemctl restart nginx
+  fi
+}
 
 
 ensure_writable_parent_for() {
@@ -1031,47 +1038,27 @@ cmd_ssl_site() {
   local domain="${1:-}" email="${2:-}"
   [[ -n "$domain" && -n "$email" ]] || err "Domain and email required"
   valid_domain "$domain" || err "Invalid domain"
+  [[ -d "$SITES_DIR/$domain/public_html" ]] || err "Site root not found: $SITES_DIR/$domain/public_html"
   cleanup_hyper_host_mounts
   ensure_dirs
   ufw allow 80/tcp >/dev/null 2>&1 || true
   ufw allow 443/tcp >/dev/null 2>&1 || true
-
-  local check ready problem root log_file d candidates=() cert_domains=() args=()
-  root="$(site_root_for_domain "$domain")"
-  ensure_acme_location_for_domain "$domain" "$root"
-  nginx_reload >/dev/null 2>&1 || true
-  check="$(ssl_preflight_json "$domain")"
-  ready="$(printf '%s' "$check" | python3 -c 'import sys,json; print(1 if json.load(sys.stdin).get("certbot_ready") else 0)' 2>/dev/null || echo 0)"
-  if [[ "$ready" != 1 ]]; then
-    problem="$(printf '%s' "$check" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("problem","SSL preflight failed"))' 2>/dev/null || echo "SSL preflight failed")"
-    echo "$check" >&2
-    err "SSL не выпущен: $problem"
-  fi
-
-  root="$(site_root_for_domain "$domain")"
-  while read -r d; do
-    [[ -z "$d" ]] && continue
-    valid_domain "$d" || continue
-    if dns_points_here "$d" && local_http_challenge_check "$d" "$root"; then
-      candidates+=("$d")
-    fi
-  done < <(nginx_domains_for_site "$domain")
-  candidates+=("$domain")
-  mapfile -t cert_domains < <(printf '%s\n' "${candidates[@]}" | sed '/^$/d' | sort -u)
-  [[ ${#cert_domains[@]} -gt 0 ]] || cert_domains=("$domain")
-
+  mkdir -p /opt/hyper-host/acme-webroot/.well-known/acme-challenge /var/log/letsencrypt
+  nginx_reload
+  local token body log_file
+  token="hyper-host-site-ssl-test-$(date +%s)-$$"
+  printf 'ok-%s' "$token" > "/opt/hyper-host/acme-webroot/.well-known/acme-challenge/$token"
+  body="$(curl --noproxy '*' -fsS --connect-timeout 2 --max-time 5 -H "Host: $domain" "http://127.0.0.1/.well-known/acme-challenge/$token" 2>/dev/null || true)"
+  rm -f "/opt/hyper-host/acme-webroot/.well-known/acme-challenge/$token" 2>/dev/null || true
+  [[ "$body" == "ok-$token" ]] || err "Сайт локально не отдаёт ACME для $domain"
+  dns_points_here "$domain" || err "DNS $domain не смотрит на этот сервер"
   log_file="/var/log/letsencrypt/hyper-host-${domain}-$(date +%F-%H%M%S).log"
-  mkdir -p /var/log/letsencrypt
-  args=(certbot --nginx --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --expand --redirect --preferred-challenges http --cert-name "$domain")
-  for d in "${cert_domains[@]}"; do args+=(-d "$d"); done
-
-  log "SSL preflight OK: ${cert_domains[*]} -> $root"
-  if ! "${args[@]}" >"$log_file" 2>&1; then
+  if ! certbot certonly --webroot -w /opt/hyper-host/acme-webroot --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --preferred-challenges http --cert-name "$domain" -d "$domain" >"$log_file" 2>&1; then
     tail -n 120 "$log_file" >&2 || true
-    err "SSL не выпущен: Certbot вернул ошибку. Лог: $log_file. Проверь DNS, 80/443 порты и что домен доступен из интернета."
+    err "SSL не выпущен. Лог: $log_file"
   fi
   nginx_reload
-  log "SSL issued for ${cert_domains[*]} / log: $log_file"
+  log "SSL issued for $domain / log: $log_file"
 }
 
 cmd_site_php() {
@@ -3598,8 +3585,8 @@ cmd_panel_domain() {
       if [[ "$apex" != "$domain" && -f "$DNS_DIR/db.$apex" ]]; then
         cmd_dns_wizard "$apex" "$pub" panel >/dev/null 2>&1 || true
       fi
-      nginx -t >/dev/null && systemctl reload nginx || nginx -t
-      log "Panel domain bound: $domain -> $PANEL_DIR/public. Если раньше был сайт с таким доменом, он отключён только в nginx, файлы не удалены."
+      nginx_reload
+      log "Panel domain bound: $domain -> $PANEL_DIR/public. Старые vhost не подключаются; файлы одноимённого сайта сохранены."
       ;;
     *) err "Use: panel-domain get|set DOMAIN" ;;
   esac
@@ -3633,30 +3620,26 @@ cmd_panel_ssl() {
   cmd_panel_domain set "$domain" >/dev/null
   ufw allow 80/tcp >/dev/null 2>&1 || true
   ufw allow 443/tcp >/dev/null 2>&1 || true
-  local root="$PANEL_DIR/public" token body check_ip expected
-  mkdir -p "$root/.well-known/acme-challenge"
+  mkdir -p /opt/hyper-host/acme-webroot/.well-known/acme-challenge /var/log/letsencrypt
+  local token body expected check_ip log_file
   token="hyper-host-panel-ssl-test-$(date +%s)-$$"
-  printf 'ok-%s' "$token" > "$root/.well-known/acme-challenge/$token"
-  chmod -R a+rX "$root/.well-known" 2>/dev/null || true
-  body="$(curl -fsS --connect-timeout 1 --max-time 2 -H "Host: $domain" "http://127.0.0.1/.well-known/acme-challenge/$token" 2>/dev/null || true)"
-  rm -f "$root/.well-known/acme-challenge/$token" 2>/dev/null || true
-  [[ "$body" == "ok-$token" ]] || err "Панель локально не отдаёт ACME для $domain. Выполни: sudo hyper panel domain $domain"
+  printf 'ok-%s' "$token" > "/opt/hyper-host/acme-webroot/.well-known/acme-challenge/$token"
+  body="$(curl --noproxy '*' -fsS --connect-timeout 2 --max-time 5 -H "Host: $domain" "http://127.0.0.1/.well-known/acme-challenge/$token" 2>/dev/null || true)"
+  rm -f "/opt/hyper-host/acme-webroot/.well-known/acme-challenge/$token" 2>/dev/null || true
+  [[ "$body" == "ok-$token" ]] || err "Панель локально не отдаёт ACME для $domain"
   expected="$(public_ip)"
   check_ip="$(resolve_domain_a_public "$domain" | head -n1)"
   if [[ -n "$expected" && "$check_ip" != "$expected" ]]; then
     err "DNS панели смотрит не туда: $domain -> ${check_ip:-нет A}. Нужно: A $domain $expected"
   fi
-  local log_file="/var/log/letsencrypt/hyper-host-panel-${domain}-$(date +%F-%H%M%S).log"
-  mkdir -p /var/log/letsencrypt
-  log "Panel SSL preflight OK: $domain -> $root"
-  if ! certbot --nginx --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --expand --redirect --preferred-challenges http --cert-name "hyper-host-panel-$domain" -d "$domain" >"$log_file" 2>&1; then
+  log_file="/var/log/letsencrypt/hyper-host-panel-${domain}-$(date +%F-%H%M%S).log"
+  if ! certbot certonly --webroot -w /opt/hyper-host/acme-webroot --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --preferred-challenges http --cert-name "$domain" -d "$domain" >"$log_file" 2>&1; then
     tail -n 120 "$log_file" >&2 || true
-    err "SSL панели не выпущен. Лог: $log_file. Проверь проброс TCP 80/443 на $SERVER_IP."
+    err "SSL панели не выпущен. Лог: $log_file"
   fi
   nginx_reload
   log "Panel SSL issued: https://$domain / log: $log_file"
 }
-
 
 cmd_repair() {
   configure_phpmyadmin_label # v26
