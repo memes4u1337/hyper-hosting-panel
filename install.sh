@@ -254,6 +254,8 @@ log "Копирование файлов панели..."
 rsync -a --delete "$PROJECT_DIR/src/" "$PANEL_DIR/"
 rsync -a --delete "$PROJECT_DIR/templates/" "$BASE_DIR/templates/"
 install -m 0755 "$PROJECT_DIR/scripts/hhctl" "$CONTROL_BIN"
+[[ -f "$PROJECT_DIR/scripts/nginx_recover_v87.py" ]] && install -m 0755 "$PROJECT_DIR/scripts/nginx_recover_v87.py" /opt/hyper-host/nginx_recover_v87.py
+[[ -f "$PROJECT_DIR/scripts/nginx-reconcile-v87.sh" ]] && install -m 0755 "$PROJECT_DIR/scripts/nginx-reconcile-v87.sh" /usr/local/sbin/hyper-host-nginx-reconcile
 install -m 0755 "$PROJECT_DIR/scripts/hyper" "$HYPER_BIN"
 install -m 0755 "$PROJECT_DIR/scripts/hyper_ftp_server.py" "$HYPER_FTP_BIN"
 mkdir -p "$BASE_DIR/deploy-center/defaults" /var/www/hyper-host-deploy/master /var/www/hyper-host-deploy/template /var/www/hyper-host-managed-bots

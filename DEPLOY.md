@@ -1,5 +1,7 @@
-# Установка v86
+# Deploy v87
 
-Патч делает резервную копию `/etc/nginx`, SQLite-настроек и CLI. Сначала восстанавливает HTTP-маршрутизацию и проверяет панель/все сайты. После успешной проверки отдельно восстанавливает либо выпускает SSL для `panel.hyper-host.pw`.
+Загрузить содержимое архива в корень ветки `main`, затем выполнить:
 
-Если Let’s Encrypt недоступен из-за DNS или закрытого порта 80, рабочая HTTP-маршрутизация не откатывается. Причина сохраняется в `/var/log/letsencrypt/hyper-host-v86-panel-*.log`.
+```bash
+cd /tmp && sudo rm -rf hyper-host-update && git clone --depth 1 --branch main https://github.com/memes4u1337/hyper-hosting-panel.git hyper-host-update && cd hyper-host-update && sudo bash apply-v87-lan-bound-final-recovery.sh beta.mystockbot.xyz
+```
