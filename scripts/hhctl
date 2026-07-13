@@ -652,10 +652,32 @@ EONGINX
   rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" \
         "$NGINX_ENABLED/20-hyper-host-site-$domain.conf" 2>/dev/null || true
   ln -sfn "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" "$NGINX_ENABLED/20-hyper-host-site-$domain.conf"
-  nginx_reload
+  rm -f "$SITES_DIR/$domain/.hyper-host-disabled" 2>/dev/null || true
+  if [[ -x /usr/local/sbin/hyper-host-nginx-reconcile ]]; then
+    /usr/local/sbin/hyper-host-nginx-reconcile
+  else
+    nginx_reload
+  fi
   log "Site created: $domain -> $root"
 }
-cmd_delete_site() { local domain="${1:-}" mode="${2:---keep-files}"; [[ -n "$domain" ]] || err "Domain required"; valid_domain "$domain" || err "Invalid domain"; rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" "$NGINX_ENABLED/20-hyper-host-site-$domain.conf" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"; nginx_reload; [[ "$mode" == "--delete-files" ]] && rm -rf "$SITES_DIR/$domain"; log "Site deleted: $domain / $mode"; }
+cmd_delete_site() {
+  local domain="${1:-}" mode="${2:---keep-files}"
+  [[ -n "$domain" ]] || err "Domain required"
+  valid_domain "$domain" || err "Invalid domain"
+  rm -f "$NGINX_ENABLED/hyper-host-site-$domain.conf" "$NGINX_ENABLED/20-hyper-host-site-$domain.conf" "$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
+  if [[ "$mode" == "--delete-files" ]]; then
+    rm -rf "$SITES_DIR/$domain"
+  else
+    mkdir -p "$SITES_DIR/$domain"
+    touch "$SITES_DIR/$domain/.hyper-host-disabled"
+  fi
+  if [[ -x /usr/local/sbin/hyper-host-nginx-reconcile ]]; then
+    /usr/local/sbin/hyper-host-nginx-reconcile
+  else
+    nginx_reload
+  fi
+  log "Site deleted: $domain / $mode"
+}
 is_private_ipv4() {
   local ip="$1"
   [[ "$ip" =~ ^10\. ]] && return 0
