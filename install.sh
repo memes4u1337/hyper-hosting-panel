@@ -254,8 +254,8 @@ log "Копирование файлов панели..."
 rsync -a --delete "$PROJECT_DIR/src/" "$PANEL_DIR/"
 rsync -a --delete "$PROJECT_DIR/templates/" "$BASE_DIR/templates/"
 install -m 0755 "$PROJECT_DIR/scripts/hhctl" "$CONTROL_BIN"
-[[ -f "$PROJECT_DIR/scripts/nginx_recover_v87.py" ]] && install -m 0755 "$PROJECT_DIR/scripts/nginx_recover_v87.py" /opt/hyper-host/nginx_recover_v87.py
-[[ -f "$PROJECT_DIR/scripts/nginx-reconcile-v87.sh" ]] && install -m 0755 "$PROJECT_DIR/scripts/nginx-reconcile-v87.sh" /usr/local/sbin/hyper-host-nginx-reconcile
+[[ -f "$PROJECT_DIR/scripts/nginx_recover_v89.py" ]] && install -m 0755 "$PROJECT_DIR/scripts/nginx_recover_v89.py" /opt/hyper-host/nginx_recover_v89.py
+[[ -f "$PROJECT_DIR/scripts/nginx-reconcile-v89.sh" ]] && install -m 0755 "$PROJECT_DIR/scripts/nginx-reconcile-v89.sh" /usr/local/sbin/hyper-host-nginx-reconcile
 install -m 0755 "$PROJECT_DIR/scripts/hyper" "$HYPER_BIN"
 install -m 0755 "$PROJECT_DIR/scripts/hyper_ftp_server.py" "$HYPER_FTP_BIN"
 mkdir -p "$BASE_DIR/deploy-center/defaults" /var/www/hyper-host-deploy/master /var/www/hyper-host-deploy/template /var/www/hyper-host-managed-bots
@@ -286,6 +286,7 @@ CACHE_DIR="${CACHE_DIR}"
 DNS_DIR="${DNS_DIR}"
 PHP_FPM_SOCK="${PHP_FPM_SOCK}"
 PHPMYADMIN_PATH="/usr/share/phpmyadmin"
+ACME_WEBROOT="${BASE_DIR}/acme-webroot"
 EOCONF
 chmod 0644 "$CONF_DIR/hyper-host.conf"
 
@@ -424,9 +425,16 @@ EONGINX
 
 rm -f /etc/nginx/sites-enabled/default
 ln -sf /etc/nginx/sites-available/hyper-host-panel.conf /etc/nginx/sites-enabled/hyper-host-panel.conf
-nginx -t
+mkdir -p "${BASE_DIR}/acme-webroot/.well-known/acme-challenge"
+chown -R www-data:www-data "${BASE_DIR}/acme-webroot" 2>/dev/null || true
+chmod -R a+rX "${BASE_DIR}/acme-webroot"
+if [[ -x /usr/local/sbin/hyper-host-nginx-reconcile ]]; then
+  /usr/local/sbin/hyper-host-nginx-reconcile
+else
+  nginx -t
+  systemctl reload nginx
+fi
 systemctl enable nginx >/dev/null 2>&1 || true
-systemctl reload nginx
 
 log "Настройка FTP..."
 FTP_USER_CONF_DIR="$BASE_DIR/ftp/user_conf"

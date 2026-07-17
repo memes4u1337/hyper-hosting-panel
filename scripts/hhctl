@@ -23,6 +23,7 @@ DNS_DIR="${DNS_DIR:-/etc/bind/hyper-host-zones}"
 CRON_DIR="/etc/cron.d"
 NGINX_AVAILABLE="/etc/nginx/sites-available"
 NGINX_ENABLED="/etc/nginx/sites-enabled"
+ACME_WEBROOT="${ACME_WEBROOT:-$BASE_DIR/acme-webroot}"
 
 # v44: FTP работает через встроенный HYPER-HOST FTP server.
 # Создание/удаление FTP не трогает /etc/passwd, /etc/fstab, PAM и vsftpd.
@@ -35,7 +36,7 @@ HYPER_FTP_BIN="${HYPER_FTP_BIN:-/usr/local/sbin/hyper-host-ftp-server}"
 HYPER_FTP_SERVICE="${HYPER_FTP_SERVICE:-hyper-host-ftp.service}"
 HYPER_FTP_PID="${HYPER_FTP_PID:-$BASE_DIR/run/hyper-host-ftp.pid}"
 
-export PANEL_NAME POWERED_BY SERVER_IP PUBLIC_IP PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB HYPER_FTP_BIN HYPER_FTP_SERVICE HYPER_FTP_PID
+export PANEL_NAME POWERED_BY SERVER_IP PUBLIC_IP PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR ACME_WEBROOT FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB HYPER_FTP_BIN HYPER_FTP_SERVICE HYPER_FTP_PID
 BOT_USER="${BOT_USER:-hyperbot}"
 PM2_HOME_DIR="${PM2_HOME_DIR:-$BOTS_DIR/.pm2}"
 DEPLOY_CENTER_DIR="${DEPLOY_CENTER_DIR:-/opt/hyper-host/deploy-center}"
@@ -181,13 +182,29 @@ print(json.dumps({
 PYST
 }
 
+nginx_autorepair() {
+  nginx -t >/dev/null 2>&1 && return 0
+  [[ -x /usr/local/sbin/hyper-host-nginx-reconcile ]] || return 1
+  /usr/local/sbin/hyper-host-nginx-reconcile >/dev/null 2>&1 || return 1
+  nginx -t >/dev/null 2>&1
+}
+
 nginx_reload() {
+  local output=""
   if [[ -x /usr/local/sbin/hyper-host-nginx-reconcile ]]; then
-    /usr/local/sbin/hyper-host-nginx-reconcile >/dev/null
-  else
-    nginx -t >/dev/null
-    systemctl restart nginx
+    if ! output="$(/usr/local/sbin/hyper-host-nginx-reconcile 2>&1)"; then
+      printf '%s\n' "$output" >&2
+      err "Не удалось пересобрать управляемый Nginx-конфиг"
+    fi
   fi
+  if ! output="$(nginx -t 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    err "Nginx-конфиг не прошёл проверку"
+  fi
+  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || {
+    systemctl status nginx --no-pager -l >&2 2>/dev/null || true
+    err "Nginx не перезагрузился"
+  }
 }
 
 
@@ -238,57 +255,112 @@ safe_write_file_optional() {
 
 
 ensure_acme_location_for_conf() {
-  # Всегда переписывает ACME-блок с правильным root.
-  # Старые конфиги могли содержать marker, но root был уже не тот — из-за этого SSL preflight писал,
-  # что nginx локально не отдаёт /.well-known/acme-challenge.
-  local conf="$1" root_path="$2"
+  # Безопасно обновляет ACME location во всех server-блоках, не вставляя его
+  # внутрь location/if. Challenge всегда обслуживается из единого webroot,
+  # который использует certbot.
+  local conf="$1" root_path="${2:-$ACME_WEBROOT}"
   [[ -f "$conf" ]] || return 0
   python3 - "$conf" "$root_path" <<'PYACME'
-import sys, pathlib, re
-conf = pathlib.Path(sys.argv[1])
+import pathlib, re, sys
+
+path = pathlib.Path(sys.argv[1])
 root = sys.argv[2]
-text = conf.read_text(encoding='utf-8', errors='ignore')
-block = '\n'.join([
-    '',
-    '    # HYPER-HOST ACME CHALLENGE',
-    '    location ^~ /.well-known/acme-challenge/ {',
-    '        root %s;' % root,
-    '        default_type "text/plain";',
-    '        try_files $uri =404;',
-    '        allow all;',
-    '    }',
-    ''
-])
-text = re.sub(r'\n\s*# HYPER-HOST ACME CHALLENGE\n\s*location \^~ /\.well-known/acme-challenge/ \{.*?\n\s*\}\n', '\n', text, flags=re.S)
-needle = '    location ~ /\\. { deny all; }'
-if needle in text:
-    text = text.replace(needle, block + '\n' + needle, 1)
-else:
-    m = re.search(r'\n\}', text)
-    if m:
-        text = text[:m.start()] + block + text[m.start():]
-    else:
-        text += block
-conf.write_text(text, encoding='utf-8')
+text = path.read_text(encoding='utf-8', errors='ignore')
+
+
+def matching_brace(src: str, opening: int) -> int:
+    depth = 0
+    quote = None
+    escaped = False
+    comment = False
+    for i in range(opening, len(src)):
+        ch = src[i]
+        if comment:
+            if ch == '\n':
+                comment = False
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch == '#':
+            comment = True
+        elif ch in ('"', "'"):
+            quote = ch
+        elif ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return i
+    raise ValueError('unbalanced nginx braces')
+
+
+def blocks(src: str, pattern: re.Pattern[str]):
+    found = []
+    pos = 0
+    while True:
+        m = pattern.search(src, pos)
+        if not m:
+            break
+        opening = src.find('{', m.start(), m.end())
+        if opening < 0:
+            break
+        closing = matching_brace(src, opening)
+        found.append((m.start(), closing + 1, opening, closing))
+        pos = closing + 1
+    return found
+
+server_re = re.compile(r'(?m)^[ \t]*server[ \t]*\{')
+acme_re = re.compile(r'(?m)^[ \t]*location[ \t]+\^~[ \t]+/\.well-known/acme-challenge/[ \t]*\{')
+marker_re = re.compile(r'(?m)^[ \t]*# HYPER-HOST ACME CHALLENGE[ \t]*\n?')
+
+server_blocks = blocks(text, server_re)
+for start, end, opening, closing in reversed(server_blocks):
+    body = text[opening + 1:closing]
+    acme_blocks = blocks(body, acme_re)
+    for a_start, a_end, _, _ in reversed(acme_blocks):
+        prefix = body[:a_start]
+        marker = marker_re.search(prefix[max(0, len(prefix) - 160):])
+        if marker:
+            absolute = max(0, len(prefix) - 160) + marker.start()
+            a_start = absolute
+        body = body[:a_start].rstrip() + '\n' + body[a_end:].lstrip('\n')
+    block = (
+        '\n    # HYPER-HOST ACME CHALLENGE\n'
+        '    location ^~ /.well-known/acme-challenge/ {\n'
+        f'        root {root};\n'
+        '        default_type text/plain;\n'
+        '        try_files $uri =404;\n'
+        '        allow all;\n'
+        '    }\n'
+    )
+    body = body.rstrip() + block
+    text = text[:opening + 1] + body + text[closing:]
+
+path.write_text(text, encoding='utf-8')
 PYACME
 }
 
 ensure_acme_location_for_domain() {
-  local domain="$1" root="$2" conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
-  ensure_acme_location_for_conf "$conf" "$root"
+  local domain="$1" conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
+  ensure_acme_location_for_conf "$conf" "$ACME_WEBROOT"
 }
 
 ensure_acme_locations_all() {
-  local conf domain root
+  local conf
+  mkdir -p "$ACME_WEBROOT/.well-known/acme-challenge"
   shopt -s nullglob
   for conf in "$NGINX_AVAILABLE"/hyper-host-site-*.conf; do
-    domain="${conf##*/hyper-host-site-}"; domain="${domain%.conf}"
-    root="$(awk '/^[[:space:]]*root[[:space:]]+/ {gsub(";", "", $2); print $2; exit}' "$conf" 2>/dev/null || true)"
-    [[ -n "$root" ]] || root="$SITES_DIR/$domain/public_html"
-    ensure_acme_location_for_conf "$conf" "$root"
+    ensure_acme_location_for_conf "$conf" "$ACME_WEBROOT"
   done
   shopt -u nullglob
 }
+
 
 write_panel_nginx_conf() {
   local domain="${1:-$PANEL_DOMAIN}" names="" item cert="" key="" candidate candidate_key
@@ -304,9 +376,9 @@ write_panel_nginx_conf() {
   [[ -n "$names" ]] || names="127.0.0.1 localhost"
 
   mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled \
-    "$panel_root/.well-known/acme-challenge"
-  chown -R www-data:www-data "$panel_root/.well-known" 2>/dev/null || true
-  chmod -R a+rX "$panel_root/.well-known" 2>/dev/null || true
+    "$ACME_WEBROOT/.well-known/acme-challenge"
+  chown -R www-data:www-data "$ACME_WEBROOT/.well-known" 2>/dev/null || true
+  chmod -R a+rX "$ACME_WEBROOT/.well-known" 2>/dev/null || true
 
   # Подключаем существующий реальный сертификат панели, если он ещё есть.
   if valid_domain "$domain"; then
@@ -336,7 +408,7 @@ server {
     error_log /var/log/nginx/hyper-host-panel.error.log;
 
     location ^~ /.well-known/acme-challenge/ {
-        root ${panel_root};
+        root ${ACME_WEBROOT};
         default_type text/plain;
         try_files \$uri =404;
         allow all;
@@ -382,7 +454,7 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
 
     location ^~ /.well-known/acme-challenge/ {
-        root ${panel_root};
+        root ${ACME_WEBROOT};
         default_type text/plain;
         try_files \$uri =404;
         allow all;
@@ -646,7 +718,7 @@ server {
     location / { try_files \$uri \$uri/ /index.php?\$query_string; }
     # HYPER-HOST ACME CHALLENGE
     location ^~ /.well-known/acme-challenge/ {
-        root ${root};
+        root ${ACME_WEBROOT};
         default_type "text/plain";
         try_files \$uri =404;
         allow all;
@@ -800,21 +872,24 @@ nginx_domains_for_site() {
 }
 
 local_http_challenge_check() {
-  local domain="$1" root="$2" token body url
-  [[ -d "$root" ]] || return 2
-  ensure_acme_location_for_domain "$domain" "$root"
-  nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
-  mkdir -p "$root/.well-known/acme-challenge"
+  local domain="$1" root="${2:-}" token body url
+  [[ -n "$root" && -d "$root" ]] || return 2
+  mkdir -p "$ACME_WEBROOT/.well-known/acme-challenge"
+  chown -R www-data:www-data "$ACME_WEBROOT/.well-known" 2>/dev/null || true
+  chmod -R a+rX "$ACME_WEBROOT/.well-known" 2>/dev/null || true
   token="hyper-host-ssl-test-$(date +%s)-$$"
-  printf 'ok-%s' "$token" > "$root/.well-known/acme-challenge/$token"
-  chmod -R a+rX "$root/.well-known" 2>/dev/null || true
+  printf 'ok-%s' "$token" > "$ACME_WEBROOT/.well-known/acme-challenge/$token"
   for url in "http://127.0.0.1/.well-known/acme-challenge/$token" "http://${SERVER_IP}/.well-known/acme-challenge/$token"; do
-    body="$(curl -fsS --connect-timeout 1 --max-time 2 -H "Host: $domain" "$url" 2>/dev/null || true)"
-    [[ "$body" == "ok-$token" ]] && { rm -f "$root/.well-known/acme-challenge/$token" 2>/dev/null || true; return 0; }
+    body="$(curl --noproxy '*' -fsS --connect-timeout 2 --max-time 5 -H "Host: $domain" "$url" 2>/dev/null || true)"
+    if [[ "$body" == "ok-$token" ]]; then
+      rm -f "$ACME_WEBROOT/.well-known/acme-challenge/$token" 2>/dev/null || true
+      return 0
+    fi
   done
-  rm -f "$root/.well-known/acme-challenge/$token" 2>/dev/null || true
+  rm -f "$ACME_WEBROOT/.well-known/acme-challenge/$token" 2>/dev/null || true
   return 1
 }
+
 
 ssl_preflight_json() {
   local domain="$1" root pub configured outbound expected arec aaaarec ips dns_status nginx_ok http_ok has_site certbot_ready problem required_a nat_mode warning
@@ -836,7 +911,7 @@ ssl_preflight_json() {
   else
     dns_status="wrong_ip"
   fi
-  nginx_ok=0; nginx -t >/dev/null 2>&1 && nginx_ok=1
+  nginx_ok=0; nginx_autorepair && nginx_ok=1
   has_site=0; [[ -f "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" || -d "$root" ]] && has_site=1
   http_ok=0; [[ "$nginx_ok" == 1 ]] && local_http_challenge_check "$domain" "$root" && http_ok=1
   certbot_ready=0; [[ "$dns_status" == ok && "$nginx_ok" == 1 && "$http_ok" == 1 && "$has_site" == 1 ]] && certbot_ready=1
@@ -1022,16 +1097,41 @@ EOFIPNGINX
 
 
 cmd_ssl_fix_site() {
-  local domain="${1:-}"
+  local domain="${1:-}" root output
   [[ -n "$domain" ]] || err "Domain required"
   valid_domain "$domain" || err "Invalid domain"
-  local root="$(site_root_for_domain "$domain")"
+  root="$(site_root_for_domain "$domain")"
+  [[ -d "$root" ]] || err "Site root not found: $root"
+  mkdir -p "$ACME_WEBROOT/.well-known/acme-challenge" /var/log/nginx
+  chown -R www-data:www-data "$ACME_WEBROOT" 2>/dev/null || true
+  chmod -R a+rX "$ACME_WEBROOT" 2>/dev/null || true
   ensure_acme_location_for_domain "$domain" "$root"
-  mkdir -p "$root/.well-known/acme-challenge"
-  chown -R www-data:www-data "$root/.well-known" 2>/dev/null || true
-  chmod -R a+rX "$root/.well-known" 2>/dev/null || true
-  nginx_reload
-  log "SSL ACME location fixed for $domain -> $root"
+  if ! nginx_reload; then
+    err "Не удалось восстановить Nginx для $domain"
+  fi
+  if ! local_http_challenge_check "$domain" "$root"; then
+    output="$(nginx -T 2>&1 || true)"
+    printf '%s\n' "$output" | grep -E "server_name|acme-challenge|configuration file" | tail -n 80 >&2 || true
+    err "ACME challenge для $domain всё ещё не отдаётся локально"
+  fi
+  log "SSL ACME полностью исправлен: $domain -> $ACME_WEBROOT"
+}
+
+
+find_valid_certificate_for_domain() {
+  local domain="$1" cert key
+  shopt -s nullglob
+  for cert in /etc/letsencrypt/live/*/fullchain.pem /opt/hyper-host/letsencrypt/live/*/fullchain.pem; do
+    key="${cert%/fullchain.pem}/privkey.pem"
+    [[ -f "$cert" && -f "$key" ]] || continue
+    openssl x509 -in "$cert" -noout -checkend 0 >/dev/null 2>&1 || continue
+    openssl x509 -in "$cert" -noout -checkhost "$domain" >/dev/null 2>&1 || continue
+    printf '%s\n' "$cert"
+    shopt -u nullglob
+    return 0
+  done
+  shopt -u nullglob
+  return 1
 }
 
 cmd_ssl_site() {
@@ -1039,27 +1139,27 @@ cmd_ssl_site() {
   [[ -n "$domain" && -n "$email" ]] || err "Domain and email required"
   valid_domain "$domain" || err "Invalid domain"
   [[ -d "$SITES_DIR/$domain/public_html" ]] || err "Site root not found: $SITES_DIR/$domain/public_html"
+  command -v certbot >/dev/null 2>&1 || err "certbot не установлен"
   cleanup_hyper_host_mounts
   ensure_dirs
   ufw allow 80/tcp >/dev/null 2>&1 || true
   ufw allow 443/tcp >/dev/null 2>&1 || true
-  mkdir -p /opt/hyper-host/acme-webroot/.well-known/acme-challenge /var/log/letsencrypt
-  nginx_reload
-  local token body log_file
-  token="hyper-host-site-ssl-test-$(date +%s)-$$"
-  printf 'ok-%s' "$token" > "/opt/hyper-host/acme-webroot/.well-known/acme-challenge/$token"
-  body="$(curl --noproxy '*' -fsS --connect-timeout 2 --max-time 5 -H "Host: $domain" "http://127.0.0.1/.well-known/acme-challenge/$token" 2>/dev/null || true)"
-  rm -f "/opt/hyper-host/acme-webroot/.well-known/acme-challenge/$token" 2>/dev/null || true
-  [[ "$body" == "ok-$token" ]] || err "Сайт локально не отдаёт ACME для $domain"
+  mkdir -p "$ACME_WEBROOT/.well-known/acme-challenge" /var/log/letsencrypt
+  cmd_ssl_fix_site "$domain"
   dns_points_here "$domain" || err "DNS $domain не смотрит на этот сервер"
+  local log_file
   log_file="/var/log/letsencrypt/hyper-host-${domain}-$(date +%F-%H%M%S).log"
-  if ! certbot certonly --webroot -w /opt/hyper-host/acme-webroot --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --preferred-challenges http --cert-name "$domain" -d "$domain" >"$log_file" 2>&1; then
+  if ! certbot certonly --webroot -w "$ACME_WEBROOT" --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --preferred-challenges http --cert-name "$domain" -d "$domain" >"$log_file" 2>&1; then
     tail -n 120 "$log_file" >&2 || true
     err "SSL не выпущен. Лог: $log_file"
   fi
   nginx_reload
-  log "SSL issued for $domain / log: $log_file"
+  local issued_cert
+  issued_cert="$(find_valid_certificate_for_domain "$domain" || true)"
+  [[ -n "$issued_cert" ]] || err "Certbot завершился, но сертификат $domain не найден или не подходит домену"
+  log "SSL issued and connected for $domain: $issued_cert / log: $log_file"
 }
+
 
 cmd_site_php() {
   local domain="${1:-}" version="${2:-}"
@@ -3277,7 +3377,7 @@ cmd_network_fix() {
 cmd_network_doctor_json() {
   local domain="${1:-}" pub cfg out server nginx_ok bind_ok ufw_status l80 l443 l53 dns_a dns_a_local dns_status local_http local_acme root problem hint
   server="$SERVER_IP"; cfg="$(configured_public_ip)"; pub="$(public_ip)"; out="$(outbound_public_ip)"
-  nginx_ok=0; nginx -t >/dev/null 2>&1 && nginx_ok=1
+  nginx_ok=0; nginx_autorepair && nginx_ok=1
   bind_ok=0; systemctl is-active bind9 >/dev/null 2>&1 && bind_ok=1
   ufw_status="$(ufw status 2>/dev/null | head -n1 | sed 's/^Status: //')"
   l80=0; listen_port_tcp 80 && l80=1
@@ -3620,12 +3720,12 @@ cmd_panel_ssl() {
   cmd_panel_domain set "$domain" >/dev/null
   ufw allow 80/tcp >/dev/null 2>&1 || true
   ufw allow 443/tcp >/dev/null 2>&1 || true
-  mkdir -p /opt/hyper-host/acme-webroot/.well-known/acme-challenge /var/log/letsencrypt
+  mkdir -p "$ACME_WEBROOT/.well-known/acme-challenge" /var/log/letsencrypt
   local token body expected check_ip log_file
   token="hyper-host-panel-ssl-test-$(date +%s)-$$"
-  printf 'ok-%s' "$token" > "/opt/hyper-host/acme-webroot/.well-known/acme-challenge/$token"
+  printf 'ok-%s' "$token" > "$ACME_WEBROOT/.well-known/acme-challenge/$token"
   body="$(curl --noproxy '*' -fsS --connect-timeout 2 --max-time 5 -H "Host: $domain" "http://127.0.0.1/.well-known/acme-challenge/$token" 2>/dev/null || true)"
-  rm -f "/opt/hyper-host/acme-webroot/.well-known/acme-challenge/$token" 2>/dev/null || true
+  rm -f "$ACME_WEBROOT/.well-known/acme-challenge/$token" 2>/dev/null || true
   [[ "$body" == "ok-$token" ]] || err "Панель локально не отдаёт ACME для $domain"
   expected="$(public_ip)"
   check_ip="$(resolve_domain_a_public "$domain" | head -n1)"
@@ -3633,7 +3733,7 @@ cmd_panel_ssl() {
     err "DNS панели смотрит не туда: $domain -> ${check_ip:-нет A}. Нужно: A $domain $expected"
   fi
   log_file="/var/log/letsencrypt/hyper-host-panel-${domain}-$(date +%F-%H%M%S).log"
-  if ! certbot certonly --webroot -w /opt/hyper-host/acme-webroot --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --preferred-challenges http --cert-name "$domain" -d "$domain" >"$log_file" 2>&1; then
+  if ! certbot certonly --webroot -w "$ACME_WEBROOT" --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --preferred-challenges http --cert-name "$domain" -d "$domain" >"$log_file" 2>&1; then
     tail -n 120 "$log_file" >&2 || true
     err "SSL панели не выпущен. Лог: $log_file"
   fi
