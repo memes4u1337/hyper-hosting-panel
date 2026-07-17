@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+INSTALLER_VERSION="92"
 PANEL_NAME="HYPER-HOST"
-POWERED_BY="powered by memes4u1337"
+POWERED_BY="Разработано memes4u1337"
+AUTHOR="memes4u1337"
+PROJECT_SITE="https://hyper-host.pw"
+PANEL_SITE="https://panel.hyper-host.pw"
+REPOSITORY="https://github.com/memes4u1337/hyper-hosting-panel"
+AUTHOR_URL="https://github.com/memes4u1337"
 BASE_DIR="/opt/hyper-host"
 PANEL_DIR="/var/www/hyper-host"
 SITES_DIR="/var/www/hyper-host-sites"
@@ -15,16 +21,56 @@ CONF_DIR="/etc/hyper-host"
 CONTROL_BIN="/usr/local/sbin/hyper-host-ctl"
 HYPER_BIN="/usr/local/bin/hyper"
 HYPER_FTP_BIN="/usr/local/sbin/hyper-host-ftp-server"
+HYPER_INSTALLER_BIN="/usr/local/sbin/hyper-host-installer"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [[ "${EUID}" -ne 0 ]]; then
-  echo "[HYPER-HOST] Запусти установщик от root: sudo bash install.sh"
-  exit 1
+if [[ -t 1 ]]; then
+  RESET='\033[0m'
+  BOLD='\033[1m'
+  CYAN='\033[1;96m'
+  BLUE='\033[1;94m'
+  GREEN='\033[1;92m'
+  YELLOW='\033[1;93m'
+  RED='\033[1;91m'
+  WHITE='\033[1;97m'
+else
+  RESET=''
+  BOLD=''
+  CYAN=''
+  BLUE=''
+  GREEN=''
+  YELLOW=''
+  RED=''
+  WHITE=''
 fi
 
-log() { echo -e "\033[1;36m[HYPER-HOST]\033[0m $*"; }
-warn() { echo -e "\033[1;33m[HYPER-HOST WARNING]\033[0m $*"; }
-fail() { echo -e "\033[1;31m[HYPER-HOST ERROR]\033[0m $*"; exit 1; }
+log() { printf '%b[%bHYPER-HOST%b]%b %s\n' "$BOLD" "$CYAN" "$RESET" "$RESET" "$*"; }
+warn() { printf '%b[%bHYPER-HOST WARNING%b]%b %b%s%b\n' "$BOLD" "$YELLOW" "$RESET" "$RESET" "$YELLOW" "$*" "$RESET"; }
+fail() { printf '%b[%bHYPER-HOST ERROR%b]%b %b%s%b\n' "$BOLD" "$RED" "$RESET" "$RESET" "$RED" "$*" "$RESET" >&2; exit 1; }
+
+show_install_banner() {
+  [[ -t 1 ]] && clear || true
+  printf '%b' "$CYAN"
+  cat <<'HH_BANNER'
+██╗  ██╗██╗   ██╗██████╗ ███████╗██████╗       ██╗  ██╗ ██████╗ ███████╗████████╗
+██║  ██║╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗      ██║  ██║██╔═══██╗██╔════╝╚══██╔══╝
+███████║ ╚████╔╝ ██████╔╝█████╗  ██████╔╝█████╗███████║██║   ██║███████╗   ██║
+██╔══██║  ╚██╔╝  ██╔═══╝ ██╔══╝  ██╔══██╗╚════╝██╔══██║██║   ██║╚════██║   ██║
+██║  ██║   ██║   ██║     ███████╗██║  ██║      ██║  ██║╚██████╔╝███████║   ██║
+╚═╝  ╚═╝   ╚═╝   ╚═╝     ╚══════╝╚═╝  ╚═╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝
+HH_BANNER
+  printf '%b' "$RESET"
+  printf '%b======================================================================%b\n' "$BLUE" "$RESET"
+  printf '  %bУстановка %bHYPER-HOST%b %bv%s%b\n' "$WHITE" "$CYAN" "$RESET" "$WHITE" "$INSTALLER_VERSION" "$RESET"
+  printf '  Разработчик: %b%s%b | %s\n' "$BOLD" "$AUTHOR" "$RESET" "$AUTHOR_URL"
+  printf '%b======================================================================%b\n\n' "$BLUE" "$RESET"
+}
+
+if [[ "${EUID}" -ne 0 ]]; then
+  fail "Запусти установщик от root: sudo bash setup.sh или sudo bash install.sh"
+fi
+
+show_install_banner
 
 # v49: раньше при занятой dpkg-блокировке (unattended-upgrades или другой apt-get,
 # который ещё не закончился) установка сразу падала с "Не удалось получить блокировку
@@ -39,6 +85,15 @@ wait_for_dpkg_lock() {
     if [[ "$waited" -ge "$max" ]]; then warn "dpkg всё ещё занят через ${max}с, пробую продолжить как есть"; break; fi
   done
 }
+
+# Ubuntu блокирует apt update, если сторонний репозиторий изменил Label/Origin/Suite.
+# Для PPA ondrej/php это штатная смена метаданных. HYPER-HOST подтверждает её
+# автоматически, чтобы установка не останавливалась посередине.
+apt_update() {
+  wait_for_dpkg_lock
+  apt-get update --allow-releaseinfo-change
+}
+
 wait_for_dpkg_lock
 
 get_server_ip() {
@@ -59,6 +114,9 @@ if [[ -f "$CONF_DIR/hyper-host.conf" ]]; then
   # shellcheck disable=SC1090
   source "$CONF_DIR/hyper-host.conf" || true
 fi
+# Брендинг установщика всегда остаётся актуальным даже при обновлении старой конфигурации.
+PANEL_NAME="HYPER-HOST"
+POWERED_BY="Разработано memes4u1337"
 SERVER_IP="${SERVER_IP:-$(get_server_ip)}"
 PUBLIC_IP="${PUBLIC_IP:-${SERVER_PUBLIC_IP:-}}"
 PANEL_DOMAIN="${PANEL_DOMAIN:-_}"
@@ -104,7 +162,7 @@ install_php_versions() {
   log "Установка PHP-FPM версий для сайтов..."
   apt-get install -y software-properties-common apt-transport-https lsb-release >/dev/null 2>&1 || true
   if ! apt-cache show php8.4-fpm >/dev/null 2>&1; then
-    add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 && apt-get update -y || warn "PPA ondrej/php недоступен, будут установлены только версии PHP из текущих репозиториев"
+    add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 && apt_update || warn "PPA ondrej/php недоступен, будут установлены только версии PHP из текущих репозиториев"
   fi
   local v pkgs pkg
   for v in 8.1 8.2 8.3 8.4; do
@@ -217,7 +275,7 @@ ensure_nologin_shell() {
 
 log "Установка системных пакетов..."
 wait_for_dpkg_lock
-apt-get update -y
+apt_update
 wait_for_dpkg_lock
 apt-get install -y \
   ca-certificates curl git unzip rsync sudo openssl ufw software-properties-common apt-transport-https lsb-release \
@@ -258,6 +316,10 @@ install -m 0755 "$PROJECT_DIR/scripts/hhctl" "$CONTROL_BIN"
 [[ -f "$PROJECT_DIR/scripts/nginx-reconcile-v89.sh" ]] && install -m 0755 "$PROJECT_DIR/scripts/nginx-reconcile-v89.sh" /usr/local/sbin/hyper-host-nginx-reconcile
 install -m 0755 "$PROJECT_DIR/scripts/hyper" "$HYPER_BIN"
 install -m 0755 "$PROJECT_DIR/scripts/hyper_ftp_server.py" "$HYPER_FTP_BIN"
+if [[ -f "$PROJECT_DIR/setup.sh" ]]; then
+  install -m 0755 "$PROJECT_DIR/setup.sh" "$HYPER_INSTALLER_BIN"
+  ln -sf "$HYPER_INSTALLER_BIN" /usr/local/bin/hyper-host-installer 2>/dev/null || true
+fi
 mkdir -p "$BASE_DIR/deploy-center/defaults" /var/www/hyper-host-deploy/master /var/www/hyper-host-deploy/template /var/www/hyper-host-managed-bots
 install -m 0755 "$PROJECT_DIR/scripts/deploy_center.py" "$BASE_DIR/deploy-center/deploy_center.py"
 install -m 0755 "$PROJECT_DIR/scripts/ssl_truth.py" "$BASE_DIR/ssl-truth.py"
@@ -269,10 +331,16 @@ ln -sf "$HYPER_BIN" /usr/bin/hyper 2>/dev/null || true
 ln -sf "$CONTROL_BIN" /usr/bin/hyper-host-ctl 2>/dev/null || true
 chmod 0755 "$CONTROL_BIN" "$HYPER_BIN" "$HYPER_FTP_BIN" /usr/bin/hyper /usr/bin/hyper-host-ctl 2>/dev/null || true
 
-log "Создание конфигурации HYPER-HOST..."
+log "Создание конфигурации панели..."
 cat > "$CONF_DIR/hyper-host.conf" <<EOCONF
 PANEL_NAME="${PANEL_NAME}"
 POWERED_BY="${POWERED_BY}"
+AUTHOR="${AUTHOR}"
+PROJECT_SITE="${PROJECT_SITE}"
+PANEL_SITE="${PANEL_SITE}"
+REPOSITORY="${REPOSITORY}"
+AUTHOR_URL="${AUTHOR_URL}"
+PROJECT_SOURCE_DIR="${PROJECT_DIR}"
 SERVER_IP="${SERVER_IP}"
 PANEL_DOMAIN="${PANEL_DOMAIN}"
 PUBLIC_IP="${PUBLIC_IP}"
@@ -519,7 +587,7 @@ fix_node_packages() {
     rm -f /etc/apt/sources.list.d/nodesource*.list /etc/apt/keyrings/nodesource.gpg 2>/dev/null || true
     apt-get install -y curl ca-certificates gnupg >/dev/null 2>&1 || true
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/tmp/hyper-host-nodesource.log 2>&1 || warn "NodeSource setup не отработал. Лог: /tmp/hyper-host-nodesource.log"
-    apt-get update -y >/dev/null 2>&1 || true
+    apt_update >/dev/null 2>&1 || true
     apt-get install -y nodejs >/tmp/hyper-host-node-install.log 2>&1 || {
       warn "Node.js 20 не установился. Лог: /tmp/hyper-host-node-install.log. Пробую дополнительно очистить libnode-dev/libnode72."
       dpkg --remove --force-all libnode-dev libnode72 npm nodejs node-gyp nodejs-doc >/tmp/hyper-host-node-dpkg-force.log 2>&1 || true
@@ -619,23 +687,42 @@ log "Проверка панели..."
 php -l "$PANEL_DIR/public/index.php" >/dev/null
 php -l "$PANEL_DIR/app/bootstrap.php" >/dev/null
 
-cat <<EOF_DONE
+PANEL_PRIMARY_URL="http://${SERVER_IP}/"
+if [[ -n "${PANEL_DOMAIN:-}" && "${PANEL_DOMAIN}" != "_" ]]; then
+  PANEL_PRIMARY_URL="https://${PANEL_DOMAIN}/"
+fi
 
-============================================================
- ${PANEL_NAME} установлен
- ${POWERED_BY}
-============================================================
- URL:      http://${SERVER_IP}/
- Login:    ${ADMIN_USER}
- Password: ${ADMIN_PASS}
- IP:       ${SERVER_IP}
-
- Файлы сайтов: ${SITES_DIR}
- Файлы ботов:  ${BOTS_DIR}
- FTP папки:     ${FTP_DIR}
- Backup:       ${BACKUP_DIR}
- phpMyAdmin:   http://${SERVER_IP}/phpmyadmin
-
- ВАЖНО: сохрани пароль сейчас.
-============================================================
-EOF_DONE
+printf '\n%b======================================================================%b\n' "$BLUE" "$RESET"
+printf '  %bHYPER-HOST УСПЕШНО УСТАНОВЛЕН%b\n' "$CYAN" "$RESET"
+printf '  Разработчик: %b%s%b\n' "$BOLD" "$AUTHOR" "$RESET"
+printf '%b======================================================================%b\n' "$BLUE" "$RESET"
+printf '\n%bДоступ к панели%b\n' "$WHITE" "$RESET"
+printf '  Основной URL:      %s\n' "$PANEL_PRIMARY_URL"
+printf '  Локальный URL:     http://%s/\n' "$SERVER_IP"
+printf '  phpMyAdmin:        http://%s/phpmyadmin\n' "$SERVER_IP"
+if [[ -n "${PANEL_DOMAIN:-}" && "${PANEL_DOMAIN}" != "_" ]]; then
+  printf '  Домен панели:      %s\n' "$PANEL_DOMAIN"
+fi
+printf '\n%bДанные администратора%b\n' "$WHITE" "$RESET"
+printf '  Логин:             %s\n' "$ADMIN_USER"
+printf '  Пароль:            %b%s%b\n' "$YELLOW" "$ADMIN_PASS" "$RESET"
+printf '\n%bПапки %bHYPER-HOST%b\n' "$WHITE" "$CYAN" "$RESET"
+printf '  Сайты:             %s\n' "$SITES_DIR"
+printf '  Telegram-боты:     %s\n' "$BOTS_DIR"
+printf '  FTP:               %s\n' "$FTP_DIR"
+printf '  Резервные копии:   %s\n' "$BACKUP_DIR"
+printf '  Конфигурация:      %s/hyper-host.conf\n' "$CONF_DIR"
+printf '\n%bПолезные команды%b\n' "$WHITE" "$RESET"
+printf '  Меню установщика:  sudo hyper-host-installer\n'
+printf '  Помощь CLI:        sudo hyper help\n'
+printf '  Ремонт:            sudo hyper repair\n'
+printf '  Статистика:        sudo hyper stats\n'
+printf '  Проверка Nginx:    sudo nginx -t\n'
+printf '  Статус SSL:        sudo hyper ssl status\n'
+printf '\n%bСсылки проекта%b\n' "$WHITE" "$RESET"
+printf '  Сайт:              %s\n' "$PROJECT_SITE"
+printf '  Панель:            %s\n' "$PANEL_SITE"
+printf '  GitHub:            %s\n' "$REPOSITORY"
+printf '  Разработчик:       %s (%s)\n' "$AUTHOR" "$AUTHOR_URL"
+printf '\n%bВАЖНО: сохрани логин и пароль администратора прямо сейчас.%b\n' "$YELLOW" "$RESET"
+printf '%b======================================================================%b\n' "$BLUE" "$RESET"
