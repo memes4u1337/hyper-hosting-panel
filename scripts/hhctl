@@ -38,8 +38,11 @@ FTP_AUTH_DB="${FTP_AUTH_DB:-$FTP_AUTH_DB_BASE.db}"
 HYPER_FTP_BIN="${HYPER_FTP_BIN:-/usr/local/sbin/hyper-host-ftp-server}"
 HYPER_FTP_SERVICE="${HYPER_FTP_SERVICE:-hyper-host-ftp.service}"
 HYPER_FTP_PID="${HYPER_FTP_PID:-$BASE_DIR/run/hyper-host-ftp.pid}"
+PROFTPD_DIR="${PROFTPD_DIR:-$BASE_DIR/proftpd}"
+PROFTPD_AUTH_SYNC="${PROFTPD_AUTH_SYNC:-$BASE_DIR/bin/proftpd_auth_sync.py}"
+PROFTPD_FIX_BIN="${PROFTPD_FIX_BIN:-$BASE_DIR/bin/hyper_ftp_proftpd_fix.sh}"
 
-export PANEL_NAME POWERED_BY SERVER_IP PUBLIC_IP PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR ACME_WEBROOT LE_CONFIG_DIR LE_WORK_DIR LE_LOGS_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB HYPER_FTP_BIN HYPER_FTP_SERVICE HYPER_FTP_PID
+export PANEL_NAME POWERED_BY SERVER_IP PUBLIC_IP PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR ACME_WEBROOT LE_CONFIG_DIR LE_WORK_DIR LE_LOGS_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB HYPER_FTP_BIN HYPER_FTP_SERVICE HYPER_FTP_PID PROFTPD_DIR PROFTPD_AUTH_SYNC PROFTPD_FIX_BIN
 BOT_USER="${BOT_USER:-hyperbot}"
 PM2_HOME_DIR="${PM2_HOME_DIR:-$BOTS_DIR/.pm2}"
 DEPLOY_CENTER_DIR="${DEPLOY_CENTER_DIR:-/opt/hyper-host/deploy-center}"
@@ -117,10 +120,10 @@ EOINI
 
 cmd_php_install_all() {
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
+  apt-get update --allow-releaseinfo-change -y
   apt-get install -y software-properties-common apt-transport-https lsb-release >/dev/null 2>&1 || true
   if ! apt-cache show php8.4-fpm >/dev/null 2>&1; then
-    add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 && apt-get update -y || true
+    add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 && apt-get update --allow-releaseinfo-change -y || true
   fi
   local v pkgs
   for v in 8.1 8.2 8.3 8.4; do
@@ -1274,20 +1277,23 @@ ftp_scope_label() {
 }
 
 ftp_link_path() {
-  # v43: FTP больше не использует bind-mount и /etc/fstab.
-  # Для встроенного FTP-сервера достаточно безопасных symlink'ов; он умеет открывать их содержимое.
+  # v1.2: ProFTPD работает в chroot. Для доступа к сайтам/ботам используем
+  # runtime bind-mount без /etc/fstab; sudo hyper ftp fix восстановит их после reboot.
   local src="${1:-}" dst="${2:-}" backup
   [[ -n "$src" && -n "$dst" ]] || return 0
   mkdir -p "$src" "$(dirname "$dst")"
-  if path_is_mount_target "$dst"; then
-    umount -lf "$dst" 2>/dev/null || true
-  fi
+  path_is_mount_target "$dst" && umount -lf "$dst" 2>/dev/null || true
   if [[ -L "$dst" ]]; then
     rm -f "$dst" 2>/dev/null || true
-  elif [[ -e "$dst" ]]; then
+  elif [[ -e "$dst" && ! -d "$dst" ]]; then
     backup="$dst.local.$(date +%s)"
-    mv "$dst" "$backup" 2>/dev/null || rm -rf --one-file-system "$dst" 2>/dev/null || true
+    mv "$dst" "$backup" 2>/dev/null || rm -f "$dst" 2>/dev/null || true
   fi
+  mkdir -p "$dst"
+  if mount --bind "$src" "$dst" 2>/dev/null; then
+    return 0
+  fi
+  rmdir "$dst" 2>/dev/null || true
   ln -sfn "$src" "$dst"
 }
 
@@ -1382,6 +1388,12 @@ ftp_auth_rebuild_db() {
     rm -f "$tmp" 2>/dev/null || true
     chmod 0600 "$FTP_AUTH_DB" 2>/dev/null || true
     chown root:root "$FTP_AUTH_DB" 2>/dev/null || true
+  fi
+  if [[ -x "$PROFTPD_AUTH_SYNC" ]]; then
+    mkdir -p "$PROFTPD_DIR"
+    "$PROFTPD_AUTH_SYNC"       --auth-text "$FTP_AUTH_TXT"       --user-conf-dir "$FTP_USER_CONF_DIR"       --ftp-dir "$FTP_DIR"       --passwd-file "$PROFTPD_DIR/ftpd.passwd"       --group-file "$PROFTPD_DIR/ftpd.group"       --uid "$(id -u "$FTP_GUEST_USER" 2>/dev/null || echo 33)"       --gid "$(id -g "$FTP_GUEST_USER" 2>/dev/null || echo 33)"       --group-name "$FTP_GUEST_USER" >/dev/null 2>&1 || true
+    systemctl reload hyper-host-proftpd-lan.service >/dev/null 2>&1 || true
+    systemctl reload hyper-host-proftpd-wan.service >/dev/null 2>&1 || true
   fi
   return 0
 }
@@ -1848,7 +1860,7 @@ ensure_bot_user() {
 }
 node_major() { node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 | grep -E '^[0-9]+$' || echo 0; }
 ensure_node_runtime() {
-  # v50 fix: раньше apt-get update -y (по ВСЕМ репозиториям: ubuntu x4, nodesource,
+  # v50 fix: раньше apt-get update --allow-releaseinfo-change -y (по ВСЕМ репозиториям: ubuntu x4, nodesource,
   # ondrej/php PPA) запускался БЕЗУСЛОВНО при каждом создании/деплое бота — даже
   # когда Node.js уже стоит нужной версии. На домашнем интернете это легко давало
   # 10-60+ секунд ожидания на пустом месте при КАЖДОМ боте. Теперь если Node.js уже
@@ -1857,7 +1869,7 @@ ensure_node_runtime() {
   if [[ "$major" -ge "$NODE_MAJOR_MIN" ]] && command -v npm >/dev/null 2>&1; then
     return 0
   fi
-  apt-get update -y >/dev/null 2>&1 || true
+  apt-get update --allow-releaseinfo-change -y >/dev/null 2>&1 || true
   apt-get install -y curl ca-certificates gnupg >/dev/null 2>&1 || true
   dpkg --configure -a >/tmp/hyper-host-dpkg-configure.log 2>&1 || true
   apt-get -f install -y >/tmp/hyper-host-apt-fix.log 2>&1 || true
@@ -1867,7 +1879,7 @@ ensure_node_runtime() {
     apt-get autoremove -y >/tmp/hyper-host-node-autoremove.log 2>&1 || true
     rm -f /etc/apt/sources.list.d/nodesource*.list /etc/apt/keyrings/nodesource.gpg 2>/dev/null || true
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/tmp/hyper-host-nodesource.log 2>&1 || true
-    apt-get update -y >/dev/null 2>&1 || true
+    apt-get update --allow-releaseinfo-change -y >/dev/null 2>&1 || true
     apt-get install -y nodejs >/tmp/hyper-host-node-install.log 2>&1 || apt-get install -y nodejs npm || true
   fi
   command -v npm >/dev/null 2>&1 || apt-get install -y npm || true
@@ -2878,7 +2890,7 @@ start_hyper_ftp_runtime() {
 }
 
 hyper_ftp_is_active() {
-  listen_port_tcp 21 && pgrep -af "hyper_ftp_server.py|hyper-host-ftp-server" >/dev/null 2>&1
+  listen_port_tcp 21 && { pgrep -x proftpd >/dev/null 2>&1 || pgrep -af "hyper_ftp_server.py|hyper-host-ftp-server" >/dev/null 2>&1; }
 }
 
 assert_hyper_ftp_ready() {
@@ -2892,68 +2904,24 @@ assert_hyper_ftp_ready() {
 }
 
 ensure_vsftpd_external_access() {
-  # v44: используется встроенный FTP-сервер HYPER-HOST, не vsftpd.
-  # Поэтому создание FTP не зависит от /etc/passwd, /etc/fstab, PAM и systemd.
+  # v1.2: возвращён стабильный ProFTPD/FTPS. Встроенный Python FTP остаётся
+  # только аварийным fallback, если helper не установлен.
   ensure_ftp_virtual_dirs
+  ftp_auth_rebuild_db || true
+  if [[ -x "$PROFTPD_FIX_BIN" ]]; then
+    "$PROFTPD_FIX_BIN"
+    return 0
+  fi
+
+  warn "Не найден $PROFTPD_FIX_BIN; запускаю аварийный встроенный FTP"
   mkdir -p "$BASE_DIR/run" "$FTP_DIR" "$FTP_USER_CONF_DIR" /var/log
   chmod 0755 "$FTP_DIR" "$FTP_USER_CONF_DIR" 2>/dev/null || true
-  ftp_auth_rebuild_db || true
-
-  resolve_hyper_ftp_bin >/dev/null || err "Не найден HYPER-HOST FTP server. Запусти: sudo bash install.sh"
-
-  # Освобождаем 21 порт от старого vsftpd, но не считаем его отсутствие ошибкой.
-  # v45 fix: раньше vsftpd только останавливался и disable'ился. Но "disable" не мешает
-  # ручному "systemctl restart vsftpd" (например в старых deploy-скриптах) снова
-  # поднять vsftpd на порту 21 — он начинает драться за порт с hyper-host-ftp.service
-  # (у обоих Restart=always), и FileZilla то коннектится, то нет, то видит не те
-  # аккаунты. "mask" полностью блокирует запуск vsftpd, пока его явно не "unmask".
-  systemctl stop vsftpd >/dev/null 2>&1 || true
-  systemctl disable vsftpd >/dev/null 2>&1 || true
-  systemctl mask vsftpd >/dev/null 2>&1 || true
-
+  resolve_hyper_ftp_bin >/dev/null || err "Не найден FTP server. Запусти: sudo bash install.sh"
   open_server_ports
-
-  # Если systemd доступен на запись — ставим автозапуск. Если /etc read-only — молча запускаем runtime.
-  if [[ -d /etc/systemd/system && -w /etc/systemd/system ]]; then
-    local bin
-    bin="$(resolve_hyper_ftp_bin)" || err "Не найден HYPER-HOST FTP server"
-    cat > /tmp/hyper-host-ftp.service.$$ <<EOSVC
-[Unit]
-Description=HYPER-HOST FTP server
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-Environment=HYPER_HOST_CONF=$CONF
-ExecStart=$bin --host 0.0.0.0 --port 21 --passive-min 40000 --passive-max 40100
-Restart=always
-RestartSec=2
-LimitNOFILE=65535
-
-[Install]
-WantedBy=multi-user.target
-EOSVC
-    if cat /tmp/hyper-host-ftp.service.$$ > /etc/systemd/system/hyper-host-ftp.service 2>/dev/null; then
-      rm -f /tmp/hyper-host-ftp.service.$$ 2>/dev/null || true
-      systemctl daemon-reload >/dev/null 2>&1 || true
-      systemctl enable hyper-host-ftp.service >/dev/null 2>&1 || true
-      systemctl restart hyper-host-ftp.service >/dev/null 2>&1 || true
-    else
-      rm -f /tmp/hyper-host-ftp.service.$$ 2>/dev/null || true
-      start_hyper_ftp_runtime
-    fi
-  else
-    start_hyper_ftp_runtime
-  fi
-
+  start_hyper_ftp_runtime
   sleep 1
-  if ! listen_port_tcp 21; then
-    start_hyper_ftp_runtime
-  fi
   assert_hyper_ftp_ready
 }
-
 
 cmd_ftp_fix_all() {
   # v41: ftp fix теперь не только правит vsftpd, но и восстанавливает bind-mount'ы аккаунтов из базы панели.
@@ -2994,8 +2962,8 @@ cmd_ftp_doctor_json() {
   local_banner="$(timeout 3 bash -c 'head -c 120 < /dev/tcp/127.0.0.1/21' 2>/dev/null | tr -d '\\r' | head -n1 || true)"
   lan_banner=""
   [[ -n "${SERVER_IP:-}" ]] && lan_banner="$(timeout 3 bash -c "head -c 120 < /dev/tcp/${SERVER_IP}/21" 2>/dev/null | tr -d '\\r' | head -n1 || true)"
-  service="$(systemctl is-active hyper-host-ftp.service 2>/dev/null || true)"
-  proc="$(pgrep -af 'hyper_ftp_server.py|hyper-host-ftp-server' 2>/dev/null | head -n1 || true)"
+  service="$(systemctl is-active hyper-host-proftpd-lan.service 2>/dev/null || systemctl is-active hyper-host-ftp.service 2>/dev/null || true)"
+  proc="$(pgrep -af 'proftpd|hyper_ftp_server.py|hyper-host-ftp-server' 2>/dev/null | head -n1 || true)"
   # v46: сравниваем настроенный публичный IP с тем, что реально видно из интернета
   # (curl ifconfig.me и т.п.). Если они не совпадают — почти наверняка сервер за CGNAT
   # (двойной NAT у провайдера) и настроенный IP снаружи вообще недостижим ни на каком
@@ -3018,11 +2986,11 @@ cmd_ftp_doctor_json() {
     issue="настроенный публичный IP ($pub) не совпадает с тем, что реально видно из интернета ($outbound_ip)"
     hint="Чаще всего это просто смена IP у провайдера (динамический IP) — с v47 это чинится само в течение 5 минут (cron hyper-host-ip-watch) либо сразу командой: sudo hyper network ip-fix. Если IP снова быстро откатывается на старый — уточни у провайдера, статический ли у тебя IP, и нет ли CGNAT."
   fi
-  if [[ -z "$issue" && -n "$port21_owner" && "$port21_owner" != "python3" && "$vsftpd_active" == "active" ]]; then
+  if [[ -z "$issue" && -n "$port21_owner" && "$port21_owner" != "python3" && "$port21_owner" != "proftpd" && "$vsftpd_active" == "active" ]]; then
     issue="порт 21 занят другим сервисом ($port21_owner), похоже ожил vsftpd и дерётся за порт с hyper-host-ftp"
     hint="sudo systemctl stop vsftpd; sudo systemctl mask vsftpd; sudo hyper ftp fix"
   fi
-  if [[ -z "$issue" ]] && ! resolve_hyper_ftp_bin >/dev/null; then issue="не найден встроенный FTP-сервер"; hint="sudo bash install.sh"; fi
+  if [[ -z "$issue" && ! -x "$PROFTPD_FIX_BIN" ]] && ! resolve_hyper_ftp_bin >/dev/null; then issue="не найден FTP-компонент"; hint="sudo bash install.sh"; fi
   if [[ -z "$issue" && "$listen21" != 1 ]]; then issue="порт 21 не слушается локально"; hint="sudo hyper ftp fix"; fi
   if [[ -z "$issue" && -z "$local_banner" ]]; then issue="локальный FTP banner не отвечает"; hint="sudo tail -n 120 /var/log/hyper-host-ftp.log"; fi
   if [[ -z "$issue" && "${users_count:-0}" == "0" ]]; then issue="FTP работает, но FTP-пользователей нет"; hint="Создай FTP в панели или выполни: sudo hyper ftp user LOGIN PASSWORD all"; fi
@@ -3039,7 +3007,7 @@ print(json.dumps({
  'ftp_process': os.environ.get('PROC',''),
  'port21_owner': os.environ.get('PORT21_OWNER',''),
  'vsftpd_active': os.environ.get('VSFTPD_ACTIVE',''),
- 'ftp_backend': 'hyper-host-ftp',
+ 'ftp_backend': 'proftpd',
  'listen_21': os.environ.get('LISTEN21') == '1',
  'local_banner': os.environ.get('LOCAL_BANNER',''),
  'lan_banner': os.environ.get('LAN_BANNER',''),
@@ -3082,7 +3050,7 @@ cmd_access_doctor_json() {
   dns_udp=0; listen_port_udp 53 && dns_udp=1
   nginx="$(systemctl is-active nginx 2>/dev/null || true)"
   mariadb="$(systemctl is-active mariadb 2>/dev/null || systemctl is-active mysql 2>/dev/null || true)"
-  ftp_service="$(systemctl is-active hyper-host-ftp.service 2>/dev/null || true)"
+  ftp_service="$(systemctl is-active hyper-host-proftpd-lan.service 2>/dev/null || systemctl is-active hyper-host-ftp.service 2>/dev/null || true)"
   sshsvc="$(systemctl is-active ssh 2>/dev/null || systemctl is-active sshd 2>/dev/null || true)"
   bind9="$(systemctl is-active bind9 2>/dev/null || true)"
   SERVER_IP="$server" PUBLIC_IP="$pub" CONFIGURED_PUBLIC_IP="$cfg" OUTBOUND_PUBLIC_IP="$out" UFW="$ufw" SSH="$ssh" FTP="$ftp" HTTP="$http" HTTPS="$https" MYSQL="$mysql" DNS_TCP="$dns_tcp" DNS_UDP="$dns_udp" NGINX="$nginx" MARIADB="$mariadb" FTP_SERVICE="$ftp_service" SSHSVC="$sshsvc" BIND9="$bind9" python3 - <<'PYACCESS'
@@ -3272,7 +3240,7 @@ PYDISK
 cmd_disk_expand() {
   [[ "${EUID}" -eq 0 ]] || err "Запусти: sudo hyper disk expand"
   if ! command -v pvresize >/dev/null 2>&1; then
-    apt-get update
+    apt-get update --allow-releaseinfo-change
     apt-get install -y lvm2
   fi
 

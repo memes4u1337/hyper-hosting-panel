@@ -41,13 +41,15 @@ def local_root(conf_dir: Path, ftp_dir: Path, username: str) -> Path:
     if candidate is None:
         candidate = ftp_dir / username
     candidate.mkdir(parents=True, exist_ok=True)
-    resolved = candidate.resolve()
-    allowed = ftp_dir.resolve()
+    # Не разворачиваем bind-mount/symlink через resolve(): FTP-root должен
+    # оставаться путём внутри /var/www/hyper-host-ftp для безопасного chroot.
+    absolute = Path(os.path.abspath(candidate))
+    allowed = Path(os.path.abspath(ftp_dir))
     try:
-        resolved.relative_to(allowed)
+        absolute.relative_to(allowed)
     except ValueError as exc:
-        raise SystemExit(f"unsafe FTP home for {username}: {resolved}") from exc
-    return resolved
+        raise SystemExit(f"unsafe FTP home for {username}: {absolute}") from exc
+    return absolute
 
 
 def atomic_write(path: Path, data: str, mode: int) -> None:

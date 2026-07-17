@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-INSTALLER_VERSION="92"
+INSTALLER_VERSION="1.2"
 PANEL_NAME="HYPER-HOST"
 POWERED_BY="Разработано memes4u1337"
 AUTHOR="memes4u1337"
@@ -61,7 +61,7 @@ show_install_banner() {
 HH_BANNER
   printf '%b' "$RESET"
   printf '%b======================================================================%b\n' "$BLUE" "$RESET"
-  printf '  %bУстановка %bHYPER-HOST%b %bv%s%b\n' "$WHITE" "$CYAN" "$RESET" "$WHITE" "$INSTALLER_VERSION" "$RESET"
+  printf '  %bУстановка панели | v%s%b\n' "$WHITE" "$INSTALLER_VERSION" "$RESET"
   printf '  Разработчик: %b%s%b | %s\n' "$BOLD" "$AUTHOR" "$RESET" "$AUTHOR_URL"
   printf '%b======================================================================%b\n\n' "$BLUE" "$RESET"
 }
@@ -281,7 +281,7 @@ apt-get install -y \
   ca-certificates curl git unzip rsync sudo openssl ufw software-properties-common apt-transport-https lsb-release \
   nginx mariadb-server \
   php-fpm php-cli php-sqlite3 php-mysql php-curl php-mbstring php-xml php-zip php-gd \
-  vsftpd openssh-server certbot python3-certbot-nginx python3 python3-venv python3-pip acl cron bind9 dnsutils whois db-util
+  proftpd-basic lftp openssh-server certbot python3-certbot-nginx python3 python3-venv python3-pip acl cron bind9 dnsutils whois db-util
 
 install_php_versions
 
@@ -316,6 +316,8 @@ install -m 0755 "$PROJECT_DIR/scripts/hhctl" "$CONTROL_BIN"
 [[ -f "$PROJECT_DIR/scripts/nginx-reconcile-v89.sh" ]] && install -m 0755 "$PROJECT_DIR/scripts/nginx-reconcile-v89.sh" /usr/local/sbin/hyper-host-nginx-reconcile
 install -m 0755 "$PROJECT_DIR/scripts/hyper" "$HYPER_BIN"
 install -m 0755 "$PROJECT_DIR/scripts/hyper_ftp_server.py" "$HYPER_FTP_BIN"
+install -m 0755 "$PROJECT_DIR/scripts/proftpd_auth_sync.py" "$BASE_DIR/bin/proftpd_auth_sync.py"
+install -m 0755 "$PROJECT_DIR/scripts/hyper_ftp_proftpd_fix.sh" "$BASE_DIR/bin/hyper_ftp_proftpd_fix.sh"
 if [[ -f "$PROJECT_DIR/setup.sh" ]]; then
   install -m 0755 "$PROJECT_DIR/setup.sh" "$HYPER_INSTALLER_BIN"
   ln -sf "$HYPER_INSTALLER_BIN" /usr/local/bin/hyper-host-installer 2>/dev/null || true
@@ -504,69 +506,23 @@ else
 fi
 systemctl enable nginx >/dev/null 2>&1 || true
 
-log "Настройка FTP..."
-FTP_USER_CONF_DIR="$BASE_DIR/ftp/user_conf"
+log "Настройка FTP/FTPS через ProFTPD..."
 FTP_AUTH_TXT="$BASE_DIR/data/vsftpd_virtual_users.txt"
-FTP_GUEST_USER="www-data"
-mkdir -p "$FTP_DIR" "$BASE_DIR/data" "$BASE_DIR/ftp" "$FTP_USER_CONF_DIR" "$BASE_DIR/run" /var/log
+FTP_USER_CONF_DIR="$BASE_DIR/ftp/user_conf"
+mkdir -p "$FTP_DIR" "$BASE_DIR/data" "$BASE_DIR/ftp" "$FTP_USER_CONF_DIR" "$BASE_DIR/bin" /var/log
 [[ -f "$FTP_AUTH_TXT" ]] || touch "$FTP_AUTH_TXT"
 chmod 0600 "$FTP_AUTH_TXT" 2>/dev/null || true
 chmod 0755 "$FTP_DIR" "$FTP_USER_CONF_DIR" 2>/dev/null || true
 
-# v44: FTP обслуживает встроенный HYPER-HOST FTP server.
-# Он не использует /etc/passwd, /etc/fstab, PAM, useradd и не зависит от vsftpd.
-# v45: mask, а не только stop/disable — иначе случайный "systemctl restart vsftpd"
-# в чьём-нибудь deploy-скрипте снова поднимет vsftpd на порту 21 и он будет драться
-# за порт с hyper-host-ftp.service.
-systemctl stop vsftpd >/dev/null 2>&1 || true
-systemctl disable vsftpd >/dev/null 2>&1 || true
-systemctl mask vsftpd >/dev/null 2>&1 || true
-
-start_hyper_ftp_runtime_install() {
-  pkill -f "hyper_ftp_server.py|hyper-host-ftp-server" >/dev/null 2>&1 || true
-  nohup "$HYPER_FTP_BIN" --host 0.0.0.0 --port 21 --passive-min 40000 --passive-max 40100 >>/var/log/hyper-host-ftp.log 2>&1 &
-  echo $! > "$BASE_DIR/run/hyper-host-ftp.pid" 2>/dev/null || true
-}
-
-if [[ -d /etc/systemd/system && -w /etc/systemd/system ]]; then
-  cat > /tmp/hyper-host-ftp.service.$$ <<EOSVC
-[Unit]
-Description=HYPER-HOST FTP server
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-Environment=HYPER_HOST_CONF=$CONF_DIR/hyper-host.conf
-ExecStart=$HYPER_FTP_BIN --host 0.0.0.0 --port 21 --passive-min 40000 --passive-max 40100
-Restart=always
-RestartSec=2
-LimitNOFILE=65535
-
-[Install]
-WantedBy=multi-user.target
-EOSVC
-  if cat /tmp/hyper-host-ftp.service.$$ > /etc/systemd/system/hyper-host-ftp.service 2>/dev/null; then
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl enable hyper-host-ftp.service >/dev/null 2>&1 || true
-    systemctl restart hyper-host-ftp.service >/dev/null 2>&1 || true
-  else
-    start_hyper_ftp_runtime_install
-  fi
-  rm -f /tmp/hyper-host-ftp.service.$$ 2>/dev/null || true
-else
-  start_hyper_ftp_runtime_install
-fi
-
-sleep 1
-if ! ss -ltn 2>/dev/null | grep -q ':21 '; then
-  start_hyper_ftp_runtime_install
-  sleep 1
-fi
+# Не удаляем существующие FTP-аккаунты. Пересобираем ProFTPD auth из файла панели
+# и восстанавливаем LAN/WAN endpoints, TLS и passive-порты.
+"$CONTROL_BIN" ftp-fix
 
 ufw allow 21/tcp >/dev/null 2>&1 || true
+ufw allow 2121/tcp >/dev/null 2>&1 || true
 ufw allow 40000:40100/tcp >/dev/null 2>&1 || true
 iptables -C INPUT -p tcp --dport 21 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 21 -j ACCEPT 2>/dev/null || true
+iptables -C INPUT -p tcp --dport 2121 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 2121 -j ACCEPT 2>/dev/null || true
 iptables -C INPUT -p tcp --match multiport --dports 40000:40100 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --match multiport --dports 40000:40100 -j ACCEPT 2>/dev/null || true
 
 systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1 || true

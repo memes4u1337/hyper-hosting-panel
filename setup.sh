@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-INSTALLER_VERSION="92"
+INSTALLER_VERSION="1.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF_FILE="/etc/hyper-host/hyper-host.conf"
 PROJECT_DIR="$SCRIPT_DIR"
@@ -82,7 +82,7 @@ show_banner() {
 BANNER
   printf '%b' "$RESET"
   line
-  printf '  %bУстановщик и центр управления %bHYPER-HOST%b %bv%s%b\n' "$WHITE" "$CYAN" "$RESET" "$WHITE" "$INSTALLER_VERSION" "$RESET"
+  printf '  %bУстановщик и центр управления | v%s%b\n' "$WHITE" "$INSTALLER_VERSION" "$RESET"
   printf '  Разработчик: %b%s%b | GitHub: %s\n' "$BOLD" "$AUTHOR" "$RESET" "$AUTHOR_URL"
   line
 }
@@ -183,6 +183,18 @@ run_ssl_menu() {
   ok "SSL-операция для ${domain} завершена."
 }
 
+run_ftp_repair() {
+  show_banner
+  if ! command -v hyper >/dev/null 2>&1; then
+    error "Команда hyper ещё не установлена."
+    return 1
+  fi
+  info "Восстанавливаю ProFTPD, FTP/FTPS, passive-порты и FTP-аккаунты..."
+  hyper ftp fix
+  hyper ftp doctor || true
+  ok "FTP/FTPS восстановлен."
+}
+
 show_menu() {
   while true; do
     show_banner
@@ -191,7 +203,8 @@ show_menu() {
     printf '  %b2%b  Выполнить ремонт панели и Nginx\n' "$GREEN" "$RESET"
     printf '  %b3%b  Проверить конфигурацию Nginx\n' "$GREEN" "$RESET"
     printf '  %b4%b  Исправить ACME и выпустить SSL\n' "$GREEN" "$RESET"
-    printf '  %b5%b  Показать информацию и ссылки\n' "$GREEN" "$RESET"
+    printf '  %b5%b  Восстановить FTP/FTPS\n' "$GREEN" "$RESET"
+    printf '  %b6%b  Показать информацию и ссылки\n' "$GREEN" "$RESET"
     printf '  %b0%b  Выход\n' "$RED" "$RESET"
     if [[ -f "$CONF_FILE" ]]; then
       printf '\n  Статус: %bHYPER-HOST%b установлен | IP: %s\n' "$CYAN" "$RESET" "$SERVER_IP"
@@ -205,7 +218,8 @@ show_menu() {
       2) run_repair || true; pause_menu ;;
       3) run_nginx_check || true; pause_menu ;;
       4) run_ssl_menu || true; pause_menu ;;
-      5) show_project_info; pause_menu ;;
+      5) run_ftp_repair || true; pause_menu ;;
+      6) show_project_info; pause_menu ;;
       0) show_banner; ok "Работа установщика завершена."; exit 0 ;;
       *) warn "Неизвестный пункт: ${choice}"; sleep 1 ;;
     esac
@@ -217,6 +231,7 @@ case "${1:-}" in
   --install|install) run_install ;;
   --repair|repair) run_repair ;;
   --nginx-check|nginx-check) run_nginx_check ;;
+  --ftp-repair|ftp-repair) run_ftp_repair ;;
   --info|info) show_project_info ;;
   --help|-h|help)
     show_banner
@@ -225,6 +240,7 @@ case "${1:-}" in
     printf '  sudo bash setup.sh --install     установить или обновить %bHYPER-HOST%b\n' "$CYAN" "$RESET"
     printf '%s\n' '  sudo bash setup.sh --repair      выполнить ремонт'
     printf '%s\n' '  sudo bash setup.sh --nginx-check проверить Nginx'
+    printf '%s\n' '  sudo bash setup.sh --ftp-repair восстановить FTP/FTPS'
     printf '%s\n' '  sudo bash setup.sh --info        показать информацию и ссылки'
     ;;
   "") show_menu ;;
