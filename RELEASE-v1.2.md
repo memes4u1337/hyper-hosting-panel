@@ -1,9 +1,18 @@
 # HYPER-HOST v1.2
 
-- Удалена повторная надпись HYPER-HOST под главным баннером.
-- Текущая версия установщика: v1.2.
-- Восстановлен ProFTPD с обычным FTP и explicit TLS.
-- LAN endpoint: порт 21, passive 40000-40049.
-- WAN endpoint: порт 21 через backend 2121, passive 40050-40100.
-- Существующие FTP-аккаунты и пароли сохраняются.
-- Добавлен пункт восстановления FTP/FTPS в меню установщика.
+Исправлен критический конфликт CLI: `hyper` больше не заменяется файлом `hyper-host-ctl`.
+
+## FTP
+
+- `sudo hyper ftp fix` снова работает.
+- ProFTPD восстанавливается напрямую через `hyper-host-ctl ftp-fix`.
+- Поддерживаются FTP и explicit FTPS на TCP 21.
+- Пассивные порты: TCP 40000-40100.
+- Сохраняются существующие FTP-аккаунты панели.
+- После установки проверяются порт 21, FTP banner и TLS.
+
+## Установка патча
+
+```bash
+sudo ./apply-v1.2-ftp-final-fix.sh /root/hyper-hosting-panel
+```

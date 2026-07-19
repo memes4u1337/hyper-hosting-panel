@@ -303,7 +303,7 @@ fi
 [[ -n "$PHP_FPM_SOCK" ]] || fail "Не найден PHP-FPM socket. Проверь установку php-fpm."
 
 log "Создание папок..."
-mkdir -p "$BASE_DIR/data" "$BASE_DIR/templates" "$BACKUP_DIR" "$CACHE_DIR" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$DNS_DIR" "$CONF_DIR"
+mkdir -p "$BASE_DIR/data" "$BASE_DIR/templates" "$BASE_DIR/bin" "$BASE_DIR/logs" "$BASE_DIR/runtime" "$BACKUP_DIR" "$CACHE_DIR" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$DNS_DIR" "$CONF_DIR"
 
 log "Очистка старых сломанных FTP bind-mount'ов..."
 cleanup_hyper_host_mounts
@@ -312,6 +312,8 @@ log "Копирование файлов панели..."
 rsync -a --delete "$PROJECT_DIR/src/" "$PANEL_DIR/"
 rsync -a --delete "$PROJECT_DIR/templates/" "$BASE_DIR/templates/"
 install -m 0755 "$PROJECT_DIR/scripts/hhctl" "$CONTROL_BIN"
+[[ -f "$PROJECT_DIR/scripts/hyper_nginx_runtime.sh" ]] || fail "Не найден scripts/hyper_nginx_runtime.sh"
+install -m 0755 "$PROJECT_DIR/scripts/hyper_nginx_runtime.sh" "$BASE_DIR/bin/hyper-host-nginx-runtime"
 [[ -f "$PROJECT_DIR/scripts/nginx_recover_v89.py" ]] && install -m 0755 "$PROJECT_DIR/scripts/nginx_recover_v89.py" /opt/hyper-host/nginx_recover_v89.py
 [[ -f "$PROJECT_DIR/scripts/nginx-reconcile-v89.sh" ]] && install -m 0755 "$PROJECT_DIR/scripts/nginx-reconcile-v89.sh" /usr/local/sbin/hyper-host-nginx-reconcile
 install -m 0755 "$PROJECT_DIR/scripts/hyper" "$HYPER_BIN"
@@ -439,6 +441,16 @@ EOSUDO
 } 2>/dev/null || fail "Не удалось записать /etc/sudoers.d/hyper-host (read-only /etc/sudoers.d?) — без этого панель не сможет выполнять команды. Проверь, что корневая ФС доступна на запись: mount | grep ' / '"
 chmod 0440 /etc/sudoers.d/hyper-host
 visudo -cf /etc/sudoers.d/hyper-host >/dev/null || fail "Ошибка sudoers-конфига"
+
+log "Подключение writable Nginx runtime..."
+"$BASE_DIR/bin/hyper-host-nginx-runtime" --quiet
+if command -v crontab >/dev/null 2>&1; then
+  _hh_cron="$(crontab -l 2>/dev/null | grep -v 'HYPER-HOST-NGINX-RUNTIME' || true)"
+  {
+    printf '%s\n' "$_hh_cron"
+    printf '@reboot sleep 5; %s/bin/hyper-host-nginx-runtime --boot >>%s/logs/nginx-runtime-boot.log 2>&1 # HYPER-HOST-NGINX-RUNTIME\n' "$BASE_DIR" "$BASE_DIR"
+  } | awk 'NF' | crontab -
+fi
 
 log "Настройка Nginx для панели..."
 {

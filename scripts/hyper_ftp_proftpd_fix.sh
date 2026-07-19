@@ -230,7 +230,7 @@ if command -v crontab >/dev/null 2>&1; then
   CURRENT_CRON="$(crontab -l 2>/dev/null | grep -v 'HYPER-HOST-FTP-RESTORE' || true)"
   {
     printf '%s\n' "$CURRENT_CRON"
-    printf '@reboot sleep 20 && /usr/local/bin/hyper ftp fix >>/var/log/hyper-host-ftp-restore.log 2>&1 # HYPER-HOST-FTP-RESTORE\n'
+    printf '@reboot sleep 20 && /usr/local/sbin/hyper-host-ctl ftp-fix >>/var/log/hyper-host-ftp-restore.log 2>&1 # HYPER-HOST-FTP-RESTORE\n'
   } | awk 'NF' | crontab -
 fi
 

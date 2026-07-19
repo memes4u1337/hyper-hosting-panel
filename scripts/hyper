@@ -419,6 +419,8 @@ cmd_help() {
   sudo hyper db user USER PASS DB %    создать пользователя для внешнего входа
   sudo hyper db user USER PASS DB    создать MySQL/phpMyAdmin аккаунт
   sudo hyper php                     PHP-FPM версии
+  sudo hyper nginx fix               сделать /etc/nginx writable и восстановить runtime
+  sudo hyper nginx doctor            проверить mount, запись и nginx -t
   sudo hyper repair                  починить права/FTP/PM2/Nginx
   sudo hyper update                  обновить панель из GitHub
   sudo hyper network doctor DOMAIN   проверить внешний/внутренний доступ
@@ -479,6 +481,26 @@ EOF
 
 
 
+cmd_nginx() {
+  local sub="${1:-doctor}"; shift || true
+  case "$sub" in
+    fix|repair|runtime)
+      $CTL nginx-runtime-fix
+      ;;
+    doctor|status|check)
+      $CTL nginx-runtime-doctor-json | json_pretty
+      ;;
+    test)
+      nginx -t
+      ;;
+    reload)
+      nginx -t && systemctl reload nginx
+      ;;
+    *) err "Nginx команды: sudo hyper nginx fix | doctor | test | reload" ;;
+  esac
+}
+
+
 cmd_access() {
   local sub="${1:-guide}"; shift || true
   case "$sub" in
@@ -535,6 +557,7 @@ case "${1:-help}" in
   bot) shift; cmd_bot "$@" ;;
   sites) shift; cmd_sites "$@" ;;
   ftp) shift; cmd_ftp "$@" ;;
+  nginx) shift; cmd_nginx "$@" ;;
   access) shift; cmd_access "$@" ;;
   disk) shift; cmd_disk "$@" ;;
   db|dbs|databases) shift; cmd_dbs "$@" ;;

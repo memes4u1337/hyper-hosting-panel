@@ -150,6 +150,7 @@ run_repair() {
     return 1
   fi
   printf '%b[%bHYPER-HOST%b]%b Запускаю ремонт %bHYPER-HOST%b...\n' "$BOLD" "$CYAN" "$RESET" "$RESET" "$CYAN" "$RESET"
+  hyper nginx fix
   hyper repair
   nginx -t
   systemctl reload nginx
@@ -158,9 +159,24 @@ run_repair() {
 
 run_nginx_check() {
   show_banner
-  info "Проверяю Nginx..."
+  info "Проверяю writable runtime и конфигурацию Nginx..."
+  if command -v hyper >/dev/null 2>&1; then
+    hyper nginx doctor || true
+  fi
   nginx -t
   systemctl is-active nginx --quiet && ok "Nginx запущен." || warn "Nginx сейчас не активен."
+}
+
+run_nginx_repair() {
+  show_banner
+  if ! command -v hyper >/dev/null 2>&1; then
+    error "Команда hyper ещё не установлена."
+    return 1
+  fi
+  info "Восстанавливаю writable /etc/nginx и Nginx runtime..."
+  hyper nginx fix
+  hyper nginx doctor || true
+  ok "Nginx runtime восстановлен."
 }
 
 run_ssl_menu() {
@@ -190,8 +206,16 @@ run_ftp_repair() {
     return 1
   fi
   info "Восстанавливаю ProFTPD, FTP/FTPS, passive-порты и FTP-аккаунты..."
-  hyper ftp fix
-  hyper ftp doctor || true
+  if [[ -x /usr/local/sbin/hyper-host-ctl ]]; then
+    /usr/local/sbin/hyper-host-ctl ftp-fix
+  else
+    hyper ftp fix
+  fi
+  if command -v hyper >/dev/null 2>&1; then
+    hyper ftp doctor || true
+  elif [[ -x /usr/local/sbin/hyper-host-ctl ]]; then
+    /usr/local/sbin/hyper-host-ctl ftp-doctor-json || true
+  fi
   ok "FTP/FTPS восстановлен."
 }
 
@@ -204,7 +228,8 @@ show_menu() {
     printf '  %b3%b  Проверить конфигурацию Nginx\n' "$GREEN" "$RESET"
     printf '  %b4%b  Исправить ACME и выпустить SSL\n' "$GREEN" "$RESET"
     printf '  %b5%b  Восстановить FTP/FTPS\n' "$GREEN" "$RESET"
-    printf '  %b6%b  Показать информацию и ссылки\n' "$GREEN" "$RESET"
+    printf '  %b6%b  Восстановить writable Nginx runtime\n' "$GREEN" "$RESET"
+    printf '  %b7%b  Показать информацию и ссылки\n' "$GREEN" "$RESET"
     printf '  %b0%b  Выход\n' "$RED" "$RESET"
     if [[ -f "$CONF_FILE" ]]; then
       printf '\n  Статус: %bHYPER-HOST%b установлен | IP: %s\n' "$CYAN" "$RESET" "$SERVER_IP"
@@ -219,7 +244,8 @@ show_menu() {
       3) run_nginx_check || true; pause_menu ;;
       4) run_ssl_menu || true; pause_menu ;;
       5) run_ftp_repair || true; pause_menu ;;
-      6) show_project_info; pause_menu ;;
+      6) run_nginx_repair || true; pause_menu ;;
+      7) show_project_info; pause_menu ;;
       0) show_banner; ok "Работа установщика завершена."; exit 0 ;;
       *) warn "Неизвестный пункт: ${choice}"; sleep 1 ;;
     esac
@@ -231,6 +257,7 @@ case "${1:-}" in
   --install|install) run_install ;;
   --repair|repair) run_repair ;;
   --nginx-check|nginx-check) run_nginx_check ;;
+  --nginx-repair|nginx-repair) run_nginx_repair ;;
   --ftp-repair|ftp-repair) run_ftp_repair ;;
   --info|info) show_project_info ;;
   --help|-h|help)
@@ -240,6 +267,7 @@ case "${1:-}" in
     printf '  sudo bash setup.sh --install     установить или обновить %bHYPER-HOST%b\n' "$CYAN" "$RESET"
     printf '%s\n' '  sudo bash setup.sh --repair      выполнить ремонт'
     printf '%s\n' '  sudo bash setup.sh --nginx-check проверить Nginx'
+    printf '%s\n' '  sudo bash setup.sh --nginx-repair восстановить writable Nginx runtime'
     printf '%s\n' '  sudo bash setup.sh --ftp-repair восстановить FTP/FTPS'
     printf '%s\n' '  sudo bash setup.sh --info        показать информацию и ссылки'
     ;;
