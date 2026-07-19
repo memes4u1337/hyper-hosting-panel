@@ -69,16 +69,35 @@ if [[ -d "$BASE_DIR/runtime/nginx" ]]; then
   cp -a "$BASE_DIR/runtime/nginx" "$BACKUP_DIR/nginx-runtime-before" 2>/dev/null || true
 fi
 
+copy_exec_if_needed(){
+  local src="$1" dst="$2"
+  mkdir -p "$(dirname "$dst")"
+
+  # install(1) завершается ошибкой, если источник и назначение — один файл.
+  # Это штатный сценарий при запуске патча прямо из PROJECT_DIR.
+  if [[ -e "$dst" || -L "$dst" ]]; then
+    local src_real dst_real
+    src_real="$(readlink -f "$src" 2>/dev/null || printf '%s' "$src")"
+    dst_real="$(readlink -f "$dst" 2>/dev/null || printf '%s' "$dst")"
+    if [[ "$src_real" == "$dst_real" ]]; then
+      chmod 0755 "$dst"
+      return 0
+    fi
+  fi
+
+  install -m0755 "$src" "$dst"
+}
+
 log 'Обновляю файлы проекта и правильную структуру CLI.'
-install -m0755 "$ROOT_DIR/setup.sh" "$PROJECT_DIR/setup.sh"
-install -m0755 "$ROOT_DIR/install.sh" "$PROJECT_DIR/install.sh"
-install -m0755 "$ROOT_DIR/scripts/hyper" "$PROJECT_DIR/scripts/hyper"
-install -m0755 "$ROOT_DIR/scripts/hhctl" "$PROJECT_DIR/scripts/hhctl"
-install -m0755 "$ROOT_DIR/scripts/hyper_nginx_runtime.sh" "$PROJECT_DIR/scripts/hyper_nginx_runtime.sh"
-install -m0755 "$ROOT_DIR/scripts/nginx_recover_v89.py" "$PROJECT_DIR/scripts/nginx_recover_v89.py"
-install -m0755 "$ROOT_DIR/scripts/nginx-reconcile-v89.sh" "$PROJECT_DIR/scripts/nginx-reconcile-v89.sh"
-install -m0755 "$ROOT_DIR/scripts/proftpd_auth_sync.py" "$PROJECT_DIR/scripts/proftpd_auth_sync.py"
-install -m0755 "$ROOT_DIR/scripts/hyper_ftp_proftpd_fix.sh" "$PROJECT_DIR/scripts/hyper_ftp_proftpd_fix.sh"
+copy_exec_if_needed "$ROOT_DIR/setup.sh" "$PROJECT_DIR/setup.sh"
+copy_exec_if_needed "$ROOT_DIR/install.sh" "$PROJECT_DIR/install.sh"
+copy_exec_if_needed "$ROOT_DIR/scripts/hyper" "$PROJECT_DIR/scripts/hyper"
+copy_exec_if_needed "$ROOT_DIR/scripts/hhctl" "$PROJECT_DIR/scripts/hhctl"
+copy_exec_if_needed "$ROOT_DIR/scripts/hyper_nginx_runtime.sh" "$PROJECT_DIR/scripts/hyper_nginx_runtime.sh"
+copy_exec_if_needed "$ROOT_DIR/scripts/nginx_recover_v89.py" "$PROJECT_DIR/scripts/nginx_recover_v89.py"
+copy_exec_if_needed "$ROOT_DIR/scripts/nginx-reconcile-v89.sh" "$PROJECT_DIR/scripts/nginx-reconcile-v89.sh"
+copy_exec_if_needed "$ROOT_DIR/scripts/proftpd_auth_sync.py" "$PROJECT_DIR/scripts/proftpd_auth_sync.py"
+copy_exec_if_needed "$ROOT_DIR/scripts/hyper_ftp_proftpd_fix.sh" "$PROJECT_DIR/scripts/hyper_ftp_proftpd_fix.sh"
 
 install -m0755 "$ROOT_DIR/scripts/hhctl" "$CONTROL_BIN"
 install -m0755 "$ROOT_DIR/scripts/hyper" "$HYPER_BIN"

@@ -10,9 +10,9 @@ git checkout main
 git reset --hard origin/main
 git clean -fd
 
-chmod +x install.sh uninstall.sh scripts/hhctl scripts/hyper || true
+chmod +x setup.sh install.sh uninstall.sh scripts/hhctl scripts/hyper || true
 
-sudo bash install.sh
+sudo bash setup.sh
 
 sudo hyper repair
 sudo hyper network fix hyper-host.pw 90.189.208.25
