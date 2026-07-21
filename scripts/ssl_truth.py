@@ -22,7 +22,8 @@ PANEL_ROOT = Path('/var/www/hyper-host/public')
 SQLITE = Path('/opt/hyper-host/data/hyperhost.sqlite')
 NG_AVAIL = Path('/etc/nginx/sites-available')
 NG_ENABLED = Path('/etc/nginx/sites-enabled')
-CERT_ROOTS = [Path('/opt/hyper-host/letsencrypt/live'), Path('/etc/letsencrypt/live')]
+PRIMARY_CERTBOT = Path('/opt/hyper-host/letsencrypt')
+CERT_ROOTS = [PRIMARY_CERTBOT / 'live', Path('/etc/letsencrypt/live')]
 ACME_ROOT = Path('/opt/hyper-host/acme-webroot')
 SERVER_IP = os.environ.get('SERVER_IP', '192.168.0.179')
 PUBLIC_IP = os.environ.get('PUBLIC_IP', '90.189.208.25')
@@ -53,6 +54,113 @@ def cert_info(cert: Path) -> dict[str, Any] | None:
     except Exception:
         return None
 
+
+
+def cert_expiry_epoch(cert: Path) -> int:
+    info = cert_info(cert)
+    if not info or not info.get('expires'):
+        return 0
+    try:
+        return int(dt.datetime.fromisoformat(str(info['expires']).replace('Z','+00:00')).timestamp())
+    except Exception:
+        return 0
+
+
+def candidate_certbot_roots() -> list[Path]:
+    roots=[PRIMARY_CERTBOT, Path('/etc/letsencrypt')]
+    backups=Path('/opt/hyper-host/backups')
+    if backups.exists():
+        for live in backups.rglob('live'):
+            root=live.parent
+            if (root/'archive').is_dir():
+                roots.append(root)
+    out=[]; seen=set()
+    for root in roots:
+        try: key=str(root.resolve())
+        except Exception: key=str(root)
+        if key in seen: continue
+        seen.add(key); out.append(root)
+    return out
+
+
+def rewrite_renewal(path: Path, lineage: str) -> None:
+    if not path.exists(): return
+    text=path.read_text('utf-8',errors='ignore')
+    replacements={
+        'archive_dir': str(PRIMARY_CERTBOT/'archive'/lineage),
+        'cert': str(PRIMARY_CERTBOT/'live'/lineage/'cert.pem'),
+        'privkey': str(PRIMARY_CERTBOT/'live'/lineage/'privkey.pem'),
+        'chain': str(PRIMARY_CERTBOT/'live'/lineage/'chain.pem'),
+        'fullchain': str(PRIMARY_CERTBOT/'live'/lineage/'fullchain.pem'),
+    }
+    for key,val in replacements.items():
+        if re.search(rf'(?m)^\s*{re.escape(key)}\s*=',text):
+            text=re.sub(rf'(?m)^\s*{re.escape(key)}\s*=.*$',f'{key} = {val}',text)
+    text=text.replace('/etc/letsencrypt',str(PRIMARY_CERTBOT))
+    path.write_text(text,'utf-8')
+
+
+def merge_backup_certificates() -> list[dict[str,Any]]:
+    PRIMARY_CERTBOT.mkdir(parents=True,exist_ok=True)
+    for name in ('live','archive','renewal','accounts'):
+        (PRIMARY_CERTBOT/name).mkdir(parents=True,exist_ok=True)
+    restored=[]
+    primary_resolved=PRIMARY_CERTBOT.resolve()
+    for root in candidate_certbot_roots():
+        try:
+            if root.resolve()==primary_resolved: continue
+        except Exception:
+            if str(root)==str(PRIMARY_CERTBOT): continue
+        live=root/'live'; archive=root/'archive'
+        if not live.is_dir() or not archive.is_dir(): continue
+        for lineage_dir in live.iterdir():
+            if not lineage_dir.is_dir(): continue
+            lineage=lineage_dir.name
+            cert=lineage_dir/'fullchain.pem'; key=lineage_dir/'privkey.pem'
+            info=cert_info(cert)
+            if not info or int(info.get('days_left',-1)) < 0 or not key.exists(): continue
+            src_epoch=cert_expiry_epoch(cert)
+            dst_cert=PRIMARY_CERTBOT/'live'/lineage/'fullchain.pem'
+            dst_epoch=cert_expiry_epoch(dst_cert) if dst_cert.exists() else 0
+            if src_epoch <= dst_epoch: continue
+            src_archive=archive/lineage
+            if not src_archive.is_dir(): continue
+            for target in (PRIMARY_CERTBOT/'live'/lineage, PRIMARY_CERTBOT/'archive'/lineage):
+                if target.exists() or target.is_symlink():
+                    if target.is_dir() and not target.is_symlink(): shutil.rmtree(target)
+                    else: target.unlink()
+            shutil.copytree(src_archive,PRIMARY_CERTBOT/'archive'/lineage,symlinks=True)
+            shutil.copytree(lineage_dir,PRIMARY_CERTBOT/'live'/lineage,symlinks=True)
+            renewal=root/'renewal'/f'{lineage}.conf'
+            if renewal.exists():
+                shutil.copy2(renewal,PRIMARY_CERTBOT/'renewal'/f'{lineage}.conf')
+                rewrite_renewal(PRIMARY_CERTBOT/'renewal'/f'{lineage}.conf',lineage)
+            restored.append({'lineage':lineage,'source':str(root),'expires':info.get('expires',''),'domains':info.get('domains',[])})
+    # Copy an existing Certbot account if the primary store lost it.
+    if not any((PRIMARY_CERTBOT/'accounts').rglob('regr.json')):
+        for root in candidate_certbot_roots():
+            src=root/'accounts'
+            if src.is_dir() and any(src.rglob('regr.json')):
+                shutil.copytree(src,PRIMARY_CERTBOT/'accounts',dirs_exist_ok=True,symlinks=True)
+                break
+    return restored
+
+
+def discover_certbot_email() -> str:
+    for root in candidate_certbot_roots():
+        accounts=root/'accounts'
+        if not accounts.exists(): continue
+        for regr in accounts.rglob('regr.json'):
+            try:
+                data=json.loads(regr.read_text('utf-8',errors='ignore'))
+                body=data.get('body',data) if isinstance(data,dict) else {}
+                contacts=body.get('contact',[]) if isinstance(body,dict) else []
+                for item in contacts or []:
+                    if isinstance(item,str) and item.startswith('mailto:') and '@' in item:
+                        return item[7:]
+            except Exception:
+                continue
+    return ''
 
 def all_certs() -> list[dict[str, Any]]:
     items=[]
@@ -267,6 +375,7 @@ def restore() -> dict[str,Any]:
     folders/DB read-only and automatically attaches matching certificates from
     /opt/hyper-host/letsencrypt or legacy /etc/letsencrypt.
     """
+    merged = merge_backup_certificates()
     reconcile = Path('/usr/local/sbin/hyper-host-nginx-reconcile')
     if not reconcile.exists():
         raise RuntimeError(f'nginx reconcile helper not found: {reconcile}')
@@ -294,14 +403,43 @@ def restore() -> dict[str,Any]:
         restored.append({'domain':pd,'cert':pc['cert'],'panel':True})
     else:
         skipped.append({'domain':pd,'reason':'panel certificate missing or expired','panel':True})
-    return {'ok':True,'restored':restored,'skipped':skipped,
+    return {'ok':True,'backup_certificates_restored':merged,'restored':restored,'skipped':skipped,
             'reconcile_output':cp.stdout.strip(),'audit':audit()}
 
 
+
+def repair_all(email: str='') -> dict[str,Any]:
+    first=restore()
+    report=audit()
+    email=(email or discover_certbot_email()).strip()
+    issued=[]; failed=[]; skipped=[]
+    missing=[x.get('domain','') for x in report.get('sites',[]) if not x.get('has_certificate')]
+    panel=report.get('panel',{}) or {}
+    panel_missing=not bool(panel.get('certificate'))
+    if not email:
+        for domain in missing: skipped.append({'domain':domain,'reason':'email для Certbot не найден'})
+        if panel_missing: skipped.append({'domain':panel.get('domain',''),'reason':'email для Certbot не найден','panel':True})
+        return {'ok':True,'email':'','restore':first,'issued':issued,'failed':failed,'skipped':skipped,'audit':report}
+    ctl='/usr/local/sbin/hyper-host-ctl'
+    for domain in missing:
+        if not domain: continue
+        cp=subprocess.run([ctl,'ssl-site',domain,email],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+        item={'domain':domain,'output':cp.stdout.strip()[-8000:]}
+        (issued if cp.returncode==0 else failed).append(item)
+    if panel_missing and panel.get('domain'):
+        cp=subprocess.run([ctl,'panel-ssl',str(panel['domain']),email],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+        item={'domain':panel['domain'],'panel':True,'output':cp.stdout.strip()[-8000:]}
+        (issued if cp.returncode==0 else failed).append(item)
+    final=restore()
+    return {'ok':True,'email':email,'restore':first,'issued':issued,'failed':failed,'skipped':skipped,'final_restore':final,'audit':audit()}
+
 def main():
-    ap=argparse.ArgumentParser(); ap.add_argument('command',choices=['audit','restore']); args=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('command',choices=['audit','restore','repair-all']); ap.add_argument('--email',default=''); args=ap.parse_args()
     try:
-        jprint(audit() if args.command=='audit' else restore())
+        if args.command=='audit': result=audit()
+        elif args.command=='restore': result=restore()
+        else: result=repair_all(args.email)
+        jprint(result)
     except Exception as exc:
         jprint({'ok':False,'error':str(exc)}); raise SystemExit(1)
 

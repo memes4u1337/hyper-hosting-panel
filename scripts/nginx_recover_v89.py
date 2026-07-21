@@ -221,8 +221,8 @@ def php_locations(socket: str, nginx_dir: Path) -> str:
     location ~ \\.php$ {{
         include {nginx_dir}/snippets/fastcgi-php.conf;
         fastcgi_connect_timeout 60;
-        fastcgi_send_timeout 600;
-        fastcgi_read_timeout 600;
+        fastcgi_send_timeout 21600;
+        fastcgi_read_timeout 21600;
         fastcgi_pass unix:{socket};
     }}
     location ~ /\\. {{ deny all; }}
@@ -250,7 +250,7 @@ def panel_block(names: list[str], root: str, socket: str, nginx_dir: Path, acme_
     server_name {' '.join(names)};
     root {root};
     index index.php index.html;
-    client_max_body_size 1024M;{cert}
+    client_max_body_size 8192M;{cert}
     access_log /var/log/nginx/hyper-host-panel.access.log;
     error_log /var/log/nginx/hyper-host-panel.error.log;
 
@@ -266,6 +266,9 @@ def panel_block(names: list[str], root: str, socket: str, nginx_dir: Path, acme_
         alias /usr/share/phpmyadmin/$1;
         include {nginx_dir}/fastcgi_params;
         fastcgi_param SCRIPT_FILENAME /usr/share/phpmyadmin/$1;
+        fastcgi_connect_timeout 60;
+        fastcgi_send_timeout 21600;
+        fastcgi_read_timeout 21600;
         fastcgi_pass unix:{socket};
     }}
     location ~ ^/phpmyadmin/(.+)$ {{ alias /usr/share/phpmyadmin/$1; }}
@@ -285,7 +288,7 @@ def site_block(names: list[str], domain: str, root: str, socket: str, logs: str,
     server_name {' '.join(names)};
     root {root};
     index index.html index.htm index.php;
-    client_max_body_size 1024M;{cert}
+    client_max_body_size 8192M;{cert}
     access_log {logs}/access{suffix}.log;
     error_log {logs}/error{suffix}.log;
 
@@ -339,11 +342,14 @@ http {{
     sendfile on;
     tcp_nopush on;
     tcp_nodelay on;
-    keepalive_timeout 65;
+    keepalive_timeout 300;
     types_hash_max_size 4096;
     server_names_hash_bucket_size 128;
     server_names_hash_max_size 4096;
-    client_max_body_size 1024M;
+    client_max_body_size 8192M;
+    client_body_timeout 21600s;
+    client_header_timeout 300s;
+    send_timeout 21600s;
 
     include {nginx_dir}/mime.types;
     default_type application/octet-stream;

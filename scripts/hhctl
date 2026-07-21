@@ -52,8 +52,10 @@ HYPER_FTP_PID="${HYPER_FTP_PID:-$BASE_DIR/run/hyper-host-ftp.pid}"
 PROFTPD_DIR="${PROFTPD_DIR:-$BASE_DIR/proftpd}"
 PROFTPD_AUTH_SYNC="${PROFTPD_AUTH_SYNC:-$BASE_DIR/bin/proftpd_auth_sync.py}"
 PROFTPD_FIX_BIN="${PROFTPD_FIX_BIN:-$BASE_DIR/bin/hyper_ftp_proftpd_fix.sh}"
+SQL_IMPORTER="${SQL_IMPORTER:-$BASE_DIR/bin/hyper_sql_import.py}"
+SQL_IMPORT_ROOT="${SQL_IMPORT_ROOT:-$BASE_DIR/imports}"
 
-export PANEL_NAME POWERED_BY SERVER_IP PUBLIC_IP PANEL_DOMAIN NETWORK_ENV NETWORK_MODE STATIC_LAN_IP STATIC_PUBLIC_IP DISABLE_IP_AUTOFIX BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR ACME_WEBROOT LE_CONFIG_DIR LE_WORK_DIR LE_LOGS_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB HYPER_FTP_BIN HYPER_FTP_SERVICE HYPER_FTP_PID PROFTPD_DIR PROFTPD_AUTH_SYNC PROFTPD_FIX_BIN NGINX_RUNTIME_DIR NGINX_RUNTIME_BIN
+export PANEL_NAME POWERED_BY SERVER_IP PUBLIC_IP PANEL_DOMAIN NETWORK_ENV NETWORK_MODE STATIC_LAN_IP STATIC_PUBLIC_IP DISABLE_IP_AUTOFIX BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR ACME_WEBROOT LE_CONFIG_DIR LE_WORK_DIR LE_LOGS_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB HYPER_FTP_BIN HYPER_FTP_SERVICE HYPER_FTP_PID PROFTPD_DIR PROFTPD_AUTH_SYNC PROFTPD_FIX_BIN SQL_IMPORTER SQL_IMPORT_ROOT NGINX_RUNTIME_DIR NGINX_RUNTIME_BIN
 BOT_USER="${BOT_USER:-hyperbot}"
 PM2_HOME_DIR="${PM2_HOME_DIR:-$BOTS_DIR/.pm2}"
 DEPLOY_CENTER_DIR="${DEPLOY_CENTER_DIR:-/opt/hyper-host/deploy-center}"
@@ -111,22 +113,39 @@ ensure_dirs() { mkdir -p "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$BACKUP_DIR" "$BAS
 sql_quote() { printf "%s" "$1" | sed "s/'/''/g"; }
 
 configure_php_limits() {
-  local dir fpm
+  local dir fpm pooldir
+  mkdir -p "$SQL_IMPORT_ROOT/tmp" "$SQL_IMPORT_ROOT/uploads" "$SQL_IMPORT_ROOT/jobs" "$SQL_IMPORT_ROOT/logs"
+  chown -R www-data:www-data "$SQL_IMPORT_ROOT/tmp" "$SQL_IMPORT_ROOT/uploads" 2>/dev/null || true
+  chmod 0770 "$SQL_IMPORT_ROOT/tmp" "$SQL_IMPORT_ROOT/uploads" 2>/dev/null || true
+  chmod 0750 "$SQL_IMPORT_ROOT/jobs" "$SQL_IMPORT_ROOT/logs" 2>/dev/null || true
   for dir in /etc/php/*/fpm/conf.d /etc/php/*/cli/conf.d; do
     [[ -d "$dir" ]] || continue
-    cat > "$dir/99-hyper-host-limits.ini" <<'EOINI'
-; HYPER-HOST upload/export limits
+    cat > "$dir/99-hyper-host-limits.ini" <<EOINI
+; HYPER-HOST v1.2 large SQL import limits
 file_uploads = On
-upload_max_filesize = 1024M
-post_max_size = 1024M
-memory_limit = 1024M
-max_execution_time = 600
-max_input_time = 600
+upload_max_filesize = 8192M
+post_max_size = 8192M
+memory_limit = 2048M
+max_execution_time = 21600
+max_input_time = 21600
 max_file_uploads = 100
 max_input_vars = 10000
+session.gc_maxlifetime = 28800
+upload_tmp_dir = $SQL_IMPORT_ROOT/tmp
 EOINI
   done
-  for fpm in php*-fpm; do systemctl restart "$fpm" >/dev/null 2>&1 || true; done
+  for pooldir in /etc/php/*/fpm/pool.d; do
+    [[ -d "$pooldir" ]] || continue
+    cat > "$pooldir/99-hyper-host-long-requests.conf" <<'EOPOOL'
+[www]
+request_terminate_timeout = 0
+request_slowlog_timeout = 0
+EOPOOL
+  done
+  while IFS= read -r fpm; do
+    [[ -n "$fpm" ]] || continue
+    systemctl restart "$fpm" >/dev/null 2>&1 || true
+  done < <(systemctl list-unit-files 'php*-fpm.service' --no-legend 2>/dev/null | awk '{print $1}' | sed 's/\.service$//')
 }
 
 cmd_php_install_all() {
@@ -151,9 +170,9 @@ cmd_php_install_all() {
 }
 
 configure_phpmyadmin_storage() {
-  mkdir -p /etc/phpmyadmin/conf.d /var/lib/phpmyadmin/tmp /etc/hyper-host
-  chown -R www-data:www-data /var/lib/phpmyadmin/tmp 2>/dev/null || true
-  chmod 0770 /var/lib/phpmyadmin/tmp 2>/dev/null || true
+  mkdir -p /etc/phpmyadmin/conf.d /var/lib/phpmyadmin/tmp /var/lib/phpmyadmin/upload /etc/hyper-host
+  chown -R www-data:www-data /var/lib/phpmyadmin/tmp /var/lib/phpmyadmin/upload 2>/dev/null || true
+  chmod 0770 /var/lib/phpmyadmin/tmp /var/lib/phpmyadmin/upload 2>/dev/null || true
   local pass secret_file sqlpass create_sql
   secret_file=/etc/hyper-host/phpmyadmin-control.secret
   if [[ -f "$secret_file" ]]; then pass="$(cat "$secret_file" 2>/dev/null || true)"; fi
@@ -172,10 +191,12 @@ EOSQL
   cat > /etc/phpmyadmin/conf.d/hyper-host-storage.php <<EOPMASTORE
 <?php
 \$cfg['TempDir'] = '/var/lib/phpmyadmin/tmp';
-\$cfg['UploadDir'] = '';
-\$cfg['SaveDir'] = '';
+\$cfg['UploadDir'] = '/var/lib/phpmyadmin/upload';
+\$cfg['SaveDir'] = '/var/lib/phpmyadmin/upload';
 \$cfg['ExecTimeLimit'] = 0;
-\$cfg['MemoryLimit'] = '1024M';
+\$cfg['MemoryLimit'] = '2048M';
+\$cfg['LoginCookieValidity'] = 28800;
+\$cfg['LoginCookieStore'] = 0;
 if (isset(\$i) && isset(\$cfg['Servers'][\$i])) {
     \$cfg['Servers'][\$i]['pmadb'] = 'phpmyadmin';
     \$cfg['Servers'][\$i]['controlhost'] = 'localhost';
@@ -517,7 +538,7 @@ server {
 
     root ${panel_root};
     index index.php index.html;
-    client_max_body_size 1024M;
+    client_max_body_size 8192M;
 
     access_log /var/log/nginx/hyper-host-panel.access.log;
     error_log /var/log/nginx/hyper-host-panel.error.log;
@@ -535,16 +556,16 @@ server {
         alias /usr/share/phpmyadmin/\$1;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME /usr/share/phpmyadmin/\$1;
-        fastcgi_read_timeout 600;
-        fastcgi_send_timeout 600;
+        fastcgi_read_timeout 21600;
+        fastcgi_send_timeout 21600;
         fastcgi_connect_timeout 60;
         fastcgi_pass unix:${PHP_FPM_SOCK};
     }
     location ~ ^/phpmyadmin/(.+)$ { alias /usr/share/phpmyadmin/\$1; }
     location ~ \.php$ {
         include snippets/fastcgi-php.conf;
-        fastcgi_read_timeout 600;
-        fastcgi_send_timeout 600;
+        fastcgi_read_timeout 21600;
+        fastcgi_send_timeout 21600;
         fastcgi_connect_timeout 60;
         fastcgi_pass unix:${PHP_FPM_SOCK};
     }
@@ -561,7 +582,7 @@ server {
     server_name ${domain};
     root ${panel_root};
     index index.php index.html;
-    client_max_body_size 1024M;
+    client_max_body_size 8192M;
     access_log /var/log/nginx/hyper-host-panel-ssl.access.log;
     error_log /var/log/nginx/hyper-host-panel-ssl.error.log;
     ssl_certificate ${cert};
@@ -829,7 +850,7 @@ server {
     server_name ${server_names};
     root ${root};
     index index.html index.htm index.php;
-    client_max_body_size 1024M;
+    client_max_body_size 8192M;
     access_log ${SITES_DIR}/${domain}/logs/access.log;
     error_log ${SITES_DIR}/${domain}/logs/error.log;
     location / { try_files \$uri \$uri/ /index.php?\$query_string; }
@@ -840,7 +861,7 @@ server {
         try_files \$uri =404;
         allow all;
     }
-    location ~ \.php$ { include snippets/fastcgi-php.conf; fastcgi_read_timeout 600; fastcgi_send_timeout 600; fastcgi_connect_timeout 60; fastcgi_pass unix:${sock}; }
+    location ~ \.php$ { include snippets/fastcgi-php.conf; fastcgi_read_timeout 21600; fastcgi_send_timeout 21600; fastcgi_connect_timeout 60; fastcgi_pass unix:${sock}; }
     location ~ /\. { deny all; }
 }
 EONGINX
@@ -1198,7 +1219,7 @@ server {
 
     root ${PANEL_DIR}/public;
     index index.php index.html;
-    client_max_body_size 1024M;
+    client_max_body_size 8192M;
 
     access_log /var/log/nginx/hyper-host-ip-$ip.access.log;
     error_log /var/log/nginx/hyper-host-ip-$ip.error.log;
@@ -1214,16 +1235,16 @@ server {
         alias /usr/share/phpmyadmin/\$1;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME /usr/share/phpmyadmin/\$1;
-        fastcgi_read_timeout 600;
-        fastcgi_send_timeout 600;
+        fastcgi_read_timeout 21600;
+        fastcgi_send_timeout 21600;
         fastcgi_connect_timeout 60;
         fastcgi_pass unix:${PHP_FPM_SOCK};
     }
 
     location ~ \.php$ {
         include snippets/fastcgi-php.conf;
-        fastcgi_read_timeout 600;
-        fastcgi_send_timeout 600;
+        fastcgi_read_timeout 21600;
+        fastcgi_send_timeout 21600;
         fastcgi_connect_timeout 60;
         fastcgi_pass unix:${PHP_FPM_SOCK};
     }
@@ -1962,7 +1983,72 @@ cmd_phpmyadmin_fix() {
   configure_phpmyadmin_label
   configure_php_limits
   configure_phpmyadmin_storage
-  log "phpMyAdmin label fixed: ${PANEL_DOMAIN:-${PUBLIC_IP:-${SERVER_IP:-127.0.0.1}}}:3306"
+  cmd_mysql_import_tune >/dev/null 2>&1 || true
+  log "phpMyAdmin и большой SQL-импорт настроены: лимит 8G, фоновые задания включены"
+}
+
+cmd_mysql_import_tune() {
+  local cnf="/etc/mysql/mariadb.conf.d/99-hyper-host-large-import.cnf"
+  mkdir -p "$SQL_IMPORT_ROOT/tmp" "$SQL_IMPORT_ROOT/uploads" "$SQL_IMPORT_ROOT/jobs" "$SQL_IMPORT_ROOT/logs"
+  chown -R www-data:www-data "$SQL_IMPORT_ROOT/tmp" "$SQL_IMPORT_ROOT/uploads" 2>/dev/null || true
+  chmod 0770 "$SQL_IMPORT_ROOT/tmp" "$SQL_IMPORT_ROOT/uploads" 2>/dev/null || true
+  chmod 0750 "$SQL_IMPORT_ROOT/jobs" "$SQL_IMPORT_ROOT/logs" 2>/dev/null || true
+  if [[ -d /etc/mysql/mariadb.conf.d && -w /etc/mysql/mariadb.conf.d ]]; then
+    cat > "$cnf" <<'EOMYSQL'
+[mysqld]
+max_allowed_packet = 1G
+net_read_timeout = 3600
+net_write_timeout = 3600
+wait_timeout = 28800
+interactive_timeout = 28800
+connect_timeout = 60
+tmp_table_size = 512M
+max_heap_table_size = 512M
+
+[client]
+max_allowed_packet = 1G
+EOMYSQL
+  else
+    warn "Каталог /etc/mysql/mariadb.conf.d недоступен для записи; применяю лимиты MySQL только в runtime"
+  fi
+  mysql --protocol=socket -uroot -e "SET GLOBAL max_allowed_packet=1073741824; SET GLOBAL net_read_timeout=3600; SET GLOBAL net_write_timeout=3600; SET GLOBAL wait_timeout=28800; SET GLOBAL interactive_timeout=28800;" >/dev/null 2>&1 || true
+  if [[ -f "$cnf" ]]; then
+    systemctl restart mariadb >/dev/null 2>&1 || systemctl restart mysql >/dev/null 2>&1 || true
+  fi
+  mysql --protocol=socket -uroot -e "SELECT 1" >/dev/null 2>&1 || err "MariaDB не отвечает после настройки импорта"
+  log "MySQL настроен для больших импортов: packet=1G, timeout=3600s"
+}
+
+cmd_mysql_import_inspect() {
+  local file="${1:-}"
+  [[ -n "$file" && -f "$file" ]] || err "Файл импорта не найден: $file"
+  [[ -f "$SQL_IMPORTER" ]] || err "SQL importer не установлен: $SQL_IMPORTER"
+  python3 "$SQL_IMPORTER" inspect "$file"
+}
+
+cmd_mysql_import_start() {
+  local db="${1:-}" file="${2:-}" job_id launcher_log
+  valid_db_name "$db" || err "Некорректное имя базы: $db"
+  [[ -n "$file" && -f "$file" ]] || err "Файл импорта не найден: $file"
+  [[ -f "$SQL_IMPORTER" ]] || err "SQL importer не установлен: $SQL_IMPORTER"
+  case "${file,,}" in *.sql|*.sql.gz|*.gz|*.zip) ;; *) err "Поддерживаются .sql, .sql.gz, .gz и .zip" ;; esac
+  mkdir -p "$SQL_IMPORT_ROOT/uploads" "$SQL_IMPORT_ROOT/jobs" "$SQL_IMPORT_ROOT/logs"
+  chmod 0750 "$SQL_IMPORT_ROOT/jobs" "$SQL_IMPORT_ROOT/logs" 2>/dev/null || true
+  chmod 0640 "$file" 2>/dev/null || true
+  chown root:www-data "$file" 2>/dev/null || true
+  job_id="$(date +%Y%m%d-%H%M%S)-${db}-$(openssl rand -hex 3)"
+  launcher_log="$SQL_IMPORT_ROOT/logs/${job_id}-launcher.log"
+  nohup setsid python3 "$SQL_IMPORTER" run --database "$db" --file "$file" --job-id "$job_id" >"$launcher_log" 2>&1 </dev/null &
+  local pid=$!
+  JOB_ID="$job_id" DB_NAME="$db" FILE_NAME="$(basename "$file")" PID="$pid" python3 - <<'PYIMPORTSTART'
+import json,os
+print(json.dumps({'ok':True,'job_id':os.environ['JOB_ID'],'database':os.environ['DB_NAME'],'file':os.environ['FILE_NAME'],'pid':int(os.environ['PID']),'status':'queued'},ensure_ascii=False))
+PYIMPORTSTART
+}
+
+cmd_mysql_import_status_json() {
+  [[ -f "$SQL_IMPORTER" ]] || { echo '[]'; return 0; }
+  python3 "$SQL_IMPORTER" list --limit "${1:-20}"
 }
 
 ensure_bot_user() {
@@ -3992,6 +4078,11 @@ cmd_ssl_restore_existing() {
   [[ -f "$SSL_TRUTH_PY" ]] || err "SSL truth checker не установлен: $SSL_TRUTH_PY"
   SERVER_IP="$SERVER_IP" PUBLIC_IP="$(public_ip 2>/dev/null || true)" python3 "$SSL_TRUTH_PY" restore
 }
+cmd_ssl_repair_all() {
+  [[ -f "$SSL_TRUTH_PY" ]] || err "SSL truth checker не установлен: $SSL_TRUTH_PY"
+  local email="${1:-}"
+  SERVER_IP="$SERVER_IP" PUBLIC_IP="$(public_ip 2>/dev/null || true)" python3 "$SSL_TRUTH_PY" repair-all --email "$email"
+}
 
 case "${1:-}" in
   nginx-runtime-fix) shift; cmd_nginx_runtime_fix "$@" ;;
@@ -4016,6 +4107,10 @@ case "${1:-}" in
   delete-mysql-account) shift; cmd_delete_mysql_account "$@" ;;
   mysql-external) shift; cmd_mysql_external "$@" ;;
   mysql-status-json) shift; cmd_mysql_status_json "$@" ;;
+  mysql-import-tune) shift; cmd_mysql_import_tune "$@" ;;
+  mysql-import-inspect) shift; cmd_mysql_import_inspect "$@" ;;
+  mysql-import-start) shift; cmd_mysql_import_start "$@" ;;
+  mysql-import-status-json) shift; cmd_mysql_import_status_json "$@" ;;
   phpmyadmin-fix) shift; cmd_phpmyadmin_fix "$@" ;;
   phpmyadmin-status-json) shift; cmd_phpmyadmin_status_json "$@" ;;
   php-install-all) shift; cmd_php_install_all "$@" ;;
@@ -4039,6 +4134,7 @@ case "${1:-}" in
   deploy-center-project-action) shift; cmd_deploy_center_project_action "$@" ;;
   ssl-audit-json) shift; cmd_ssl_audit_json "$@" ;;
   ssl-restore-existing) shift; cmd_ssl_restore_existing "$@" ;;
+  ssl-repair-all) shift; cmd_ssl_repair_all "$@" ;;
   access-fix) shift; cmd_access_fix "$@" ;;
   access-doctor-json) shift; cmd_access_doctor_json "$@" ;;
   access-guide) shift; cmd_access_guide "$@" ;;
@@ -4076,6 +4172,8 @@ Usage: hyper-host-ctl nginx-runtime-fix
        hyper-host-ctl nginx-runtime-doctor-json
        hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
        hyper-host-ctl create-ftp USER PASS [all|sites|site|bots|backups|files] [DOMAIN]
+       hyper-host-ctl mysql-import-start DB FILE
+       hyper-host-ctl mysql-import-status-json
        hyper-host-ctl ftp-test-login USER PASS [HOST]
        hyper-host-ctl bot-create NAME python|node|php|custom MAIN_FILE [MEM_MB]
        hyper-host-ctl bot-deploy NAME python MAIN_FILE TMP_BOT TMP_ENV TMP_REQ [MEM_MB]

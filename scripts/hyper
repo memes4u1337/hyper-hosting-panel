@@ -175,9 +175,16 @@ PY
     external) [[ "${1:-}" == enable || "${1:-}" == disable ]] || err "Используй: sudo hyper db external enable|disable"; $CTL mysql-external "$1"; $CTL mysql-status-json | json_pretty ;;
     doctor) $CTL mysql-doctor-json | json_pretty ;;
     pma-fix) $CTL phpmyadmin-fix ;;
-    test) shift || true; [[ -n "${1:-}" && -n "${2:-}" && -n "${3:-}" ]] || err "Используй: sudo hyper db test HOST USER PASS [DB]"; $CTL mysql-test "$@" ;;
+    tune-import) $CTL mysql-import-tune ;;
+    import)
+      [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper db import DATABASE /path/dump.sql|dump.sql.gz|dump.zip"
+      $CTL mysql-import-start "$1" "$2" | json_pretty
+      ;;
+    imports|import-status) $CTL mysql-import-status-json | json_pretty ;;
+    inspect) [[ -n "${1:-}" ]] || err "Используй: sudo hyper db inspect FILE"; $CTL mysql-import-inspect "$1" | json_pretty ;;
+    test) [[ -n "${1:-}" && -n "${2:-}" && -n "${3:-}" ]] || err "Используй: sudo hyper db test HOST USER PASS [DB]"; $CTL mysql-test "$@" ;;
     user) [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper db user USER PASS [DB] [HOST]"; $CTL create-mysql-account "$1" "$2" "${4:-%}" "${3:-}" ALL ;;
-    *) err "Используй: sudo hyper db list | doctor | pma-fix | external enable|disable | user USER PASS [DB] [%|IP] | test HOST USER PASS [DB]" ;;
+    *) err "Используй: sudo hyper db list | doctor | pma-fix | tune-import | import DB FILE | imports | inspect FILE | external enable|disable | user USER PASS [DB] [%|IP] | test HOST USER PASS [DB]" ;;
   esac
 }
 
@@ -207,7 +214,8 @@ PY
     ip|local-ip) $CTL ssl-ip-selfsigned "${1:-}" ;;
     renew) $CTL ssl-renew-all ;;
     restore) $CTL ssl-restore-existing | json_pretty ;;
-    *) err "SSL команды: sudo hyper ssl status | check DOMAIN | fix DOMAIN | issue DOMAIN EMAIL | panel PANEL_DOMAIN EMAIL | ip [192.168.0.179] | renew | restore" ;;
+    repair-all) $CTL ssl-repair-all "${1:-}" | json_pretty ;;
+    *) err "SSL команды: sudo hyper ssl status | check DOMAIN | fix DOMAIN | issue DOMAIN EMAIL | panel PANEL_DOMAIN EMAIL | ip [192.168.0.179] | renew | restore | repair-all [EMAIL]" ;;
   esac
 }
 
@@ -452,6 +460,8 @@ SSL:
   sudo hyper ssl panel panel.hyper-host.pw EMAIL
   sudo hyper ssl ip 192.168.0.179
   sudo hyper ssl renew
+  sudo hyper ssl restore
+  sudo hyper ssl repair-all [EMAIL]
 
 DNS:
   sudo hyper dns wizard hyper-host.pw 90.189.208.25 panel
@@ -473,6 +483,8 @@ DNS:
   sudo hyper raw delete-site DOMAIN [--delete-files]
   sudo hyper raw create-ftp USER PASS
   sudo hyper raw create-db DB USER PASS [0|1]
+  sudo hyper db import DATABASE /path/dump.sql|dump.sql.gz|dump.zip
+  sudo hyper db imports
   sudo hyper raw create-mysql-account USER PASS localhost DB ALL
   sudo hyper raw mysql-external enable|disable
   sudo hyper raw site-logs DOMAIN error 200

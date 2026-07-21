@@ -183,31 +183,46 @@ install_php_versions() {
 
 configure_php_limits() {
   log "Настройка больших загрузок PHP/phpMyAdmin..."
-  local dir fpm
+  local dir fpm pooldir
+  mkdir -p "$BASE_DIR/imports/tmp" "$BASE_DIR/imports/uploads" "$BASE_DIR/imports/jobs" "$BASE_DIR/imports/logs"
+  chown -R www-data:www-data "$BASE_DIR/imports/tmp" "$BASE_DIR/imports/uploads" 2>/dev/null || true
+  chmod 0770 "$BASE_DIR/imports/tmp" "$BASE_DIR/imports/uploads" 2>/dev/null || true
+  chmod 0750 "$BASE_DIR/imports/jobs" "$BASE_DIR/imports/logs" 2>/dev/null || true
   for dir in /etc/php/*/fpm/conf.d /etc/php/*/cli/conf.d; do
     [[ -d "$dir" ]] || continue
-    cat > "$dir/99-hyper-host-limits.ini" <<'EOINI'
-; HYPER-HOST upload/export limits
+    cat > "$dir/99-hyper-host-limits.ini" <<EOINI
+; HYPER-HOST v1.2 large SQL import limits
 file_uploads = On
-upload_max_filesize = 1024M
-post_max_size = 1024M
-memory_limit = 1024M
-max_execution_time = 600
-max_input_time = 600
+upload_max_filesize = 8192M
+post_max_size = 8192M
+memory_limit = 2048M
+max_execution_time = 21600
+max_input_time = 21600
 max_file_uploads = 100
 max_input_vars = 10000
+session.gc_maxlifetime = 28800
+upload_tmp_dir = $BASE_DIR/imports/tmp
 EOINI
   done
-  for fpm in php*-fpm; do
-    systemctl restart "$fpm" >/dev/null 2>&1 || true
+  for pooldir in /etc/php/*/fpm/pool.d; do
+    [[ -d "$pooldir" ]] || continue
+    cat > "$pooldir/99-hyper-host-long-requests.conf" <<'EOPOOL'
+[www]
+request_terminate_timeout = 0
+request_slowlog_timeout = 0
+EOPOOL
   done
+  while IFS= read -r fpm; do
+    [[ -n "$fpm" ]] || continue
+    systemctl restart "$fpm" >/dev/null 2>&1 || true
+  done < <(systemctl list-unit-files 'php*-fpm.service' --no-legend 2>/dev/null | awk '{print $1}' | sed 's/\.service$//')
 }
 
 configure_phpmyadmin_storage() {
   log "Настройка хранилища конфигурации phpMyAdmin..."
-  mkdir -p /etc/phpmyadmin/conf.d /var/lib/phpmyadmin/tmp /etc/hyper-host
-  chown -R www-data:www-data /var/lib/phpmyadmin/tmp 2>/dev/null || true
-  chmod 0770 /var/lib/phpmyadmin/tmp 2>/dev/null || true
+  mkdir -p /etc/phpmyadmin/conf.d /var/lib/phpmyadmin/tmp /var/lib/phpmyadmin/upload /etc/hyper-host
+  chown -R www-data:www-data /var/lib/phpmyadmin/tmp /var/lib/phpmyadmin/upload 2>/dev/null || true
+  chmod 0770 /var/lib/phpmyadmin/tmp /var/lib/phpmyadmin/upload 2>/dev/null || true
   local pass secret_file sqlpass create_sql
   secret_file=/etc/hyper-host/phpmyadmin-control.secret
   if [[ -f "$secret_file" ]]; then
@@ -235,10 +250,12 @@ EOSQL
 <?php
 // HYPER-HOST: phpMyAdmin advanced configuration storage + large import/export.
 \$cfg['TempDir'] = '/var/lib/phpmyadmin/tmp';
-\$cfg['UploadDir'] = '';
-\$cfg['SaveDir'] = '';
+\$cfg['UploadDir'] = '/var/lib/phpmyadmin/upload';
+\$cfg['SaveDir'] = '/var/lib/phpmyadmin/upload';
 \$cfg['ExecTimeLimit'] = 0;
-\$cfg['MemoryLimit'] = '1024M';
+\$cfg['MemoryLimit'] = '2048M';
+\$cfg['LoginCookieValidity'] = 28800;
+\$cfg['LoginCookieStore'] = 0;
 if (isset(\$i) && isset(\$cfg['Servers'][\$i])) {
     \$cfg['Servers'][\$i]['pmadb'] = 'phpmyadmin';
     \$cfg['Servers'][\$i]['controlhost'] = 'localhost';
@@ -309,7 +326,7 @@ fi
 [[ -n "$PHP_FPM_SOCK" ]] || fail "Не найден PHP-FPM socket. Проверь установку php-fpm."
 
 log "Создание папок..."
-mkdir -p "$BASE_DIR/data" "$BASE_DIR/templates" "$BASE_DIR/bin" "$BASE_DIR/logs" "$BASE_DIR/runtime" "$BACKUP_DIR" "$CACHE_DIR" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$DNS_DIR" "$CONF_DIR"
+mkdir -p "$BASE_DIR/data" "$BASE_DIR/templates" "$BASE_DIR/bin" "$BASE_DIR/logs" "$BASE_DIR/runtime" "$BASE_DIR/imports/tmp" "$BASE_DIR/imports/uploads" "$BASE_DIR/imports/jobs" "$BASE_DIR/imports/logs" "$BACKUP_DIR" "$CACHE_DIR" "$PANEL_DIR" "$SITES_DIR" "$BOTS_DIR" "$FTP_DIR" "$DNS_DIR" "$CONF_DIR"
 
 log "Очистка старых сломанных FTP bind-mount'ов..."
 cleanup_hyper_host_mounts
@@ -333,6 +350,10 @@ fi
 mkdir -p "$BASE_DIR/deploy-center/defaults" /var/www/hyper-host-deploy/master /var/www/hyper-host-deploy/template /var/www/hyper-host-managed-bots
 install -m 0755 "$PROJECT_DIR/scripts/deploy_center.py" "$BASE_DIR/deploy-center/deploy_center.py"
 install -m 0755 "$PROJECT_DIR/scripts/ssl_truth.py" "$BASE_DIR/ssl-truth.py"
+install -m 0755 "$PROJECT_DIR/scripts/hyper_sql_import.py" "$BASE_DIR/bin/hyper_sql_import.py"
+chown -R www-data:www-data "$BASE_DIR/imports/tmp" "$BASE_DIR/imports/uploads" 2>/dev/null || true
+chmod 0770 "$BASE_DIR/imports/tmp" "$BASE_DIR/imports/uploads" 2>/dev/null || true
+chmod 0750 "$BASE_DIR/imports/jobs" "$BASE_DIR/imports/logs" 2>/dev/null || true
 # v76: не создаём и не копируем никакие bot.py/.env/requirements.txt.
 # Пользователь загружает главный комплект и шаблон магазинов только через Deploy Manager.
 # v23: делаем CLI доступным для панели, PM2-ботов и обычной shell-среды.
@@ -488,7 +509,7 @@ server {
 
     root ${PANEL_DIR}/public;
     index index.php index.html;
-    client_max_body_size 1024M;
+    client_max_body_size 8192M;
 
     access_log /var/log/nginx/hyper-host-panel.access.log;
     error_log /var/log/nginx/hyper-host-panel.error.log;
@@ -506,8 +527,8 @@ server {
         alias /usr/share/phpmyadmin/\$1;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME /usr/share/phpmyadmin/\$1;
-        fastcgi_read_timeout 600;
-        fastcgi_send_timeout 600;
+        fastcgi_read_timeout 21600;
+        fastcgi_send_timeout 21600;
         fastcgi_connect_timeout 60;
         fastcgi_pass unix:${PHP_FPM_SOCK};
     }
@@ -518,8 +539,8 @@ server {
 
     location ~ \.php$ {
         include snippets/fastcgi-php.conf;
-        fastcgi_read_timeout 600;
-        fastcgi_send_timeout 600;
+        fastcgi_read_timeout 21600;
+        fastcgi_send_timeout 21600;
         fastcgi_connect_timeout 60;
         fastcgi_pass unix:${PHP_FPM_SOCK};
     }
@@ -670,6 +691,8 @@ fi
 
 log "Финальный ремонт прав и сервисов..."
 /usr/local/sbin/hyper-host-ctl repair >/dev/null || warn "Repair-команда не выполнилась, проверь вручную: sudo hyper-host-ctl repair"
+/usr/local/sbin/hyper-host-ctl mysql-import-tune >/dev/null || warn "Не удалось применить расширенные лимиты SQL-импорта"
+/usr/local/sbin/hyper-host-ctl ssl-restore-existing >/dev/null 2>&1 || true
 /usr/local/sbin/hyper-host-ctl network-fix "${PANEL_DOMAIN}" "${PUBLIC_IP}" >/dev/null 2>&1 || true
 
 log "Проверка панели..."

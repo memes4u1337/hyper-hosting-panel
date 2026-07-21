@@ -153,6 +153,28 @@ function handle_post(string $action): void
             case 'create_db': {
                 $db=trim((string)($_POST['db_name']??'')); $du=trim((string)($_POST['db_user']??'')); $pass=(string)($_POST['password']??''); $remote=!empty($_POST['remote_allowed'])?'1':'0'; $hostPattern=$remote==='1'?(trim((string)($_POST['host_pattern']??'%'))):'localhost'; if($hostPattern==='custom') $hostPattern=trim((string)($_POST['custom_host']??'%')); if(!is_valid_db_name($db)||!is_valid_db_name($du)) throw new RuntimeException('Имя базы/пользователя: латиница, цифры, _'); if(strlen($pass)<10) throw new RuntimeException('Пароль базы минимум 10 символов'); $res=run_ctl(['create-db',$db,$du,$pass,$remote,$hostPattern],180); if($res['code']!==0) throw new RuntimeException($res['output']); upsert_db_row($db,$du,(int)$remote,$pass,$remote==='1'?mysql_external_host():mysql_local_host(),'3306'); upsert_mysql_account_row($du,$pass,$hostPattern,$db,'ALL',(int)$remote); flash('База и phpMyAdmin-пользователь созданы','success'); redirect('/?page=databases');
             }
+            case 'import_db': {
+                $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM databases WHERE id=?'); $st->execute([$id]); $row=$st->fetch(); if(!$row) throw new RuntimeException('База не найдена');
+                $file=$_FILES['sql_file']??null;
+                if(!is_array($file) || (int)($file['error']??UPLOAD_ERR_NO_FILE)!==UPLOAD_ERR_OK) {
+                    $code=(int)($file['error']??UPLOAD_ERR_NO_FILE);
+                    $errors=[UPLOAD_ERR_INI_SIZE=>'Файл превышает upload_max_filesize',UPLOAD_ERR_FORM_SIZE=>'Файл превышает допустимый размер формы',UPLOAD_ERR_PARTIAL=>'Файл загружен не полностью',UPLOAD_ERR_NO_FILE=>'Файл не выбран',UPLOAD_ERR_NO_TMP_DIR=>'Нет временной папки PHP',UPLOAD_ERR_CANT_WRITE=>'PHP не может записать файл на диск',UPLOAD_ERR_EXTENSION=>'Загрузка остановлена расширением PHP'];
+                    throw new RuntimeException($errors[$code]??('Ошибка загрузки файла: '.$code));
+                }
+                $original=(string)($file['name']??'dump.sql');
+                $lower=strtolower($original);
+                if(!str_ends_with($lower,'.sql') && !str_ends_with($lower,'.sql.gz') && !str_ends_with($lower,'.gz') && !str_ends_with($lower,'.zip')) throw new RuntimeException('Разрешены только .sql, .sql.gz, .gz и .zip');
+                $uploadDir='/opt/hyper-host/imports/uploads';
+                if(!is_dir($uploadDir) && !@mkdir($uploadDir,0770,true)) throw new RuntimeException('Не удалось создать папку импорта');
+                $safe=preg_replace('/[^A-Za-z0-9._-]+/u','_',basename($original))?:'dump.sql';
+                $dest=$uploadDir.'/'.date('Ymd-His').'-'.bin2hex(random_bytes(4)).'-'.$safe;
+                if(!move_uploaded_file((string)$file['tmp_name'],$dest)) throw new RuntimeException('Не удалось переместить загруженный SQL в очередь импорта');
+                @chmod($dest,0640);
+                $res=run_ctl_json(['mysql-import-start',(string)$row['db_name'],$dest],60);
+                if(empty($res['ok'])) { @unlink($dest); throw new RuntimeException((string)($res['error']??$res['_error']??'Не удалось запустить импорт')); }
+                add_event('database','Запущен фоновый SQL-импорт: '.$row['db_name'].' / '.$original);
+                flash('SQL загружен. Импорт запущен в фоне, страницу можно закрыть. Задание: '.(string)($res['job_id']??''),'success'); redirect('/?page=databases#imports');
+            }
             case 'delete_db': {
                 $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM databases WHERE id=?'); $st->execute([$id]); $r=$st->fetch(); if(!$r) throw new RuntimeException('База не найдена'); $res=run_ctl(['delete-db',$r['db_name'],$r['db_user']],180); if($res['code']!==0) throw new RuntimeException($res['output']); db()->prepare('DELETE FROM databases WHERE id=?')->execute([$id]); redirect('/?page=databases');
             }
@@ -217,8 +239,9 @@ function handle_post(string $action): void
                 flash($act==='delete' ? 'Бот проекта #'.$pid.' полностью удалён с сервера. Проект в MySQL сохранён.' : 'Проект #'.$pid.': '.$act,'success'); redirect('/?page=deploy_center');
             }
             case 'ssl_restore_existing': {
-                hh_clear_cache(); $res=run_ctl_json(['ssl-restore-existing'],300); if(empty($res['ok'])) throw new RuntimeException((string)($res['error']??$res['_error']??'Не удалось восстановить SSL'));
-                flash('Nginx подключил все реально найденные действующие сертификаты','success'); redirect('/?page=ssl');
+                hh_clear_cache(); $res=run_ctl_json(['ssl-repair-all'],1200); if(empty($res['ok'])) throw new RuntimeException((string)($res['error']??$res['_error']??'Не удалось восстановить SSL'));
+                $issued=count($res['issued']??[]); $failed=count($res['failed']??[]);
+                flash('SSL восстановлен и переподключён ко всем найденным доменам. Новых выпущено: '.$issued.($failed?'; ошибок выпуска: '.$failed:''),$failed?'warning':'success'); redirect('/?page=ssl');
             }
             case 'create_bot': {
                 $name=trim((string)($_POST['name']??''));
@@ -693,6 +716,8 @@ function view_databases(): void
     $mysql=run_ctl_json_cached(['mysql-status-json'],5,120);
     $doctor=run_ctl_json_cached(['mysql-doctor-json'],5,120);
     $pmaStatus=run_ctl_json_cached(['phpmyadmin-status-json'],5,120);
+    $imports=run_ctl_json_cached(['mysql-import-status-json'],8,5);
+    if(!is_array($imports) || !array_is_list($imports)) $imports=[];
     $gen=default_db_password();
     $external=setting_get('mysql_external','0')==='1' || (($mysql['bind_address']??'')==='0.0.0.0');
     $pma=phpmyadmin_url();
@@ -722,8 +747,8 @@ function view_databases(): void
       <div><span>Доступ</span><b class="<?= $external?'hh-ok':'hh-warn' ?>"><?= $external?'внешний включён':'локально' ?></b></div>
       <div><span>SQL host</span><b><?= e($mysqlExternalHost) ?></b></div>
       <div><span>pmadb</span><b class="<?= !empty($pmaStatus['ready'])?'hh-ok':'hh-warn' ?>"><?= !empty($pmaStatus['ready'])?'готово':'настроить' ?></b></div>
-      <div><span>Импорт</span><b><?= e((string)($pmaStatus['upload_max_filesize']??'1024M')) ?></b></div>
-      <div><span>Экспорт</span><b><?= e((string)($pmaStatus['memory_limit']??'1024M')) ?></b></div>
+      <div><span>Импорт</span><b><?= e((string)($pmaStatus['upload_max_filesize']??'8192M')) ?></b></div>
+      <div><span>Экспорт</span><b><?= e((string)($pmaStatus['memory_limit']??'2048M')) ?></b></div>
     </div>
     <?php if(!empty($doctor['problem'])): ?><div class="alert alert-warning mt-3 mb-0"><i class="fa-solid fa-triangle-exclamation me-2"></i><?= e((string)$doctor['problem']) ?></div><?php endif; ?>
   </section>
@@ -750,6 +775,19 @@ function view_databases(): void
           </div>
           <button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Создать</button>
         </form>
+      </div>
+
+      <div class="panel-card db-form-card mt-4" id="imports">
+        <h2><i class="fa-solid fa-file-import me-2"></i>Большой SQL-импорт</h2>
+        <p class="muted small">Файлы <code>.sql</code>, <code>.sql.gz</code> и <code>.zip</code> загружаются один раз, затем импорт продолжается в фоне без удержания соединения браузера.</p>
+        <?php if($rows): ?>
+        <form method="post" enctype="multipart/form-data" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="import_db">
+          <select class="form-select" name="id" required><?php foreach($rows as $r): ?><option value="<?= (int)$r['id'] ?>"><?= e($r['db_name']) ?></option><?php endforeach; ?></select>
+          <input class="form-control" type="file" name="sql_file" accept=".sql,.gz,.zip,application/sql,application/zip,application/gzip" required>
+          <button class="btn btn-primary w-100"><i class="fa-solid fa-cloud-arrow-up me-2"></i>Загрузить и импортировать в фоне</button>
+        </form>
+        <?php else: ?><div class="alert alert-warning mb-0">Сначала создай базу данных.</div><?php endif; ?>
+        <div class="small muted mt-3">Лимит панели: 8 ГБ. Для твоего ZIP на 260 МБ SQL внутри распакуется потоково — без временного файла на 2 ГБ.</div>
       </div>
 
       <div class="panel-card db-form-card mt-4">
@@ -794,6 +832,21 @@ function view_databases(): void
         <?php endforeach; if(!$rows): ?><div class="empty">Баз пока нет</div><?php endif; ?>
         </div>
       </div>
+
+      <div class="panel-card mt-4" id="import-jobs">
+        <div class="card-title-row"><h2><i class="fa-solid fa-bars-progress me-2"></i>Импорт SQL</h2><button class="btn btn-sm btn-soft" type="button" onclick="location.reload()">Обновить</button></div>
+        <div class="db-cards-list">
+        <?php $hasRunning=false; foreach($imports as $job): $status=(string)($job['status']??'unknown'); if(in_array($status,['queued','running'],true))$hasRunning=true; $progress=(float)($job['progress']??0); ?>
+          <div class="db-row-card compact">
+            <div><span>База</span><b><?= e((string)($job['database']??'')) ?></b><small><?= e((string)($job['source_name']??'')) ?></small></div>
+            <div><span>Статус</span><b class="<?= $status==='done'?'hh-ok':($status==='failed'?'hh-bad':'hh-warn') ?>"><?= e($status==='done'?'готово':($status==='failed'?'ошибка':'выполняется')) ?></b><small><?= round($progress,1) ?>%</small></div>
+            <div style="min-width:180px"><span>Прогресс</span><div class="progress" style="height:9px"><div class="progress-bar" style="width:<?= max(0,min(100,$progress)) ?>%"></div></div><small><?= e(human_bytes((float)($job['bytes_processed']??0))) ?> / <?= e(human_bytes((float)($job['bytes_total']??0))) ?></small></div>
+            <div><span>Задание</span><code><?= e((string)($job['job_id']??'')) ?></code><?php if(!empty($job['error'])): ?><small class="text-danger" title="<?= e((string)$job['error']) ?>"><?= e(mb_substr((string)$job['error'],0,180)) ?></small><?php endif; ?></div>
+          </div>
+        <?php endforeach; if(!$imports): ?><div class="empty">Импорты ещё не запускались</div><?php endif; ?>
+        </div>
+      </div>
+      <?php if(!empty($hasRunning)): ?><script>setTimeout(function(){location.reload()},5000);</script><?php endif; ?>
 
       <div class="panel-card mt-4">
         <h2><i class="fa-solid fa-users-gear me-2"></i>Аккаунты MySQL / phpMyAdmin</h2>
@@ -1291,7 +1344,7 @@ function view_ssl(): void {
       <input class="form-control public-ip-input" name="public_ip" value="<?= e($savedPublicIp) ?>" placeholder="90.189.208.25">
       <button class="btn btn-soft"><i class="fa-solid fa-floppy-disk me-2"></i>IP</button>
     </form>
-    <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_restore_existing"><button class="btn btn-soft"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Подключить найденные сертификаты</button></form><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_renew_all"><button class="btn btn-primary"><i class="fa-solid fa-arrows-rotate me-2"></i>Автопродление</button></form>
+    <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_restore_existing"><button class="btn btn-soft"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Восстановить SSL на всех доменах</button></form><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_renew_all"><button class="btn btn-primary"><i class="fa-solid fa-arrows-rotate me-2"></i>Автопродление</button></form>
   </div>
 </div>
 <div class="panel-card ssl-card">
