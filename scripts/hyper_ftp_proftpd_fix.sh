@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 CONF="${HYPER_HOST_CONF:-/etc/hyper-host/hyper-host.conf}"
 [[ -f "$CONF" ]] && source "$CONF" || true
+NETWORK_ENV="${NETWORK_ENV:-/opt/hyper-host/network.env}"
+[[ -f "$NETWORK_ENV" ]] && source "$NETWORK_ENV" || true
 
 BASE_DIR="${BASE_DIR:-/opt/hyper-host}"
 FTP_DIR="${FTP_DIR:-/var/www/hyper-host-ftp}"
@@ -33,17 +35,13 @@ fail(){ printf '[HYPER-HOST FTP ERROR] %s\n' "$*" >&2; exit 1; }
 extract_ipv4(){ grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' <<<"${1:-}" | head -n1 || true; }
 is_private(){ local ip="${1:-}"; [[ "$ip" =~ ^10\. || "$ip" =~ ^192\.168\. || "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. || "$ip" =~ ^127\. || "$ip" =~ ^169\.254\. ]]; }
 
-LAN_IP="$(extract_ipv4 "${SERVER_IP:-}")"
+LAN_IP="$(extract_ipv4 "${STATIC_LAN_IP:-${SERVER_IP:-}}")"
 [[ -n "$LAN_IP" ]] || LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 [[ -n "$LAN_IP" ]] || fail 'Не удалось определить локальный IPv4 сервера'
 
-PUBLIC_IP_VALUE="$(extract_ipv4 "${PUBLIC_IP:-${SERVER_PUBLIC_IP:-}}")"
+PUBLIC_IP_VALUE="$(extract_ipv4 "${STATIC_PUBLIC_IP:-${PUBLIC_IP:-${SERVER_PUBLIC_IP:-}}}")"
 if [[ -z "$PUBLIC_IP_VALUE" && -f /etc/hyper-host/public_ip ]]; then
   PUBLIC_IP_VALUE="$(extract_ipv4 "$(cat /etc/hyper-host/public_ip 2>/dev/null || true)")"
-fi
-if [[ -z "$PUBLIC_IP_VALUE" ]]; then
-  PUBLIC_IP_VALUE="$(curl -4fsS --max-time 6 https://api.ipify.org 2>/dev/null || true)"
-  PUBLIC_IP_VALUE="$(extract_ipv4 "$PUBLIC_IP_VALUE")"
 fi
 if [[ -z "$PUBLIC_IP_VALUE" ]] || is_private "$PUBLIC_IP_VALUE"; then
   PUBLIC_IP_VALUE="$LAN_IP"

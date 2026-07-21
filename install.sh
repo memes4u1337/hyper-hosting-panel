@@ -114,11 +114,17 @@ if [[ -f "$CONF_DIR/hyper-host.conf" ]]; then
   # shellcheck disable=SC1090
   source "$CONF_DIR/hyper-host.conf" || true
 fi
+[[ -f "$BASE_DIR/network.env" ]] && source "$BASE_DIR/network.env" || true
+NETWORK_MODE="static"
+STATIC_LAN_IP="192.168.0.179"
+STATIC_PUBLIC_IP="90.189.208.25"
+DISABLE_IP_AUTOFIX="1"
 # Брендинг установщика всегда остаётся актуальным даже при обновлении старой конфигурации.
 PANEL_NAME="HYPER-HOST"
 POWERED_BY="Разработано memes4u1337"
-SERVER_IP="${SERVER_IP:-$(get_server_ip)}"
-PUBLIC_IP="${PUBLIC_IP:-${SERVER_PUBLIC_IP:-}}"
+SERVER_IP="$STATIC_LAN_IP"
+PUBLIC_IP="$STATIC_PUBLIC_IP"
+SERVER_PUBLIC_IP="$STATIC_PUBLIC_IP"
 PANEL_DOMAIN="${PANEL_DOMAIN:-_}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-$(openssl rand -base64 18 | tr -d '\n')}"
@@ -335,6 +341,21 @@ ln -sf "$HYPER_BIN" /usr/bin/hyper 2>/dev/null || true
 ln -sf "$CONTROL_BIN" /usr/bin/hyper-host-ctl 2>/dev/null || true
 chmod 0755 "$CONTROL_BIN" "$HYPER_BIN" "$HYPER_FTP_BIN" /usr/bin/hyper /usr/bin/hyper-host-ctl 2>/dev/null || true
 
+log "Создание статической сетевой конфигурации HYPER-HOST..."
+mkdir -p "$BASE_DIR"
+cat > "$BASE_DIR/network.env" <<EONETWORK
+NETWORK_MODE="static"
+STATIC_LAN_IP="192.168.0.179"
+STATIC_PUBLIC_IP="90.189.208.25"
+SERVER_IP="192.168.0.179"
+PUBLIC_IP="90.189.208.25"
+SERVER_PUBLIC_IP="90.189.208.25"
+DISABLE_IP_AUTOFIX="1"
+EONETWORK
+chmod 0600 "$BASE_DIR/network.env"
+mkdir -p /etc/hyper-host 2>/dev/null || true
+printf '%s\n' '90.189.208.25' > /etc/hyper-host/public_ip 2>/dev/null || true
+
 log "Создание конфигурации панели..."
 cat > "$CONF_DIR/hyper-host.conf" <<EOCONF
 PANEL_NAME="${PANEL_NAME}"
@@ -348,6 +369,11 @@ PROJECT_SOURCE_DIR="${PROJECT_DIR}"
 SERVER_IP="${SERVER_IP}"
 PANEL_DOMAIN="${PANEL_DOMAIN}"
 PUBLIC_IP="${PUBLIC_IP}"
+SERVER_PUBLIC_IP="${PUBLIC_IP}"
+NETWORK_MODE="static"
+STATIC_LAN_IP="${SERVER_IP}"
+STATIC_PUBLIC_IP="${PUBLIC_IP}"
+DISABLE_IP_AUTOFIX="1"
 BASE_DIR="${BASE_DIR}"
 PANEL_DIR="${PANEL_DIR}"
 SITES_DIR="${SITES_DIR}"
@@ -608,17 +634,12 @@ systemctl restart "php${PHP_VER}-fpm" 2>/dev/null || systemctl restart php-fpm 2
 systemctl enable cron >/dev/null 2>&1 || true
 systemctl restart cron 2>/dev/null || true
 
-# v47: у многих домашних провайдеров публичный IP не статичный (меняется при
-# переподключении/перезагрузке роутера). Без этого вотчера при смене IP FTP и DNS
-# продолжали бы рекламировать старый, недоступный извне адрес. Проверяем раз в 5 минут.
-{
-cat > /etc/cron.d/hyper-host-ip-watch <<EOIPWATCH
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-*/5 * * * * root /usr/local/sbin/hyper-host-ctl ip-autofix --quiet >/var/log/hyper-host-ip-watch.log 2>&1
-EOIPWATCH
-} 2>/dev/null || warn "Не удалось поставить cron для автообновления IP (read-only /etc/cron.d?) — при смене IP чини вручную: sudo hyper network ip-fix"
-chmod 0644 /etc/cron.d/hyper-host-ip-watch 2>/dev/null || true
+# На этом сервере IP закреплены вручную. Старый ip-autofix удаляется, чтобы
+# сторонний сервис определения IP больше никогда не подменял 90.189.208.25.
+rm -f /etc/cron.d/hyper-host-ip-watch 2>/dev/null || true
+if command -v crontab >/dev/null 2>&1; then
+  crontab -l 2>/dev/null | grep -v 'ip-autofix' | crontab - 2>/dev/null || true
+fi
 systemctl reload cron 2>/dev/null || true
 
 log "Настройка firewall..."

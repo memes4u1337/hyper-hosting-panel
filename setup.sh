@@ -103,6 +103,9 @@ load_config() {
     # shellcheck disable=SC1090
     source "$CONF_FILE" || true
   fi
+  [[ -f /opt/hyper-host/network.env ]] && source /opt/hyper-host/network.env || true
+  SERVER_IP="${STATIC_LAN_IP:-${SERVER_IP:-192.168.0.179}}"
+  PUBLIC_IP="${STATIC_PUBLIC_IP:-${PUBLIC_IP:-90.189.208.25}}"
   if [[ -z "${SERVER_IP:-}" ]]; then
     SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
   fi

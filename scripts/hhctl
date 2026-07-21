@@ -6,10 +6,19 @@ CONF="/etc/hyper-host/hyper-host.conf"
 # shellcheck disable=SC1090
 source "$CONF"
 
+# HYPER-HOST v1.2: сеть этого сервера статическая. Отдельный файл в /opt
+# имеет приоритет над старыми/ошибочными значениями и не зависит от writable /etc.
+NETWORK_ENV="${NETWORK_ENV:-/opt/hyper-host/network.env}"
+[[ -f "$NETWORK_ENV" ]] && source "$NETWORK_ENV"
+NETWORK_MODE="${NETWORK_MODE:-static}"
+STATIC_LAN_IP="${STATIC_LAN_IP:-192.168.0.179}"
+STATIC_PUBLIC_IP="${STATIC_PUBLIC_IP:-90.189.208.25}"
+DISABLE_IP_AUTOFIX="${DISABLE_IP_AUTOFIX:-1}"
+
 PANEL_NAME="${PANEL_NAME:-HYPER-HOST}"
 POWERED_BY="${POWERED_BY:-powered by memes4u1337}"
-SERVER_IP="${SERVER_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
-PUBLIC_IP="${PUBLIC_IP:-${SERVER_PUBLIC_IP:-}}"
+SERVER_IP="${STATIC_LAN_IP:-${SERVER_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}}"
+PUBLIC_IP="${STATIC_PUBLIC_IP:-${PUBLIC_IP:-${SERVER_PUBLIC_IP:-}}}"
 PANEL_DOMAIN="${PANEL_DOMAIN:-_}"
 BASE_DIR="${BASE_DIR:-/opt/hyper-host}"
 PANEL_DIR="${PANEL_DIR:-/var/www/hyper-host}"
@@ -44,7 +53,7 @@ PROFTPD_DIR="${PROFTPD_DIR:-$BASE_DIR/proftpd}"
 PROFTPD_AUTH_SYNC="${PROFTPD_AUTH_SYNC:-$BASE_DIR/bin/proftpd_auth_sync.py}"
 PROFTPD_FIX_BIN="${PROFTPD_FIX_BIN:-$BASE_DIR/bin/hyper_ftp_proftpd_fix.sh}"
 
-export PANEL_NAME POWERED_BY SERVER_IP PUBLIC_IP PANEL_DOMAIN BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR ACME_WEBROOT LE_CONFIG_DIR LE_WORK_DIR LE_LOGS_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB HYPER_FTP_BIN HYPER_FTP_SERVICE HYPER_FTP_PID PROFTPD_DIR PROFTPD_AUTH_SYNC PROFTPD_FIX_BIN NGINX_RUNTIME_DIR NGINX_RUNTIME_BIN
+export PANEL_NAME POWERED_BY SERVER_IP PUBLIC_IP PANEL_DOMAIN NETWORK_ENV NETWORK_MODE STATIC_LAN_IP STATIC_PUBLIC_IP DISABLE_IP_AUTOFIX BASE_DIR PANEL_DIR SITES_DIR BOTS_DIR FTP_DIR PHP_FPM_SOCK PHPMYADMIN_PATH BACKUP_DIR ACME_WEBROOT LE_CONFIG_DIR LE_WORK_DIR LE_LOGS_DIR FTP_GUEST_USER FTP_USER_CONF_DIR FTP_AUTH_TXT FTP_AUTH_DB_BASE FTP_AUTH_DB HYPER_FTP_BIN HYPER_FTP_SERVICE HYPER_FTP_PID PROFTPD_DIR PROFTPD_AUTH_SYNC PROFTPD_FIX_BIN NGINX_RUNTIME_DIR NGINX_RUNTIME_BIN
 BOT_USER="${BOT_USER:-hyperbot}"
 PM2_HOME_DIR="${PM2_HOME_DIR:-$BOTS_DIR/.pm2}"
 DEPLOY_CENTER_DIR="${DEPLOY_CENTER_DIR:-/opt/hyper-host/deploy-center}"
@@ -877,16 +886,16 @@ is_private_ipv4() {
 }
 
 outbound_public_ip() {
-  curl -4 -fsS --max-time 4 https://api.ipify.org 2>/dev/null || \
-  curl -4 -fsS --max-time 4 https://ifconfig.me 2>/dev/null || \
-  echo ""
+  # Статическая конфигурация: возвращаем только закреплённый адрес.
+  # Никакие сторонние сервисы определения IP не используются.
+  configured_public_ip
 }
 
 configured_public_ip() {
-  local ip="${PUBLIC_IP:-}"
+  local ip="${STATIC_PUBLIC_IP:-${PUBLIC_IP:-}}"
   [[ -z "$ip" && -f /etc/hyper-host/public_ip ]] && ip="$(tr -d '[:space:]' </etc/hyper-host/public_ip 2>/dev/null || true)"
   [[ -z "$ip" ]] && ip="${SERVER_PUBLIC_IP:-}"
-  echo "$ip"
+  printf '%s\n' "$ip"
 }
 
 public_ip() {
@@ -915,6 +924,13 @@ resolve_domain_a_public() {
   local domain="$1" ns
   for ns in 1.1.1.1 8.8.8.8 9.9.9.9; do
     dig +time=2 +tries=1 +short @"$ns" A "$domain" 2>/dev/null
+  done | sed '/^$/d' | sort -u
+}
+
+resolve_domain_aaaa_public() {
+  local domain="$1" ns
+  for ns in 1.1.1.1 8.8.8.8 9.9.9.9; do
+    dig +time=2 +tries=1 +short @"$ns" AAAA "$domain" 2>/dev/null
   done | sed '/^$/d' | sort -u
 }
 
@@ -951,16 +967,15 @@ choose_ssl_expected_ip() {
 }
 
 dns_points_here() {
-  local domain="$1" expected ips
-  expected="$(choose_ssl_expected_ip "$domain")"
-  ips="$(resolve_domain_ips "$domain")"
-  [[ -n "$ips" ]] || return 2
-  if [[ -n "$expected" ]] && echo "$ips" | grep -qxF "$expected"; then return 0; fi
-  # Для локального сервера за NAT разрешаем A-запись на публичный IP роутера,
-  # даже если outbound IP отличается. Главное — чтобы порты 80/443 были проброшены.
-  if [[ -z "$(configured_public_ip)" && -n "$SERVER_IP" ]] && is_private_ipv4 "$SERVER_IP" && [[ -n "$(resolve_domain_a "$domain")" ]]; then return 0; fi
-  [[ -n "$SERVER_IP" ]] && echo "$ips" | grep -qxF "$SERVER_IP" && return 0
-  return 1
+  local domain="$1" expected arec aaaarec
+  expected="$(configured_public_ip)"
+  [[ -n "$expected" ]] || return 1
+  arec="$(resolve_domain_a_public "$domain")"
+  printf '%s\n' "$arec" | grep -qxF "$expected" || return 1
+  # У сервера нет публичного IPv6. Любая AAAA-запись заставит Let's Encrypt
+  # проверять чужой IPv6 и HTTP-01 завершится ошибкой.
+  aaaarec="$(resolve_domain_aaaa_public "$domain")"
+  [[ -z "$aaaarec" ]]
 }
 
 site_root_for_domain() {
@@ -1009,17 +1024,19 @@ ssl_preflight_json() {
   expected="$(choose_ssl_expected_ip "$domain")"
   pub="$expected"
   arec="$(resolve_domain_a_public "$domain")"
-  aaaarec="$(for ns in 1.1.1.1 8.8.8.8 9.9.9.9; do dig +time=2 +tries=1 +short @"$ns" AAAA "$domain" 2>/dev/null; done | sed '/^$/d' | sort -u || true)"
+  aaaarec="$(resolve_domain_aaaa_public "$domain")"
   ips="$(printf '%s\n%s\n' "$arec" "$aaaarec" | sed '/^$/d' | sort -u)"
   dns_status="bad"
   nat_mode=0
   [[ -n "$SERVER_IP" ]] && is_private_ipv4 "$SERVER_IP" && nat_mode=1
   if [[ -z "$ips" ]]; then
     dns_status="missing"
-  elif dns_points_here "$domain"; then
-    dns_status="ok"
-  else
+  elif ! printf '%s\n' "$arec" | grep -qxF "$expected"; then
     dns_status="wrong_ip"
+  elif [[ -n "$aaaarec" ]]; then
+    dns_status="wrong_aaaa"
+  else
+    dns_status="ok"
   fi
   nginx_ok=0; nginx_autorepair && nginx_ok=1
   has_site=0; [[ -f "$NGINX_AVAILABLE/hyper-host-site-$domain.conf" || -d "$root" ]] && has_site=1
@@ -1029,7 +1046,8 @@ ssl_preflight_json() {
   required_a="A    $domain    $expected"
   if [[ "$nat_mode" == 1 ]]; then warning=""; fi
   if [[ "$dns_status" == missing ]]; then problem="У домена нет публичных A/AAAA записей. Добавь запись: $required_a"; fi
-  if [[ "$dns_status" == wrong_ip ]]; then problem="DNS домена указывает не на нужный IP. Сейчас: ${ips//$'\n'/, }. Нужно: $required_a"; fi
+  if [[ "$dns_status" == wrong_ip ]]; then problem="DNS A-запись домена указывает не на нужный IP. Сейчас: ${arec//$'\n'/, }. Нужно: $required_a"; fi
+  if [[ "$dns_status" == wrong_aaaa ]]; then problem="У домена есть AAAA-запись (${aaaarec//$'\n'/, }), но у сервера нет публичного IPv6. Удали AAAA-запись перед выпуском SSL."; fi
   if [[ "$nginx_ok" != 1 ]]; then problem="Nginx config не проходит проверку: sudo nginx -t"; fi
   if [[ "$has_site" != 1 ]]; then problem="Сайт не найден в HYPER-HOST. Сначала создай сайт: $domain"; fi
   if [[ "$http_ok" != 1 && "$dns_status" == ok && "$nginx_ok" == 1 ]]; then problem="Nginx локально не отдаёт /.well-known/acme-challenge для Host: $domain. Проверь root сайта и конфиг."; fi
@@ -1069,30 +1087,56 @@ cmd_ssl_check_json() {
 
 cmd_public_ip() {
   local action="${1:-get}" ip="${2:-}"
-  mkdir -p /etc/hyper-host
+  mkdir -p "$BASE_DIR" /etc/hyper-host 2>/dev/null || true
   case "$action" in
     get)
-      echo "$(public_ip)"
+      configured_public_ip
       ;;
     set)
       [[ -n "$ip" ]] || err "Public IP required"
       [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || err "Invalid IPv4: $ip"
-      echo "$ip" > /etc/hyper-host/public_ip 2>/dev/null || warn "Не удалось записать /etc/hyper-host/public_ip (read-only?) — публичный IP используется только на время этого запуска."
-      if [[ -f "$CONF" ]]; then
-        if grep -q '^PUBLIC_IP=' "$CONF"; then sed -i "s#^PUBLIC_IP=.*#PUBLIC_IP=\"$ip\"#" "$CONF" 2>/dev/null || true; else echo "PUBLIC_IP=\"$ip\"" >> "$CONF" 2>/dev/null || true; fi
+      local tmp="$BASE_DIR/network.env.tmp.$$"
+      cat > "$tmp" <<EOFNET
+NETWORK_MODE="static"
+STATIC_LAN_IP="${STATIC_LAN_IP:-192.168.0.179}"
+STATIC_PUBLIC_IP="$ip"
+SERVER_IP="${STATIC_LAN_IP:-192.168.0.179}"
+PUBLIC_IP="$ip"
+SERVER_PUBLIC_IP="$ip"
+DISABLE_IP_AUTOFIX="1"
+EOFNET
+      chmod 0600 "$tmp"
+      mv -f "$tmp" "$BASE_DIR/network.env"
+      printf '%s\n' "$ip" > /etc/hyper-host/public_ip 2>/dev/null || true
+      if [[ -f "$CONF" && -w "$CONF" ]]; then
+        python3 - "$CONF" "$ip" "${STATIC_LAN_IP:-192.168.0.179}" <<'PYNETCONF'
+import sys,re,pathlib
+p=pathlib.Path(sys.argv[1]); pub=sys.argv[2]; lan=sys.argv[3]
+text=p.read_text('utf-8',errors='ignore')
+vals={'SERVER_IP':lan,'PUBLIC_IP':pub,'SERVER_PUBLIC_IP':pub,'NETWORK_MODE':'static','STATIC_LAN_IP':lan,'STATIC_PUBLIC_IP':pub,'DISABLE_IP_AUTOFIX':'1'}
+for k,v in vals.items():
+    line=f'{k}="{v}"'
+    if re.search(rf'(?m)^{re.escape(k)}=',text): text=re.sub(rf'(?m)^{re.escape(k)}=.*$',line,text)
+    else: text=text.rstrip()+"\n"+line+"\n"
+p.write_text(text,'utf-8')
+PYNETCONF
       fi
-      log "Public IP saved: $ip"
+      STATIC_PUBLIC_IP="$ip"; PUBLIC_IP="$ip"; SERVER_PUBLIC_IP="$ip"
+      export STATIC_PUBLIC_IP PUBLIC_IP SERVER_PUBLIC_IP
+      log "Static public IP saved: $ip"
       ;;
     clear)
-      rm -f /etc/hyper-host/public_ip
-      [[ -f "$CONF" ]] && sed -i '/^PUBLIC_IP=/d' "$CONF" || true
-      log "Public IP override cleared"
+      err "Статический режим включён. Используй: sudo hyper public-ip set 90.189.208.25"
       ;;
-    *) err "Use: public-ip get|set IP|clear" ;;
+    *) err "Use: public-ip get|set IP" ;;
   esac
 }
 
 cmd_ip_autofix() {
+  if [[ "${NETWORK_MODE:-static}" == "static" || "${DISABLE_IP_AUTOFIX:-1}" == "1" ]]; then
+    [[ "${1:-}" == "--quiet" ]] || log "ip-autofix отключён: используется статический IP ${STATIC_PUBLIC_IP:-90.189.208.25}"
+    return 0
+  fi
   # v47: у многих домашних провайдеров публичный IP не статичный — он периодически
   # меняется (перезагрузка роутера, переподключение и т.д.). Раньше при смене IP
   # панель продолжала рекламировать СТАРЫЙ адрес в FTP (PASV) и в DNS-записях, и всё
@@ -1258,10 +1302,17 @@ cmd_ssl_site() {
   ensure_certbot_dirs
   install_certbot_renew_cron || true
   cmd_ssl_fix_site "$domain"
-  dns_points_here "$domain" || err "DNS $domain не смотрит на этот сервер"
+  local dns_a dns_aaaa expected_ip
+  expected_ip="$(configured_public_ip)"
+  dns_a="$(resolve_domain_a_public "$domain")"
+  dns_aaaa="$(resolve_domain_aaaa_public "$domain")"
+  printf '%s\n' "$dns_a" | grep -qxF "$expected_ip" \
+    || err "DNS A для $domain должен указывать на $expected_ip. Сейчас: ${dns_a:-нет A-записи}"
+  [[ -z "$dns_aaaa" ]] \
+    || err "Удали AAAA-запись для $domain перед выпуском SSL: ${dns_aaaa//$'\n'/, }. У сервера используется только IPv4 $expected_ip."
   local log_file
   log_file="$LE_LOGS_DIR/hyper-host-${domain}-$(date +%F-%H%M%S).log"
-  if ! certbot_run certonly --webroot -w "$ACME_WEBROOT" --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --preferred-challenges http --cert-name "$domain" -d "$domain" >"$log_file" 2>&1; then
+  if ! certbot_run certonly --webroot -w "$ACME_WEBROOT" --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --preferred-challenges http-01 --deploy-hook /usr/local/sbin/hyper-host-nginx-reconcile --cert-name "$domain" -d "$domain" >"$log_file" 2>&1; then
     tail -n 120 "$log_file" >&2 || true
     err "SSL не выпущен. Лог: $log_file"
   fi
@@ -2611,7 +2662,7 @@ PY
 }
 cmd_ssl_renew_all() {
   ensure_certbot_dirs
-  certbot_run renew --quiet
+  certbot_run renew --quiet --deploy-hook /usr/local/sbin/hyper-host-nginx-reconcile
   nginx_reload
   log "SSL renew checked: $LE_CONFIG_DIR"
 }
@@ -3059,7 +3110,7 @@ cmd_ftp_doctor_json() {
   issue=""; hint=""
   if [[ "$ip_mismatch" == 1 ]]; then
     issue="настроенный публичный IP ($pub) не совпадает с тем, что реально видно из интернета ($outbound_ip)"
-    hint="Чаще всего это просто смена IP у провайдера (динамический IP) — с v47 это чинится само в течение 5 минут (cron hyper-host-ip-watch) либо сразу командой: sudo hyper network ip-fix. Если IP снова быстро откатывается на старый — уточни у провайдера, статический ли у тебя IP, и нет ли CGNAT."
+    hint="В HYPER-HOST закреплён статический внешний IP 90.189.208.25. Проверь A-запись домена и проброс TCP 80/443 на 192.168.0.179. Автоматическая подмена IP отключена."
   fi
   if [[ -z "$issue" && -n "$port21_owner" && "$port21_owner" != "python3" && "$port21_owner" != "proftpd" && "$vsftpd_active" == "active" ]]; then
     issue="порт 21 занят другим сервисом ($port21_owner), похоже ожил vsftpd и дерётся за порт с hyper-host-ftp"
@@ -3821,7 +3872,7 @@ cmd_panel_ssl() {
     err "DNS панели смотрит не туда: $domain -> ${check_ip:-нет A}. Нужно: A $domain $expected"
   fi
   log_file="$LE_LOGS_DIR/hyper-host-panel-${domain}-$(date +%F-%H%M%S).log"
-  if ! certbot_run certonly --webroot -w "$ACME_WEBROOT" --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --preferred-challenges http --cert-name "$domain" -d "$domain" >"$log_file" 2>&1; then
+  if ! certbot_run certonly --webroot -w "$ACME_WEBROOT" --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --preferred-challenges http-01 --deploy-hook /usr/local/sbin/hyper-host-nginx-reconcile --cert-name "$domain" -d "$domain" >"$log_file" 2>&1; then
     tail -n 120 "$log_file" >&2 || true
     err "SSL панели не выпущен. Лог: $log_file"
   fi
@@ -3878,18 +3929,12 @@ EOSUDO
   open_server_ports
   ensure_nginx_public_listen
   ensure_vsftpd_external_access; systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
-  # v47: гарантируем, что вотчер смены публичного IP стоит в cron даже на уже
-  # развёрнутых панелях, обновлённых через git pull без повторного install.sh.
-  if [[ ! -f /etc/cron.d/hyper-host-ip-watch ]]; then
-    { cat > /etc/cron.d/hyper-host-ip-watch <<EOIPWATCH
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-*/5 * * * * root /usr/local/sbin/hyper-host-ctl ip-autofix --quiet >/var/log/hyper-host-ip-watch.log 2>&1
-EOIPWATCH
-    } 2>/dev/null || warn "Не удалось записать /etc/cron.d/hyper-host-ip-watch (read-only /etc?) — автообновление IP при смене адреса не встанет, почини IP вручную: sudo hyper network ip-fix"
-    chmod 0644 /etc/cron.d/hyper-host-ip-watch 2>/dev/null || true
-    systemctl reload cron 2>/dev/null || true
+  # Статический сервер: любой старый watcher удаления/подмены IP отключаем.
+  rm -f /etc/cron.d/hyper-host-ip-watch 2>/dev/null || true
+  if command -v crontab >/dev/null 2>&1; then
+    crontab -l 2>/dev/null | grep -v 'ip-autofix' | crontab - 2>/dev/null || true
   fi
+  systemctl reload cron 2>/dev/null || true
   log "Repair finished: permissions, ACL, FTP safe homes, PM2 hyperbot and services checked"
 }
 
@@ -3950,11 +3995,11 @@ cmd_deploy_center_project_action() {
 }
 cmd_ssl_audit_json() {
   [[ -f "$SSL_TRUTH_PY" ]] || err "SSL truth checker не установлен: $SSL_TRUTH_PY"
-  SERVER_IP="$SERVER_IP" PUBLIC_IP="$(get_public_ip 2>/dev/null || true)" python3 "$SSL_TRUTH_PY" audit
+  SERVER_IP="$SERVER_IP" PUBLIC_IP="$(public_ip 2>/dev/null || true)" python3 "$SSL_TRUTH_PY" audit
 }
 cmd_ssl_restore_existing() {
   [[ -f "$SSL_TRUTH_PY" ]] || err "SSL truth checker не установлен: $SSL_TRUTH_PY"
-  SERVER_IP="$SERVER_IP" PUBLIC_IP="$(get_public_ip 2>/dev/null || true)" python3 "$SSL_TRUTH_PY" restore
+  SERVER_IP="$SERVER_IP" PUBLIC_IP="$(public_ip 2>/dev/null || true)" python3 "$SSL_TRUTH_PY" restore
 }
 
 case "${1:-}" in
