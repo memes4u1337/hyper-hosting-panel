@@ -230,6 +230,30 @@ def site_rows() -> list[dict[str, Any]]:
     return rows
 
 
+def site_names(row: dict[str, Any]) -> list[str]:
+    out=[]
+    for value in [str(row.get('domain') or '')] + re.split(r'[\s,;]+', str(row.get('aliases') or '')):
+        value=value.strip().lower().rstrip('.')
+        if value and value not in out: out.append(value)
+    return out
+
+
+def sync_db_flags(certs: list[dict[str, Any]]) -> None:
+    if not SQLITE.exists(): return
+    try:
+        con=sqlite3.connect(SQLITE,timeout=2)
+        columns={r[1] for r in con.execute('PRAGMA table_info(sites)')}
+        if 'ssl_enabled' not in columns:
+            con.close(); return
+        for row in site_rows():
+            domain=str(row.get('domain') or '')
+            enabled=1 if choose_cert(domain,certs) and nginx_has_ssl_domain(domain) else 0
+            con.execute('UPDATE sites SET ssl_enabled=? WHERE lower(domain)=lower(?)',(enabled,domain))
+        con.commit(); con.close()
+    except Exception:
+        pass
+
+
 def remote_cert(domain: str) -> dict[str, Any] | None:
     ctx=ssl.create_default_context()
     ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
@@ -358,13 +382,25 @@ def repair_one(domain: str, aliases: str, root: str, cert: dict[str,Any], panel:
 def audit() -> dict[str,Any]:
     certs=all_certs(); items=[]
     for row in site_rows():
-        d=row['domain']; cert=choose_cert(d,certs); live=remote_cert(d)
-        live_matches=bool(cert and live and live.get('fingerprint')==cert.get('fingerprint'))
-        status='active' if live_matches else ('cert_only' if cert else 'missing')
-        if cert and cert['days_left'] < 0: status='expired'
-        items.append({'domain':d,'status':status,'has_certificate':bool(cert),'certificate':cert or {},'nginx_https':nginx_has_ssl_domain(d),'live_certificate':live or {},'live_matches':live_matches})
+        d=str(row['domain']).strip().lower(); name_items=[]
+        for name in site_names(row):
+            cert=choose_cert(name,certs); live=remote_cert(name)
+            live_matches=bool(cert and live and live.get('fingerprint')==cert.get('fingerprint'))
+            status='active' if live_matches else ('cert_only' if cert else 'missing')
+            if cert and cert['days_left'] < 0: status='expired'
+            name_items.append({'domain':name,'status':status,'certificate':cert or {},
+                               'nginx_https':nginx_has_ssl_domain(name),'live_certificate':live or {},
+                               'live_matches':live_matches})
+        canonical=next((x for x in name_items if x['domain']==d),name_items[0] if name_items else {})
+        missing=[x['domain'] for x in name_items if x.get('status')!='active']
+        overall='active' if name_items and not missing else ('partial' if canonical.get('status')=='active' else canonical.get('status','missing'))
+        items.append({'domain':d,'aliases':str(row.get('aliases') or ''),'status':overall,
+                      'has_certificate':bool(canonical.get('certificate')),'certificate':canonical.get('certificate',{}),
+                      'nginx_https':bool(canonical.get('nginx_https')),'live_certificate':canonical.get('live_certificate',{}),
+                      'live_matches':bool(canonical.get('live_matches')),'names':name_items,'missing_names':missing})
     pd=panel_domain(); pc=choose_cert(pd,certs); pl=remote_cert(pd)
     pstatus='active' if pc and pl and pc.get('fingerprint')==pl.get('fingerprint') else ('cert_only' if pc else 'missing')
+    sync_db_flags(certs)
     return {'ok':True,'sites':items,'panel':{'domain':pd,'status':pstatus,'certificate':pc or {},'live_certificate':pl or {}},'certificates_found':len(certs)}
 
 
@@ -391,6 +427,7 @@ def restore() -> dict[str,Any]:
     subprocess.run(['systemctl','reload','nginx'], check=False)
 
     certs = all_certs()
+    sync_db_flags(certs)
     restored=[]; skipped=[]
     for row in site_rows():
         d=row['domain']; cert=choose_cert(d,certs)
@@ -413,25 +450,29 @@ def repair_all(email: str='') -> dict[str,Any]:
     report=audit()
     email=(email or discover_certbot_email()).strip()
     issued=[]; failed=[]; skipped=[]
-    missing=[x.get('domain','') for x in report.get('sites',[]) if not x.get('has_certificate')]
+    needs_repair=[]
+    for item in report.get('sites',[]):
+        if item.get('status')!='active' or item.get('missing_names'):
+            needs_repair.append(str(item.get('domain') or ''))
     panel=report.get('panel',{}) or {}
-    panel_missing=not bool(panel.get('certificate'))
+    panel_missing=panel.get('status')!='active'
     if not email:
-        for domain in missing: skipped.append({'domain':domain,'reason':'email для Certbot не найден'})
+        for domain in needs_repair: skipped.append({'domain':domain,'reason':'email для Certbot не найден'})
         if panel_missing: skipped.append({'domain':panel.get('domain',''),'reason':'email для Certbot не найден','panel':True})
         return {'ok':True,'email':'','restore':first,'issued':issued,'failed':failed,'skipped':skipped,'audit':report}
     ctl='/usr/local/sbin/hyper-host-ctl'
-    for domain in missing:
+    for domain in needs_repair:
         if not domain: continue
-        cp=subprocess.run([ctl,'ssl-site',domain,email],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
-        item={'domain':domain,'output':cp.stdout.strip()[-8000:]}
+        cp=subprocess.run([ctl,'ssl-site',domain,email],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=1200)
+        item={'domain':domain,'output':cp.stdout.strip()[-12000:]}
         (issued if cp.returncode==0 else failed).append(item)
     if panel_missing and panel.get('domain'):
-        cp=subprocess.run([ctl,'panel-ssl',str(panel['domain']),email],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
-        item={'domain':panel['domain'],'panel':True,'output':cp.stdout.strip()[-8000:]}
+        cp=subprocess.run([ctl,'panel-ssl',str(panel['domain']),email],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=1200)
+        item={'domain':panel['domain'],'panel':True,'output':cp.stdout.strip()[-12000:]}
         (issued if cp.returncode==0 else failed).append(item)
     final=restore()
     return {'ok':True,'email':email,'restore':first,'issued':issued,'failed':failed,'skipped':skipped,'final_restore':final,'audit':audit()}
+
 
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument('command',choices=['audit','restore','repair-all']); ap.add_argument('--email',default=''); args=ap.parse_args()

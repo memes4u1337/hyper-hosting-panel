@@ -1001,6 +1001,69 @@ nginx_domains_for_site() {
   fi
 }
 
+site_names_for_ssl() {
+  local domain="$1"
+  python3 - "$domain" "$BASE_DIR/data/hyperhost.sqlite" "$BASE_DIR/data/v89-routing.tsv" "$NGINX_AVAILABLE" <<'PYSSLNAMES'
+import pathlib,re,sqlite3,sys
+domain,db_path,map_path,nginx_available=sys.argv[1:]
+valid=re.compile(r'^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$')
+names=[]
+def add(value):
+    value=(value or '').strip().lower().rstrip('.')
+    if value and valid.fullmatch(value) and value not in names:
+        names.append(value)
+add(domain)
+try:
+    con=sqlite3.connect(f'file:{db_path}?mode=ro',uri=True,timeout=1)
+    row=con.execute('SELECT aliases FROM sites WHERE lower(domain)=lower(?) LIMIT 1',(domain,)).fetchone()
+    con.close()
+    if row and row[0]:
+        for item in re.split(r'[\s,;]+',str(row[0])): add(item)
+except Exception:
+    pass
+try:
+    for line in pathlib.Path(map_path).read_text('utf-8',errors='ignore').splitlines():
+        parts=line.split('\t')
+        if len(parts)>=2 and parts[1].strip().lower().rstrip('.')==domain.lower().rstrip('.'):
+            add(parts[0])
+except Exception:
+    pass
+for conf in (pathlib.Path(nginx_available)/f'hyper-host-site-{domain}.conf', pathlib.Path('/etc/nginx/hyper-host-managed')/f'20-site-{domain}.conf'):
+    try:
+        text=conf.read_text('utf-8',errors='ignore')
+        for raw in re.findall(r'\bserver_name\s+([^;]+);',text,re.I):
+            for item in raw.split(): add(item)
+    except Exception:
+        pass
+print('\n'.join(names))
+PYSSLNAMES
+}
+
+ssl_dns_ready_host() {
+  local host="$1" expected arec aaaarec extra
+  expected="$(configured_public_ip)"
+  [[ -n "$expected" ]] || expected="${STATIC_PUBLIC_IP:-90.189.208.25}"
+  arec="$(resolve_domain_a_public "$host")"
+  aaaarec="$(resolve_domain_aaaa_public "$host")"
+  printf '%s\n' "$arec" | grep -qxF "$expected" || return 1
+  extra="$(printf '%s\n' "$arec" | grep -vxF "$expected" || true)"
+  [[ -z "$extra" && -z "$aaaarec" ]]
+}
+
+local_tls_certificate_ok() {
+  local host="$1" tmp
+  tmp="$(mktemp /tmp/hyper-host-tls-cert.XXXXXX)"
+  if ! timeout 12 openssl s_client -connect 127.0.0.1:443 -servername "$host" -showcerts </dev/null 2>/dev/null \
+      | openssl x509 -outform PEM >"$tmp" 2>/dev/null; then
+    rm -f "$tmp"; return 1
+  fi
+  openssl x509 -in "$tmp" -noout -checkend 0 >/dev/null 2>&1 \
+    && openssl x509 -in "$tmp" -noout -checkhost "$host" >/dev/null 2>&1
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
 local_http_challenge_check() {
   local domain="$1" root="${2:-}" token body url
   [[ -n "$root" && -d "$root" ]] || return 2
@@ -1283,19 +1346,29 @@ cmd_ssl_fix_site() {
 
 
 find_valid_certificate_for_domain() {
-  local domain="$1" cert key
-  shopt -s nullglob
-  for cert in /etc/letsencrypt/live/*/fullchain.pem /opt/hyper-host/letsencrypt/live/*/fullchain.pem; do
-    key="${cert%/fullchain.pem}/privkey.pem"
-    [[ -f "$cert" && -f "$key" ]] || continue
-    openssl x509 -in "$cert" -noout -checkend 0 >/dev/null 2>&1 || continue
-    openssl x509 -in "$cert" -noout -checkhost "$domain" >/dev/null 2>&1 || continue
-    printf '%s\n' "$cert"
-    shopt -u nullglob
-    return 0
-  done
-  shopt -u nullglob
-  return 1
+  local domain="$1"
+  python3 - "$domain" <<'PYFINDCERT'
+import datetime as dt,glob,pathlib,subprocess,sys
+domain=sys.argv[1]
+items=[]
+for pattern in ('/opt/hyper-host/letsencrypt/live/*/fullchain.pem','/etc/letsencrypt/live/*/fullchain.pem'):
+    for name in glob.glob(pattern):
+        cert=pathlib.Path(name); key=cert.with_name('privkey.pem')
+        if not cert.is_file() or not key.is_file(): continue
+        if subprocess.run(['openssl','x509','-in',str(cert),'-noout','-checkend','0'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode: continue
+        if subprocess.run(['openssl','x509','-in',str(cert),'-noout','-checkhost',domain],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode: continue
+        try:
+            raw=subprocess.check_output(['openssl','x509','-in',str(cert),'-noout','-enddate'],text=True,stderr=subprocess.DEVNULL).strip().split('=',1)[1]
+            expiry=int(dt.datetime.strptime(raw,'%b %d %H:%M:%S %Y %Z').timestamp())
+        except Exception: expiry=0
+        preferred=1 if str(cert).startswith('/opt/hyper-host/letsencrypt/') else 0
+        items.append((expiry,preferred,str(cert)))
+if items:
+    items.sort(reverse=True)
+    print(items[0][2])
+    raise SystemExit(0)
+raise SystemExit(1)
+PYFINDCERT
 }
 
 cmd_ssl_site() {
@@ -1310,29 +1383,82 @@ cmd_ssl_site() {
   ufw allow 443/tcp >/dev/null 2>&1 || true
   ensure_certbot_dirs
   install_certbot_renew_cron || true
-  cmd_ssl_fix_site "$domain"
-  local dns_a dns_aaaa expected_ip extra_a
-  expected_ip="$(configured_public_ip)"
-  dns_a="$(resolve_domain_a_public "$domain")"
-  dns_aaaa="$(resolve_domain_aaaa_public "$domain")"
-  printf '%s\n' "$dns_a" | grep -qxF "$expected_ip" \
-    || err "DNS A для $domain должен указывать на $expected_ip. Сейчас: ${dns_a:-нет A-записи}"
-  extra_a="$(printf '%s\n' "$dns_a" | grep -vxF "$expected_ip" || true)"
-  [[ -z "$extra_a" ]] \
-    || err "Удали лишние A-записи для $domain: ${extra_a//$'\n'/, }. Должен остаться только $expected_ip."
-  [[ -z "$dns_aaaa" ]] \
-    || err "Удали AAAA-запись для $domain перед выпуском SSL: ${dns_aaaa//$'\n'/, }. У сервера используется только IPv4 $expected_ip."
-  local log_file
-  log_file="$LE_LOGS_DIR/hyper-host-${domain}-$(date +%F-%H%M%S).log"
-  if ! certbot_run certonly --webroot -w "$ACME_WEBROOT" --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --preferred-challenges http-01 --deploy-hook /usr/local/sbin/hyper-host-nginx-reconcile --cert-name "$domain" -d "$domain" >"$log_file" 2>&1; then
-    tail -n 120 "$log_file" >&2 || true
-    err "SSL не выпущен. Лог: $log_file"
+
+  # First reconnect every certificate that already exists. This makes the
+  # button instant for old sites whose certificate survived but disappeared
+  # from the generated Nginx vhost.
+  if [[ -x "$SSL_TRUTH_PY" ]]; then
+    SERVER_IP="$SERVER_IP" PUBLIC_IP="$(configured_public_ip)" python3 "$SSL_TRUTH_PY" restore >/dev/null 2>&1 || true
   fi
+  cmd_ssl_fix_site "$domain"
+
+  local root expected host cert log_file issued=0 restored=0 failed_aliases="" skipped_aliases=""
+  root="$(site_root_for_domain "$domain")"
+  expected="$(configured_public_ip)"
+  [[ -n "$expected" ]] || expected="${STATIC_PUBLIC_IP:-90.189.208.25}"
+  mapfile -t ssl_names < <(site_names_for_ssl "$domain")
+  [[ ${#ssl_names[@]} -gt 0 ]] || ssl_names=("$domain")
+
+  for host in "${ssl_names[@]}"; do
+    valid_domain "$host" || continue
+
+    # An existing valid certificate only needs to be reconnected; never burn a
+    # Let's Encrypt issuance/renewal for it.
+    cert="$(find_valid_certificate_for_domain "$host" || true)"
+    if [[ -n "$cert" ]]; then
+      restored=$((restored + 1))
+      continue
+    fi
+
+    if ! ssl_dns_ready_host "$host"; then
+      if [[ "$host" == "$domain" ]]; then
+        local dns_a dns_aaaa
+        dns_a="$(resolve_domain_a_public "$host")"
+        dns_aaaa="$(resolve_domain_aaaa_public "$host")"
+        err "SSL не выпущен: DNS $host должен иметь только A=$expected и не иметь AAAA. Сейчас A: ${dns_a:-нет}; AAAA: ${dns_aaaa:-нет}"
+      fi
+      skipped_aliases+="${skipped_aliases:+, }$host"
+      warn "Alias $host пропущен: DNS должен иметь только A=$expected и не иметь AAAA"
+      continue
+    fi
+
+    if ! local_http_challenge_check "$host" "$root"; then
+      if [[ "$host" == "$domain" ]]; then
+        err "Локальный ACME challenge для $host не работает после автоматического ремонта"
+      fi
+      failed_aliases+="${failed_aliases:+, }$host (ACME)"
+      warn "Alias $host пропущен: локальный ACME challenge не работает"
+      continue
+    fi
+
+    log_file="$LE_LOGS_DIR/hyper-host-${host}-$(date +%F-%H%M%S).log"
+    if certbot_run certonly --webroot -w "$ACME_WEBROOT" \
+        --non-interactive --agree-tos --email "$email" --no-eff-email \
+        --keep-until-expiring --preferred-challenges http-01 \
+        --deploy-hook /usr/local/sbin/hyper-host-nginx-reconcile \
+        --cert-name "$host" -d "$host" >"$log_file" 2>&1; then
+      issued=$((issued + 1))
+    else
+      tail -n 100 "$log_file" >&2 || true
+      if [[ "$host" == "$domain" ]]; then
+        err "SSL не выпущен для $host. Лог: $log_file"
+      fi
+      failed_aliases+="${failed_aliases:+, }$host"
+      warn "SSL для alias $host не выпущен. Лог: $log_file"
+    fi
+  done
+
   nginx_reload
-  local issued_cert
-  issued_cert="$(find_valid_certificate_for_domain "$domain" || true)"
-  [[ -n "$issued_cert" ]] || err "Certbot завершился, но сертификат $domain не найден или не подходит домену"
-  log "SSL issued and connected for $domain: $issued_cert / log: $log_file"
+
+  cert="$(find_valid_certificate_for_domain "$domain" || true)"
+  [[ -n "$cert" ]] || err "Сертификат $domain после выпуска не найден"
+  local_tls_certificate_ok "$domain" || err "Сертификат найден, но Nginx не отдаёт его для $domain"
+
+  # Synchronize the visual SSL flags with real certificate state.
+  if [[ -x "$SSL_TRUTH_PY" ]]; then
+    SERVER_IP="$SERVER_IP" PUBLIC_IP="$expected" python3 "$SSL_TRUTH_PY" restore >/dev/null 2>&1 || true
+  fi
+  log "SSL готов: $domain; выпущено=$issued; подключено существующих=$restored${skipped_aliases:+; aliases без DNS: $skipped_aliases}${failed_aliases:+; ошибки aliases: $failed_aliases}"
 }
 
 
@@ -3937,25 +4063,47 @@ cmd_panel_ssl() {
   ufw allow 443/tcp >/dev/null 2>&1 || true
   ensure_certbot_dirs
   install_certbot_renew_cron || true
-  local token body expected check_ip log_file
+
+  if [[ -x "$SSL_TRUTH_PY" ]]; then
+    SERVER_IP="$SERVER_IP" PUBLIC_IP="$(configured_public_ip)" python3 "$SSL_TRUTH_PY" restore >/dev/null 2>&1 || true
+  fi
+  local existing
+  existing="$(find_valid_certificate_for_domain "$domain" || true)"
+  if [[ -n "$existing" ]]; then
+    nginx_reload
+    local_tls_certificate_ok "$domain" || err "Сертификат панели найден, но Nginx его не отдаёт: $existing"
+    log "Panel SSL restored: https://$domain -> $existing"
+    return 0
+  fi
+
+  local token body expected dns_a dns_aaaa extra log_file
   token="hyper-host-panel-ssl-test-$(date +%s)-$$"
   printf 'ok-%s' "$token" > "$ACME_WEBROOT/.well-known/acme-challenge/$token"
   body="$(curl --noproxy '*' -fsS --connect-timeout 2 --max-time 5 -H "Host: $domain" "http://127.0.0.1/.well-known/acme-challenge/$token" 2>/dev/null || true)"
   rm -f "$ACME_WEBROOT/.well-known/acme-challenge/$token" 2>/dev/null || true
   [[ "$body" == "ok-$token" ]] || err "Панель локально не отдаёт ACME для $domain"
-  expected="$(public_ip)"
-  check_ip="$(resolve_domain_a_public "$domain" | head -n1)"
-  if [[ -n "$expected" && "$check_ip" != "$expected" ]]; then
-    err "DNS панели смотрит не туда: $domain -> ${check_ip:-нет A}. Нужно: A $domain $expected"
-  fi
+
+  expected="$(configured_public_ip)"
+  [[ -n "$expected" ]] || expected="${STATIC_PUBLIC_IP:-90.189.208.25}"
+  dns_a="$(resolve_domain_a_public "$domain")"
+  dns_aaaa="$(resolve_domain_aaaa_public "$domain")"
+  printf '%s\n' "$dns_a" | grep -qxF "$expected" || err "DNS панели смотрит не туда: $domain -> ${dns_a:-нет A}. Нужно только A $domain $expected"
+  extra="$(printf '%s\n' "$dns_a" | grep -vxF "$expected" || true)"
+  [[ -z "$extra" ]] || err "Удали лишние A-записи панели: ${extra//$'\n'/, }"
+  [[ -z "$dns_aaaa" ]] || err "Удали AAAA-запись панели: ${dns_aaaa//$'\n'/, }"
+
   log_file="$LE_LOGS_DIR/hyper-host-panel-${domain}-$(date +%F-%H%M%S).log"
   if ! certbot_run certonly --webroot -w "$ACME_WEBROOT" --non-interactive --agree-tos --email "$email" --no-eff-email --keep-until-expiring --preferred-challenges http-01 --deploy-hook /usr/local/sbin/hyper-host-nginx-reconcile --cert-name "$domain" -d "$domain" >"$log_file" 2>&1; then
     tail -n 120 "$log_file" >&2 || true
     err "SSL панели не выпущен. Лог: $log_file"
   fi
   nginx_reload
+  existing="$(find_valid_certificate_for_domain "$domain" || true)"
+  [[ -n "$existing" ]] || err "Certbot завершился, но сертификат панели не найден"
+  local_tls_certificate_ok "$domain" || err "Сертификат панели найден, но Nginx его не отдаёт"
   log "Panel SSL issued: https://$domain / log: $log_file"
 }
+
 
 cmd_repair() {
   configure_phpmyadmin_label # v26

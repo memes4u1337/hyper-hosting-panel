@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import ipaddress
 import re
 import sqlite3
@@ -113,7 +114,7 @@ def current_nginx_text() -> str:
 
 def all_certificates() -> list[Path]:
     result: list[Path] = []
-    for base in (Path("/etc/letsencrypt/live"), Path("/opt/hyper-host/letsencrypt/live")):
+    for base in (Path("/opt/hyper-host/letsencrypt/live"), Path("/etc/letsencrypt/live")):
         if base.is_dir():
             result.extend(sorted(base.glob("*/fullchain.pem")))
     return result
@@ -132,11 +133,33 @@ def cert_matches(cert: Path, host: str) -> bool:
     return True
 
 
+def cert_expiry_epoch(cert: Path) -> int:
+    try:
+        line = subprocess.check_output(
+            ["openssl", "x509", "-in", str(cert), "-noout", "-enddate"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5,
+        ).strip()
+        value = line.split("=", 1)[1].strip()
+        return int(dt.datetime.strptime(value, "%b %d %H:%M:%S %Y %Z").timestamp())
+    except Exception:
+        return 0
+
+
 def choose_cert(host: str, certs: list[Path]) -> tuple[str, str] | None:
-    for cert in certs:
-        if cert_matches(cert, host):
-            return str(cert), str(cert.parent / "privkey.pem")
-    return None
+    matches = [cert for cert in certs if cert_matches(cert, host)]
+    if not matches:
+        return None
+    # Prefer the certificate with the latest expiry. When dates match, prefer
+    # the writable HYPER-HOST Certbot store instead of legacy /etc paths.
+    matches.sort(
+        key=lambda cert: (
+            cert_expiry_epoch(cert),
+            1 if str(cert).startswith("/opt/hyper-host/letsencrypt/") else 0,
+        ),
+        reverse=True,
+    )
+    cert = matches[0]
+    return str(cert), str(cert.parent / "privkey.pem")
 
 
 def load_db_sites(path: Path) -> dict[str, dict[str, str]]:

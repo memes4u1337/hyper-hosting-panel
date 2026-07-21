@@ -121,7 +121,7 @@ function handle_post(string $action): void
             case 'ssl_site': {
                 $id=(int)($_POST['id']??0); $email=trim((string)($_POST['email']??'')); if(!filter_var($email,FILTER_VALIDATE_EMAIL)) throw new RuntimeException('Укажи нормальный email');
                 $st=db()->prepare('SELECT * FROM sites WHERE id=?'); $st->execute([$id]); $s=$st->fetch(); if(!$s) throw new RuntimeException('Сайт не найден');
-                $res=run_ctl(['ssl-site',$s['domain'],$email],300); if($res['code']!==0) throw new RuntimeException($res['output']); hh_clear_cache(); db()->prepare('UPDATE sites SET ssl_enabled=1 WHERE id=?')->execute([$id]); add_event('ssl','Выпущен SSL: '.$s['domain']); flash('SSL выпущен','success'); redirect('/?page=ssl');
+                $res=run_ctl(['ssl-site',$s['domain'],$email],1200); if($res['code']!==0) throw new RuntimeException($res['output']); hh_clear_cache(); db()->prepare('UPDATE sites SET ssl_enabled=1 WHERE id=?')->execute([$id]); add_event('ssl','Выпущен SSL: '.$s['domain']); flash('SSL выпущен','success'); redirect('/?page=ssl');
             }
             case 'create_folder': {
                 $name=trim((string)($_POST['name']??'')); if(!is_valid_folder_name($name)) throw new RuntimeException('Неверное имя папки');
@@ -1353,10 +1353,12 @@ function view_ssl(): void {
       $c=$map[$s['domain']]??null;
       $dns=run_ctl_json_cached(['ssl-check-json',$s['domain']],8,300);
       $hasCert = $c && (($c['status'] ?? '') === 'active');
+      $partial = $c && (($c['status'] ?? '') === 'partial');
       $certOnly = $c && (($c['status'] ?? '') === 'cert_only');
       $ready=empty($dns['_error']) && !empty($dns['certbot_ready']);
       $points=empty($dns['_error']) && !empty($dns['points_here']);
       if($hasCert){ $badge='success'; $label='SSL реально работает'; }
+      elseif($partial){ $badge='warning'; $label='SSL частично: проверь aliases'; }
       elseif($certOnly){ $badge='warning'; $label='Сертификат есть, Nginx не отдаёт'; }
       elseif($ready){ $badge='success'; $label='Можно выпускать'; }
       elseif($points){ $badge='info'; $label='DNS OK'; }
@@ -1385,7 +1387,7 @@ function view_ssl(): void {
         <?php if(!empty($dns['outbound_public_ip']) && !empty($dns['configured_public_ip']) && $dns['outbound_public_ip']!==$dns['configured_public_ip']): ?><div class="small text-warning">NAT режим: исходящий IP отличается, это не мешает SSL при пробросе портов.</div><?php endif; ?>
         <?php if(!$hasCert && !empty($dns['problem'])): ?><div class="small text-danger mt-1"><?= e((string)$dns['problem']) ?></div><?php endif; ?>
       </td>
-      <td><?= $hasCert?'<span class="badge rounded-pill text-bg-success">'.e((string)($c['certificate']['days_left']??'?')).' дней</span>':($certOnly?'<span class="badge rounded-pill text-bg-warning">найден, не подключён</span>':'<span class="badge rounded-pill text-bg-secondary">нет SSL</span>') ?><div class="small muted"><?= e((string)($c['certificate']['expires']??'')) ?></div></td>
+      <td><?= $hasCert?'<span class="badge rounded-pill text-bg-success">'.e((string)($c['certificate']['days_left']??'?')).' дней</span>':($partial?'<span class="badge rounded-pill text-bg-warning">не все домены защищены</span>':($certOnly?'<span class="badge rounded-pill text-bg-warning">найден, не подключён</span>':'<span class="badge rounded-pill text-bg-secondary">нет SSL</span>')) ?><div class="small muted"><?= e((string)($c['certificate']['expires']??'')) ?></div></td>
       <td class="text-end"><div class="d-inline-flex gap-2 flex-wrap justify-content-end"><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_fix_site"><input type="hidden" name="id" value="<?= (int)$s['id'] ?>"><button class="btn btn-sm btn-outline-info"><i class="fa-solid fa-wand-magic-sparkles me-1"></i>Fix ACME</button></form><button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#ssl<?= (int)$s['id'] ?>"><i class="fa-solid fa-certificate me-1"></i><?= $hasCert?'Перевыпустить':'Выпустить' ?></button></div></td>
     </tr>
   <?php endforeach; if(!$sites): ?><tr><td colspan="4" class="empty">Сайтов пока нет</td></tr><?php endif; ?>
