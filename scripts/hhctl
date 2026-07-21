@@ -483,7 +483,7 @@ write_panel_nginx_conf() {
 
   # Панель должна отвечать только на свои точные имена/IP. Она больше не является
   # default_server и не перехватывает сайты.
-  for item in "$domain" "$SERVER_IP" "$PUBLIC_IP" localhost; do
+  for item in "$domain" "$SERVER_IP" localhost; do
     item="$(printf '%s' "$item" | xargs)"
     [[ -n "$item" && "$item" != "_" ]] || continue
     [[ " $names " == *" $item "* ]] || names="${names:+$names }$item"
@@ -899,16 +899,9 @@ configured_public_ip() {
 }
 
 public_ip() {
-  # Это IP, который панель будет рекомендовать для DNS.
-  # Важно: если сервер стоит за роутером/NAT, исходящий IP через ifconfig.me может быть не тем,
-  # на который у тебя смотрит домен. Поэтому есть ручная настройка PUBLIC_IP.
-  local cfg out
-  cfg="$(configured_public_ip)"
-  if [[ -n "$cfg" ]]; then echo "$cfg"; return; fi
-  if [[ -n "$SERVER_IP" ]] && ! is_private_ipv4 "$SERVER_IP"; then echo "$SERVER_IP"; return; fi
-  out="$(outbound_public_ip)"
-  [[ -n "$out" ]] && { echo "$out"; return; }
-  echo "$SERVER_IP"
+  # Для этого сервера публичный адрес фиксирован владельцем панели.
+  # Никакого внешнего автоопределения и fallback на чужие адреса.
+  printf '%s\n' "${STATIC_PUBLIC_IP:-90.189.208.25}"
 }
 
 resolve_domain_ips_public() {
@@ -917,21 +910,21 @@ resolve_domain_ips_public() {
   local domain="$1" ns
   for ns in 1.1.1.1 8.8.8.8 9.9.9.9; do
     { dig +time=2 +tries=1 +short @"$ns" A "$domain" 2>/dev/null; dig +time=2 +tries=1 +short @"$ns" AAAA "$domain" 2>/dev/null; }
-  done | sed '/^$/d' | sort -u
+  done | awk '/^([0-9]{1,3}\.){3}[0-9]{1,3}$/ || /:/' | sort -u
 }
 
 resolve_domain_a_public() {
   local domain="$1" ns
   for ns in 1.1.1.1 8.8.8.8 9.9.9.9; do
     dig +time=2 +tries=1 +short @"$ns" A "$domain" 2>/dev/null
-  done | sed '/^$/d' | sort -u
+  done | awk '/^([0-9]{1,3}\.){3}[0-9]{1,3}$/' | sort -u
 }
 
 resolve_domain_aaaa_public() {
   local domain="$1" ns
   for ns in 1.1.1.1 8.8.8.8 9.9.9.9; do
     dig +time=2 +tries=1 +short @"$ns" AAAA "$domain" 2>/dev/null
-  done | sed '/^$/d' | sort -u
+  done | awk '/:/' | sort -u
 }
 
 resolve_domain_ips() {
@@ -953,27 +946,18 @@ resolve_domain_a_local() {
 }
 
 choose_ssl_expected_ip() {
-  local domain="$1" cfg arec first_a out
-  cfg="$(configured_public_ip)"
-  [[ -n "$cfg" ]] && { echo "$cfg"; return; }
-  arec="$(resolve_domain_a "$domain")"
-  first_a="$(printf '%s\n' "$arec" | head -n1)"
-  # Если сервер за NAT и DNS уже смотрит на публичный IP роутера — считаем его ожидаемым.
-  if [[ -n "$first_a" && -n "$SERVER_IP" ]] && is_private_ipv4 "$SERVER_IP"; then echo "$first_a"; return; fi
-  if [[ -n "$SERVER_IP" ]] && ! is_private_ipv4 "$SERVER_IP"; then echo "$SERVER_IP"; return; fi
-  out="$(outbound_public_ip)"
-  [[ -n "$out" ]] && { echo "$out"; return; }
-  echo "$SERVER_IP"
+  printf '%s\n' "${STATIC_PUBLIC_IP:-90.189.208.25}"
 }
 
 dns_points_here() {
-  local domain="$1" expected arec aaaarec
-  expected="$(configured_public_ip)"
-  [[ -n "$expected" ]] || return 1
+  local domain="$1" expected arec aaaarec extra
+  expected="${STATIC_PUBLIC_IP:-90.189.208.25}"
   arec="$(resolve_domain_a_public "$domain")"
+  [[ -n "$arec" ]] || return 1
   printf '%s\n' "$arec" | grep -qxF "$expected" || return 1
-  # У сервера нет публичного IPv6. Любая AAAA-запись заставит Let's Encrypt
-  # проверять чужой IPv6 и HTTP-01 завершится ошибкой.
+  extra="$(printf '%s\n' "$arec" | grep -vxF "$expected" || true)"
+  [[ -z "$extra" ]] || return 1
+  # У сервера нет публичного IPv6. Любая AAAA-запись отправит ACME на другой адрес.
   aaaarec="$(resolve_domain_aaaa_public "$domain")"
   [[ -z "$aaaarec" ]]
 }
@@ -1033,6 +1017,8 @@ ssl_preflight_json() {
     dns_status="missing"
   elif ! printf '%s\n' "$arec" | grep -qxF "$expected"; then
     dns_status="wrong_ip"
+  elif [[ -n "$(printf '%s\n' "$arec" | grep -vxF "$expected" || true)" ]]; then
+    dns_status="extra_a"
   elif [[ -n "$aaaarec" ]]; then
     dns_status="wrong_aaaa"
   else
@@ -1047,6 +1033,7 @@ ssl_preflight_json() {
   if [[ "$nat_mode" == 1 ]]; then warning=""; fi
   if [[ "$dns_status" == missing ]]; then problem="У домена нет публичных A/AAAA записей. Добавь запись: $required_a"; fi
   if [[ "$dns_status" == wrong_ip ]]; then problem="DNS A-запись домена указывает не на нужный IP. Сейчас: ${arec//$'\n'/, }. Нужно: $required_a"; fi
+  if [[ "$dns_status" == extra_a ]]; then problem="У домена есть лишние A-записи: ${arec//$'\n'/, }. Оставь только $expected, иначе Let's Encrypt может попасть на чужой сервер."; fi
   if [[ "$dns_status" == wrong_aaaa ]]; then problem="У домена есть AAAA-запись (${aaaarec//$'\n'/, }), но у сервера нет публичного IPv6. Удали AAAA-запись перед выпуском SSL."; fi
   if [[ "$nginx_ok" != 1 ]]; then problem="Nginx config не проходит проверку: sudo nginx -t"; fi
   if [[ "$has_site" != 1 ]]; then problem="Сайт не найден в HYPER-HOST. Сначала создай сайт: $domain"; fi
@@ -1095,6 +1082,7 @@ cmd_public_ip() {
     set)
       [[ -n "$ip" ]] || err "Public IP required"
       [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || err "Invalid IPv4: $ip"
+      [[ "$ip" == "90.189.208.25" ]] || err "На этом сервере разрешён только внешний IP 90.189.208.25"
       local tmp="$BASE_DIR/network.env.tmp.$$"
       cat > "$tmp" <<EOFNET
 NETWORK_MODE="static"
@@ -1179,8 +1167,8 @@ cmd_ip_autofix() {
 
 cmd_ssl_ip_selfsigned() {
   ensure_nginx_runtime_writable
-  local ip="${1:-$SERVER_IP}"
-  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || err "Invalid IP: $ip"
+  local ip="${1:-192.168.0.179}"
+  [[ "$ip" == "192.168.0.179" ]] || err "Self-signed IP SSL разрешён только для внутреннего IP 192.168.0.179"
   local dir="/etc/ssl/hyper-host-ip-$ip" key="$dir/privkey.pem" crt="$dir/fullchain.pem" conf="$dir/openssl.cnf" nginx_conf="/etc/nginx/sites-available/hyper-host-ip-$ip.conf"
   mkdir -p "$dir" "$PANEL_DIR/public"
   cat > "$conf" <<EOFIP
@@ -1302,12 +1290,15 @@ cmd_ssl_site() {
   ensure_certbot_dirs
   install_certbot_renew_cron || true
   cmd_ssl_fix_site "$domain"
-  local dns_a dns_aaaa expected_ip
+  local dns_a dns_aaaa expected_ip extra_a
   expected_ip="$(configured_public_ip)"
   dns_a="$(resolve_domain_a_public "$domain")"
   dns_aaaa="$(resolve_domain_aaaa_public "$domain")"
   printf '%s\n' "$dns_a" | grep -qxF "$expected_ip" \
     || err "DNS A для $domain должен указывать на $expected_ip. Сейчас: ${dns_a:-нет A-записи}"
+  extra_a="$(printf '%s\n' "$dns_a" | grep -vxF "$expected_ip" || true)"
+  [[ -z "$extra_a" ]] \
+    || err "Удали лишние A-записи для $domain: ${extra_a//$'\n'/, }. Должен остаться только $expected_ip."
   [[ -z "$dns_aaaa" ]] \
     || err "Удали AAAA-запись для $domain перед выпуском SSL: ${dns_aaaa//$'\n'/, }. У сервера используется только IPv4 $expected_ip."
   local log_file
@@ -3090,10 +3081,7 @@ cmd_ftp_doctor_json() {
   [[ -n "${SERVER_IP:-}" ]] && lan_banner="$(timeout 3 bash -c "head -c 120 < /dev/tcp/${SERVER_IP}/21" 2>/dev/null | tr -d '\\r' | head -n1 || true)"
   service="$(systemctl is-active hyper-host-proftpd-lan.service 2>/dev/null || systemctl is-active hyper-host-ftp.service 2>/dev/null || true)"
   proc="$(pgrep -af 'proftpd|hyper_ftp_server.py|hyper-host-ftp-server' 2>/dev/null | head -n1 || true)"
-  # v46: сравниваем настроенный публичный IP с тем, что реально видно из интернета
-  # (curl ifconfig.me и т.п.). Если они не совпадают — почти наверняка сервер за CGNAT
-  # (двойной NAT у провайдера) и настроенный IP снаружи вообще недостижим ни на каком
-  # порту, сколько бы портов ты ни пробрасывал на своём роутере — этот IP просто не твой.
+  # Статическая сеть: диагностический адрес берётся только из закреплённой конфигурации.
   outbound_ip="$(outbound_public_ip)"
   ip_mismatch=0
   [[ -n "$outbound_ip" && -n "$pub" && "$outbound_ip" != "$pub" ]] && ip_mismatch=1
@@ -3530,10 +3518,13 @@ cmd_network_doctor_json() {
     if [[ -z "$dns_a" ]]; then
       dns_status="missing"
       problem="Публичная DNS A-запись не найдена. У регистратора/в DNS должно быть: A $domain $pub"
-    elif printf '%s\n' "$dns_a" | grep -qxF "$pub"; then
-      dns_status="ok"
-    else
+    elif ! printf '%s\n' "$dns_a" | grep -qxF "$pub"; then
       problem="Публичная DNS A-запись смотрит не туда. Сейчас: ${dns_a//$'\n'/, }. Нужно: $pub"
+    elif [[ -n "$(printf '%s\n' "$dns_a" | grep -vxF "$pub" || true)" ]]; then
+      dns_status="extra_a"
+      problem="У домена есть лишняя A-запись. Оставь только $pub: ${dns_a//$'\n'/, }"
+    else
+      dns_status="ok"
     fi
     curl -fsS --connect-timeout 1 --max-time 2 -H "Host: $domain" "http://127.0.0.1/" >/dev/null 2>&1 && local_http=1 || true
     root="$(site_root_for_domain "$domain")"

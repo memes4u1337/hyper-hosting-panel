@@ -439,7 +439,7 @@ def main() -> int:
 
     (managed / "00-default.conf").write_text(default_block(str(default_root), args.default_cert, args.default_key), encoding="utf-8")
     certs = all_certificates()
-    panel_names = uniq([panel_domain, args.lan_ip, "localhost"])
+    panel_names = uniq([panel_domain, "192.168.0.179", "localhost"])
     panel_names = [x for x in panel_names if valid_domain(x) or valid_ip(x) or x == "localhost"]
     panel_pair = choose_cert(panel_domain, certs)
     panel_text = panel_block(panel_names, str(panel_root), args.panel_php_sock, nginx_dir, str(acme_webroot))

@@ -16,10 +16,8 @@ read_conf(){
 }
 
 v="$(read_conf PANEL_DOMAIN)"; [[ -n "$v" && "$v" != _ ]] && PANEL_DOMAIN="$v"
-v="$(read_conf SERVER_IP)"; [[ -n "$v" ]] && LAN_IP="$v"
-v="$(read_conf PUBLIC_IP)"; [[ -n "$v" ]] && PUBLIC_IP="$v"
-LAN_IP="${STATIC_LAN_IP:-192.168.0.179}"
-PUBLIC_IP="${STATIC_PUBLIC_IP:-90.189.208.25}"
+LAN_IP="192.168.0.179"
+PUBLIC_IP="90.189.208.25"
 v="$(read_conf BETA_DOMAIN)"; [[ -n "$v" ]] && BETA_DOMAIN="$v"
 
 PHP_SOCK="$(read_conf PHP_FPM_SOCK)"
