@@ -89,7 +89,10 @@ fi
 
 write_config(){
   local path="$1" name="$2" port="$3" pasv_min="$4" pasv_max="$5" pasv_ip="$6" log_suffix="$7"
+  local modules_line=""
+  [[ -f /etc/proftpd/modules.conf ]] && modules_line="Include /etc/proftpd/modules.conf"
   cat > "$path" <<EOCONF
+$modules_line
 ServerType standalone
 ServerName "$name"
 DefaultServer on
@@ -100,8 +103,6 @@ User nobody
 Group nogroup
 Umask 002 002
 MaxInstances 40
-IdentLookups off
-UseReverseDNS off
 TimeoutNoTransfer 600
 TimeoutStalled 600
 TimeoutIdle 1200
@@ -144,8 +145,26 @@ EOCONF
 write_config "$LAN_CONF" 'HYPER-HOST FTP LAN' "$LAN_PORT" "$LAN_PASV_MIN" "$LAN_PASV_MAX" "$LAN_IP" lan
 write_config "$WAN_CONF" 'HYPER-HOST FTP WAN' "$WAN_PORT" "$WAN_PASV_MIN" "$WAN_PASV_MAX" "$PUBLIC_IP_VALUE" wan
 
-proftpd -t -c "$LAN_CONF" >/dev/null || fail 'LAN-конфигурация ProFTPD не прошла проверку'
-proftpd -t -c "$WAN_CONF" >/dev/null || fail 'WAN-конфигурация ProFTPD не прошла проверку'
+validate_proftpd_config(){
+  local conf="$1" label="$2" output directive attempt
+  for attempt in $(seq 1 20); do
+    if output="$(proftpd -t -c "$conf" 2>&1)"; then
+      return 0
+    fi
+    directive="$(printf '%s\n' "$output" | sed -n "s/.*unknown configuration directive '\([^']*\)'.*/\1/p" | head -n1)"
+    if [[ -n "$directive" ]]; then
+      warn "$label: ProFTPD не поддерживает директиву $directive — удаляю её из сгенерированного конфига"
+      sed -i -E "/^[[:space:]]*${directive}([[:space:]]|$)/d" "$conf"
+      continue
+    fi
+    printf '%s\n' "$output" >&2
+    fail "$label-конфигурация ProFTPD не прошла проверку"
+  done
+  fail "$label-конфигурация ProFTPD не прошла проверку после автоматической очистки"
+}
+
+validate_proftpd_config "$LAN_CONF" 'LAN'
+validate_proftpd_config "$WAN_CONF" 'WAN'
 
 # Удаляем конфликтующий встроенный FTP runtime из предыдущей установки.
 systemctl stop hyper-host-ftp.service hyper-host-ftp-lan.service hyper-host-ftp-wan.service >/dev/null 2>&1 || true

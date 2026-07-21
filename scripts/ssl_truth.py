@@ -261,34 +261,41 @@ def audit() -> dict[str,Any]:
 
 
 def restore() -> dict[str,Any]:
-    # v80: сайты всегда восстанавливаются единым маршрутизатором hhctl.
-    # Так aliases с отдельными папками не перехватывают друг друга, а каждый hostname
-    # получает HTTPS-блок именно со своим существующим сертификатом.
-    ctl=Path('/usr/local/sbin/hyper-host-ctl')
-    if not ctl.exists():
-        raise RuntimeError(f'hyper-host-ctl not found: {ctl}')
-    cp=subprocess.run([str(ctl),'sites-rebuild'],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+    """Reconnect every still-valid certificate to the generated Nginx vhosts.
+
+    The authoritative vhost builder is nginx-reconcile-v89. It reads the site
+    folders/DB read-only and automatically attaches matching certificates from
+    /opt/hyper-host/letsencrypt or legacy /etc/letsencrypt.
+    """
+    reconcile = Path('/usr/local/sbin/hyper-host-nginx-reconcile')
+    if not reconcile.exists():
+        raise RuntimeError(f'nginx reconcile helper not found: {reconcile}')
+    cp = subprocess.run([str(reconcile)], text=True, stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT)
     if cp.returncode != 0:
         raise RuntimeError(cp.stdout)
-    rebuild_output=cp.stdout
 
-    certs=all_certs(); restored=[]; skipped=[]
+    check = subprocess.run(['nginx','-t'], text=True, stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT)
+    if check.returncode != 0:
+        raise RuntimeError(check.stdout)
+    subprocess.run(['systemctl','reload','nginx'], check=False)
+
+    certs = all_certs()
+    restored=[]; skipped=[]
     for row in site_rows():
         d=row['domain']; cert=choose_cert(d,certs)
         if cert:
-            restored.append({'domain':d,'config':str(NG_AVAIL/f'hyper-host-site-{d}.conf'),'cert':cert['cert']})
+            restored.append({'domain':d,'cert':cert['cert']})
         else:
-            skipped.append({'domain':d,'reason':'certificate missing'})
-
+            skipped.append({'domain':d,'reason':'certificate missing or expired'})
     pd=panel_domain(); pc=choose_cert(pd,certs)
     if pc:
-        restored.append(repair_one(pd,'',str(PANEL_ROOT),pc,True))
-
-    cp=subprocess.run(['nginx','-t'],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
-    if cp.returncode != 0:
-        raise RuntimeError(cp.stdout)
-    subprocess.run(['systemctl','reload','nginx'],check=False)
-    return {'ok':True,'restored':restored,'skipped':skipped,'site_rebuild_output':rebuild_output,'audit':audit()}
+        restored.append({'domain':pd,'cert':pc['cert'],'panel':True})
+    else:
+        skipped.append({'domain':pd,'reason':'panel certificate missing or expired','panel':True})
+    return {'ok':True,'restored':restored,'skipped':skipped,
+            'reconcile_output':cp.stdout.strip(),'audit':audit()}
 
 
 def main():

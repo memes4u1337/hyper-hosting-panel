@@ -206,7 +206,8 @@ PY
     panel) [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper ssl panel panel.example.com EMAIL"; $CTL panel-ssl "$1" "$2" ;;
     ip|local-ip) $CTL ssl-ip-selfsigned "${1:-}" ;;
     renew) $CTL ssl-renew-all ;;
-    *) err "SSL команды: sudo hyper ssl status | check DOMAIN | fix DOMAIN | issue DOMAIN EMAIL | panel PANEL_DOMAIN EMAIL | ip [192.168.0.179] | renew" ;;
+    restore) $CTL ssl-restore-existing | json_pretty ;;
+    *) err "SSL команды: sudo hyper ssl status | check DOMAIN | fix DOMAIN | issue DOMAIN EMAIL | panel PANEL_DOMAIN EMAIL | ip [192.168.0.179] | renew | restore" ;;
   esac
 }
 
