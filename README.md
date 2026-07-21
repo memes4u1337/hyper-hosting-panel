@@ -1,41 +1,29 @@
-# HYPER-HOST
+# HYPER-HOST v1.2
 
-**HYPER-HOST** — панель управления сайтами, FTP, PHP, phpMyAdmin, MySQL, PM2 Telegram-ботами, SSL, резервными копиями, DNS и сервером.
+Панель управления сайтами, PHP/MySQL, FTP/FTPS, SSL и ботами.
 
-**Разработчик:** memes4u1337  
-**Сайт:** https://hyper-host.pw  
-**Панель:** https://panel.hyper-host.pw  
-**GitHub:** https://github.com/memes4u1337/hyper-hosting-panel
-
-## Установка или обновление
-
-Запусти отдельное интерактивное меню:
+## Обновление установленного сервера
 
 ```bash
-chmod +x setup.sh install.sh
-sudo bash setup.sh
+sudo ./apply-v1.2-stable-recovery.sh /root/hyper-hosting-panel
 ```
 
-Быстрая установка без меню:
+Патч восстанавливает writable Nginx runtime, создание сайтов, ранее выпущенные SSL-сертификаты и FTP/FTPS через ProFTPD.
 
-```bash
-sudo bash setup.sh --install
-```
-
-После установки меню доступно из любого каталога:
+## Меню
 
 ```bash
 sudo hyper-host-installer
 ```
 
-## Основные команды
+## Основные проверки
 
 ```bash
-sudo hyper help
-sudo hyper repair
-sudo hyper stats
-sudo hyper bots
+sudo hyper nginx doctor
+sudo hyper ftp doctor
 sudo hyper ssl status
-sudo hyper ssl check hyper-host.pw
 sudo nginx -t
 ```
+
+Автор: memes4u1337  
+GitHub: https://github.com/memes4u1337/hyper-hosting-panel
