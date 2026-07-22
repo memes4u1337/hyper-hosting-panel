@@ -258,6 +258,44 @@ nginx_autorepair() {
   nginx -t >/dev/null 2>&1
 }
 
+nginx_hard_restart() {
+  local output="" owner="" i
+  if ! output="$(nginx -t 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    err "Nginx-конфиг не прошёл проверку"
+  fi
+
+  # A normal reload previously returned success while the old master kept
+  # serving one certificate for every SNI name. Stop every stale nginx master
+  # and start exactly one systemd-managed instance with the tested config.
+  systemctl stop nginx >/dev/null 2>&1 || true
+  pkill -TERM -x nginx >/dev/null 2>&1 || true
+  for i in $(seq 1 30); do
+    pgrep -x nginx >/dev/null 2>&1 || break
+    sleep 0.2
+  done
+  if pgrep -x nginx >/dev/null 2>&1; then
+    pkill -KILL -x nginx >/dev/null 2>&1 || true
+    sleep 0.5
+  fi
+  rm -f /run/nginx.pid 2>/dev/null || true
+
+  owner="$(ss -ltnp 'sport = :443' 2>/dev/null | tail -n +2 || true)"
+  if [[ -n "$owner" ]]; then
+    printf '%s\n' "$owner" >&2
+    err "Порт 443 занят посторонним процессом после остановки Nginx"
+  fi
+
+  systemctl start nginx >/dev/null 2>&1 || {
+    systemctl status nginx --no-pager -l >&2 2>/dev/null || true
+    err "Nginx не запустился после жёсткой перезагрузки"
+  }
+  sleep 1
+  systemctl is-active --quiet nginx || err "Сервис Nginx не active"
+  nginx -t >/dev/null 2>&1 || err "Nginx после запуска использует некорректный конфиг"
+  ss -ltnp 'sport = :443' 2>/dev/null | grep -q nginx || err "Nginx не слушает 443 после запуска"
+}
+
 nginx_reload() {
   ensure_nginx_runtime_writable
   local output=""
@@ -267,14 +305,7 @@ nginx_reload() {
       err "Не удалось пересобрать управляемый Nginx-конфиг"
     fi
   fi
-  if ! output="$(nginx -t 2>&1)"; then
-    printf '%s\n' "$output" >&2
-    err "Nginx-конфиг не прошёл проверку"
-  fi
-  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || {
-    systemctl status nginx --no-pager -l >&2 2>/dev/null || true
-    err "Nginx не перезагрузился"
-  }
+  nginx_hard_restart
 }
 
 
@@ -4269,6 +4300,7 @@ cmd_ssl_repair_all() {
 case "${1:-}" in
   nginx-runtime-fix) shift; cmd_nginx_runtime_fix "$@" ;;
   nginx-runtime-doctor-json) shift; cmd_nginx_runtime_doctor_json "$@" ;;
+  nginx-hard-restart) shift; nginx_hard_restart "$@" ;;
   create-folder) shift; cmd_create_folder "$@" ;;
   delete-folder) shift; cmd_delete_folder "$@" ;;
   add-site) shift; cmd_add_site "$@" ;;
@@ -4354,6 +4386,7 @@ case "${1:-}" in
   *) cat >&2 <<EOHELP
 Usage: hyper-host-ctl nginx-runtime-fix
        hyper-host-ctl nginx-runtime-doctor-json
+       hyper-host-ctl nginx-hard-restart
        hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
        hyper-host-ctl create-ftp USER PASS [all|sites|site|bots|backups|files] [DOMAIN]
        hyper-host-ctl mysql-import-start DB FILE

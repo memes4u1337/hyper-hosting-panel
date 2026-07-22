@@ -53,4 +53,31 @@ if ! TEST_OUTPUT="$(nginx -t 2>&1)"; then
   printf '%s\n' "$TEST_OUTPUT" >&2
   exit 1
 fi
-systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
+
+# Do not trust a soft reload here. A stale nginx master previously kept the
+# omnistockcrm.tech certificate as the TLS fallback for every SNI domain even
+# though nginx -T already showed the new files. Restart the single systemd
+# instance so the tested configuration is certainly active.
+systemctl stop nginx >/dev/null 2>&1 || true
+pkill -TERM -x nginx >/dev/null 2>&1 || true
+for _ in $(seq 1 30); do
+  pgrep -x nginx >/dev/null 2>&1 || break
+  sleep 0.2
+done
+if pgrep -x nginx >/dev/null 2>&1; then
+  pkill -KILL -x nginx >/dev/null 2>&1 || true
+  sleep 0.5
+fi
+rm -f /run/nginx.pid 2>/dev/null || true
+if ss -ltnp 'sport = :443' 2>/dev/null | tail -n +2 | grep -q .; then
+  ss -ltnp 'sport = :443' >&2 || true
+  echo '[HYPER-HOST ERROR] Порт 443 занят не Nginx' >&2
+  exit 1
+fi
+systemctl start nginx >/dev/null 2>&1 || {
+  systemctl status nginx --no-pager -l >&2 2>/dev/null || true
+  exit 1
+}
+sleep 1
+systemctl is-active --quiet nginx
+ss -ltnp 'sport = :443' 2>/dev/null | grep -q nginx

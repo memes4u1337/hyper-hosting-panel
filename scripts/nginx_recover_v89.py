@@ -157,15 +157,31 @@ def cert_expiry_epoch(cert: Path) -> int:
 
 
 def choose_cert(host: str, certs: list[Path]) -> tuple[str, str] | None:
+    """Choose a certificate deterministically for one SNI name.
+
+    The exact Certbot lineage is authoritative. Older builds scanned all
+    certificates first; after several backup restores that could attach a
+    different site's certificate to a vhost even though the correct lineage
+    existed on disk. We now prefer /live/<host>/fullchain.pem and only fall
+    back to a SAN match when an exact lineage does not exist.
+    """
+    host = (host or "").strip().lower().rstrip(".")
+    exact_candidates = [
+        Path("/opt/hyper-host/letsencrypt/live") / host / "fullchain.pem",
+        Path("/etc/letsencrypt/live") / host / "fullchain.pem",
+    ]
+    for cert in exact_candidates:
+        if cert_matches(cert, host):
+            return str(cert), str(cert.parent / "privkey.pem")
+
     matches = [cert for cert in certs if cert_matches(cert, host)]
     if not matches:
         return None
-    # Prefer the certificate with the latest expiry. When dates match, prefer
-    # the writable HYPER-HOST Certbot store instead of legacy /etc paths.
     matches.sort(
         key=lambda cert: (
             cert_expiry_epoch(cert),
             1 if str(cert).startswith("/opt/hyper-host/letsencrypt/") else 0,
+            str(cert),
         ),
         reverse=True,
     )
@@ -278,7 +294,7 @@ def panel_block(names: list[str], root: str, socket: str, nginx_dir: Path, acme_
     listen = https_listen() if ssl else http_listen()
     cert = ""
     if ssl_pair:
-        cert = f"\n    ssl_certificate {ssl_pair[0]};\n    ssl_certificate_key {ssl_pair[1]};\n    ssl_protocols TLSv1.2 TLSv1.3;"
+        cert = f"\n    # HYPER-HOST exact SNI certificate\n    ssl_certificate {ssl_pair[0]};\n    ssl_certificate_key {ssl_pair[1]};\n    ssl_protocols TLSv1.2 TLSv1.3;"
     return f"""server {{
     {listen}
     server_name {' '.join(names)};
@@ -316,7 +332,7 @@ def site_block(names: list[str], domain: str, root: str, socket: str, logs: str,
     cert = ""
     suffix = "-ssl" if ssl else ""
     if ssl_pair:
-        cert = f"\n    ssl_certificate {ssl_pair[0]};\n    ssl_certificate_key {ssl_pair[1]};\n    ssl_protocols TLSv1.2 TLSv1.3;"
+        cert = f"\n    # HYPER-HOST exact SNI certificate\n    ssl_certificate {ssl_pair[0]};\n    ssl_certificate_key {ssl_pair[1]};\n    ssl_protocols TLSv1.2 TLSv1.3;"
     return f"""server {{
     {listen}
     server_name {' '.join(names)};
@@ -496,10 +512,25 @@ def main() -> int:
         socket = str(plan["socket"])
         text = site_block(names, domain, root, socket, logs, nginx_dir, str(acme_webroot))
         groups: OrderedDict[tuple[str, str], list[str]] = OrderedDict()
-        for host in names:
+
+        # The canonical domain always gets its own deterministic certificate
+        # first. Aliases may join that block only when the same certificate
+        # actually covers them. This prevents one site's lineage from becoming
+        # the TLS fallback for every other SNI name.
+        canonical_pair = choose_cert(domain, certs)
+        if canonical_pair:
+            groups.setdefault(canonical_pair, []).append(domain)
+            for alias in names[1:]:
+                if cert_matches(Path(canonical_pair[0]), alias):
+                    groups[canonical_pair].append(alias)
+
+        for host in names[1:]:
+            if any(host in grouped_names for grouped_names in groups.values()):
+                continue
             pair = choose_cert(host, certs)
             if pair:
                 groups.setdefault(pair, []).append(host)
+
         for pair, ssl_names in groups.items():
             text += "\n" + site_block(ssl_names, domain, root, socket, logs, nginx_dir, str(acme_webroot), pair)
         (managed / f"20-site-{domain}.conf").write_text(text, encoding="utf-8")

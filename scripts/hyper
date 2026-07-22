@@ -508,10 +508,10 @@ cmd_nginx() {
     test)
       nginx -t
       ;;
-    reload)
-      nginx -t && systemctl reload nginx
+    reload|hard-restart|restart)
+      $CTL nginx-hard-restart
       ;;
-    *) err "Nginx команды: sudo hyper nginx fix | doctor | test | reload" ;;
+    *) err "Nginx команды: sudo hyper nginx fix | doctor | test | hard-restart" ;;
   esac
 }
 
