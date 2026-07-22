@@ -181,10 +181,12 @@ PY
       $CTL mysql-import-start "$1" "$2" | json_pretty
       ;;
     imports|import-status) $CTL mysql-import-status-json | json_pretty ;;
+    import-cancel) [[ -n "${1:-}" ]] || err "Используй: sudo hyper db import-cancel JOB_ID"; $CTL mysql-import-cancel "$1" | json_pretty ;;
+    import-log) [[ -n "${1:-}" ]] || err "Используй: sudo hyper db import-log JOB_ID"; $CTL mysql-import-log "$1" ;;
     inspect) [[ -n "${1:-}" ]] || err "Используй: sudo hyper db inspect FILE"; $CTL mysql-import-inspect "$1" | json_pretty ;;
     test) [[ -n "${1:-}" && -n "${2:-}" && -n "${3:-}" ]] || err "Используй: sudo hyper db test HOST USER PASS [DB]"; $CTL mysql-test "$@" ;;
     user) [[ -n "${1:-}" && -n "${2:-}" ]] || err "Используй: sudo hyper db user USER PASS [DB] [HOST]"; $CTL create-mysql-account "$1" "$2" "${4:-%}" "${3:-}" ALL ;;
-    *) err "Используй: sudo hyper db list | doctor | pma-fix | tune-import | import DB FILE | imports | inspect FILE | external enable|disable | user USER PASS [DB] [%|IP] | test HOST USER PASS [DB]" ;;
+    *) err "Используй: sudo hyper db list | doctor | pma-fix | tune-import | import DB FILE | imports | import-log JOB_ID | import-cancel JOB_ID | inspect FILE | external enable|disable | user USER PASS [DB] [%|IP] | test HOST USER PASS [DB]" ;;
   esac
 }
 

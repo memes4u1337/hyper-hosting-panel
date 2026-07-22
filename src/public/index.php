@@ -175,6 +175,13 @@ function handle_post(string $action): void
                 add_event('database','Запущен фоновый SQL-импорт: '.$row['db_name'].' / '.$original);
                 flash('SQL загружен. Импорт запущен в фоне, страницу можно закрыть. Задание: '.(string)($res['job_id']??''),'success'); redirect('/?page=databases#imports');
             }
+            case 'cancel_import': {
+                $jobId=trim((string)($_POST['job_id']??''));
+                if(!preg_match('/^[A-Za-z0-9_.-]{5,160}$/',$jobId)) throw new RuntimeException('Некорректный ID задания');
+                $res=run_ctl_json(['mysql-import-cancel',$jobId],30);
+                if(empty($res['ok'])) throw new RuntimeException((string)($res['error']??'Не удалось отменить импорт'));
+                flash('Отмена импорта запрошена: '.$jobId,'warning'); redirect('/?page=databases#import-jobs');
+            }
             case 'delete_db': {
                 $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM databases WHERE id=?'); $st->execute([$id]); $r=$st->fetch(); if(!$r) throw new RuntimeException('База не найдена'); $res=run_ctl(['delete-db',$r['db_name'],$r['db_user']],180); if($res['code']!==0) throw new RuntimeException($res['output']); db()->prepare('DELETE FROM databases WHERE id=?')->execute([$id]); redirect('/?page=databases');
             }
@@ -787,7 +794,7 @@ function view_databases(): void
           <button class="btn btn-primary w-100"><i class="fa-solid fa-cloud-arrow-up me-2"></i>Загрузить и импортировать в фоне</button>
         </form>
         <?php else: ?><div class="alert alert-warning mb-0">Сначала создай базу данных.</div><?php endif; ?>
-        <div class="small muted mt-3">Лимит панели: 8 ГБ. Для твоего ZIP на 260 МБ SQL внутри распакуется потоково — без временного файла на 2 ГБ.</div>
+        <div class="small muted mt-3">Лимит панели: 8 ГБ. Дамп на 2 ГБ может импортироваться 30–120 минут. Ниже отображаются живой PID, скорость, размер базы и число созданных таблиц — поэтому видно, идёт работа или процесс действительно остановился.</div>
       </div>
 
       <div class="panel-card db-form-card mt-4">
@@ -836,12 +843,22 @@ function view_databases(): void
       <div class="panel-card mt-4" id="import-jobs">
         <div class="card-title-row"><h2><i class="fa-solid fa-bars-progress me-2"></i>Импорт SQL</h2><button class="btn btn-sm btn-soft" type="button" onclick="location.reload()">Обновить</button></div>
         <div class="db-cards-list">
-        <?php $hasRunning=false; foreach($imports as $job): $status=(string)($job['status']??'unknown'); if(in_array($status,['queued','running'],true))$hasRunning=true; $progress=(float)($job['progress']??0); ?>
+        <?php $hasRunning=false; foreach($imports as $job):
+          $status=(string)($job['status']??'unknown');
+          if(in_array($status,['queued','running','waiting_mysql'],true))$hasRunning=true;
+          $progress=(float)($job['progress']??0);
+          $elapsed=(int)($job['elapsed_seconds']??0); $eta=$job['eta_seconds']??null;
+          $speed=(float)($job['speed_mib_s']??0); $alive=!empty($job['worker_alive']);
+          $statusText=match($status){'done'=>'готово','failed'=>'ошибка','cancelled'=>'отменён','waiting_mysql'=>'MySQL обрабатывает данные','queued'=>'в очереди',default=>'импортируется'};
+        ?>
           <div class="db-row-card compact">
             <div><span>База</span><b><?= e((string)($job['database']??'')) ?></b><small><?= e((string)($job['source_name']??'')) ?></small></div>
-            <div><span>Статус</span><b class="<?= $status==='done'?'hh-ok':($status==='failed'?'hh-bad':'hh-warn') ?>"><?= e($status==='done'?'готово':($status==='failed'?'ошибка':'выполняется')) ?></b><small><?= round($progress,1) ?>%</small></div>
-            <div style="min-width:180px"><span>Прогресс</span><div class="progress" style="height:9px"><div class="progress-bar" style="width:<?= max(0,min(100,$progress)) ?>%"></div></div><small><?= e(human_bytes((float)($job['bytes_processed']??0))) ?> / <?= e(human_bytes((float)($job['bytes_total']??0))) ?></small></div>
-            <div><span>Задание</span><code><?= e((string)($job['job_id']??'')) ?></code><?php if(!empty($job['error'])): ?><small class="text-danger" title="<?= e((string)$job['error']) ?>"><?= e(mb_substr((string)$job['error'],0,180)) ?></small><?php endif; ?></div>
+            <div><span>Статус</span><b class="<?= $status==='done'?'hh-ok':(in_array($status,['failed','cancelled'],true)?'hh-bad':'hh-warn') ?>"><?= e($statusText) ?></b><small><?= round($progress,1) ?>% · процесс <?= $alive?'жив':'не найден' ?></small></div>
+            <div style="min-width:220px"><span>Прогресс</span><div class="progress" style="height:9px"><div class="progress-bar" style="width:<?= max(0,min(100,$progress)) ?>%"></div></div><small><?= e(human_bytes((float)($job['bytes_processed']??0))) ?> / <?= e(human_bytes((float)($job['bytes_total']??0))) ?> · <?= round($speed,1) ?> МиБ/с</small></div>
+            <div><span>Результат в базе</span><b><?= (int)($job['tables_count']??0) ?> таблиц</b><small><?= e(human_bytes((float)($job['database_size_bytes']??0))) ?> · прошло <?= gmdate('H:i:s',max(0,$elapsed)) ?><?= is_numeric($eta)?' · осталось ~'.gmdate('H:i:s',max(0,(int)$eta)):'' ?></small></div>
+            <div><span>Задание</span><code><?= e((string)($job['job_id']??'')) ?></code><?php if(!empty($job['error'])): ?><small class="text-danger" title="<?= e((string)$job['error']) ?>"><?= e(mb_substr((string)$job['error'],0,220)) ?></small><?php elseif(!empty($job['log_tail']) && $status==='waiting_mysql'): ?><small title="<?= e((string)$job['log_tail']) ?>">MySQL занят обработкой последнего блока — это не зависание</small><?php endif; ?>
+              <?php if(in_array($status,['queued','running','waiting_mysql'],true)): ?><form method="post" class="mt-2" onsubmit="return confirm('Остановить импорт? Уже загруженные таблицы останутся в базе.')"><?= csrf_field() ?><input type="hidden" name="action" value="cancel_import"><input type="hidden" name="job_id" value="<?= e((string)($job['job_id']??'')) ?>"><button class="btn btn-sm btn-outline-danger">Остановить</button></form><?php endif; ?>
+            </div>
           </div>
         <?php endforeach; if(!$imports): ?><div class="empty">Импорты ещё не запускались</div><?php endif; ?>
         </div>

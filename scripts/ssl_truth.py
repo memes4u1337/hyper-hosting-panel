@@ -34,26 +34,43 @@ def jprint(data: Any) -> None:
 
 
 def cert_info(cert: Path) -> dict[str, Any] | None:
+    """Read certificate metadata and compute a real SHA-256 DER fingerprint.
+
+    Older builds parsed the human-readable OpenSSL fingerprint line. On some
+    OpenSSL versions that line has different capitalization, so the parser
+    returned an empty string for every certificate. Two empty fingerprints
+    were then treated as a match, which made SSL audit report success while
+    Nginx was actually serving another site's certificate.
+    """
     try:
-        text = subprocess.check_output(['openssl','x509','-in',str(cert),'-noout','-subject','-issuer','-enddate','-fingerprint','-sha256','-ext','subjectAltName'], text=True, stderr=subprocess.DEVNULL)
-        end = re.search(r'notAfter=(.+)', text)
+        if not cert.is_file():
+            return None
+        key = cert.with_name('privkey.pem')
+        text = subprocess.check_output(
+            ['openssl', 'x509', '-in', str(cert), '-noout', '-subject', '-issuer', '-enddate', '-ext', 'subjectAltName'],
+            text=True, stderr=subprocess.DEVNULL, timeout=10,
+        )
+        der = subprocess.check_output(
+            ['openssl', 'x509', '-in', str(cert), '-outform', 'DER'],
+            stderr=subprocess.DEVNULL, timeout=10,
+        )
+        end = re.search(r'(?mi)^notAfter=(.+)$', text)
         exp = dt.datetime.strptime(end.group(1).strip(), '%b %d %H:%M:%S %Y %Z') if end else None
-        sans = re.findall(r'DNS:([^,\s]+)', text)
+        sans = re.findall(r'DNS:([^,\s]+)', text, flags=re.I)
         if not sans:
-            m = re.search(r'CN\s*=\s*([^,\n/]+)', text)
-            if m: sans = [m.group(1).strip()]
-        fp = re.search(r'SHA256 Fingerprint=([0-9A-F:]+)', text)
+            m = re.search(r'(?i)CN\s*=\s*([^,\n/]+)', text)
+            if m:
+                sans = [m.group(1).strip()]
         return {
             'cert': str(cert),
-            'key': str(cert.with_name('privkey.pem')),
-            'domains': sans,
-            'expires': exp.isoformat()+'Z' if exp else '',
+            'key': str(key),
+            'domains': [x.lower().rstrip('.') for x in sans],
+            'expires': exp.isoformat() + 'Z' if exp else '',
             'days_left': (exp - dt.datetime.utcnow()).days if exp else -9999,
-            'fingerprint': (fp.group(1).replace(':','').lower() if fp else ''),
+            'fingerprint': hashlib.sha256(der).hexdigest(),
         }
     except Exception:
         return None
-
 
 
 def cert_expiry_epoch(cert: Path) -> int:
@@ -180,6 +197,15 @@ def all_certs() -> list[dict[str, Any]]:
     return items
 
 
+def is_public_domain(domain: str) -> bool:
+    domain=(domain or '').strip().lower().rstrip('.')
+    if not domain or domain.endswith(('.local','.invalid','.test','.example')):
+        return False
+    if re.match(r'^v(?:59|60)-(?:nginx|acme)-test-', domain):
+        return False
+    return bool(re.fullmatch(r'(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}', domain))
+
+
 def match_domain(pattern: str, domain: str) -> bool:
     pattern=pattern.lower().strip('.'); domain=domain.lower().strip('.')
     if pattern == domain: return True
@@ -215,8 +241,10 @@ def site_rows() -> list[dict[str, Any]]:
             con.row_factory=sqlite3.Row
             for r in con.execute('SELECT domain, aliases, root_path FROM sites ORDER BY domain'):
                 row=dict(r)
-                if str(row.get('domain') or '').strip().lower()==panel:
+                domain=str(row.get('domain') or '').strip().lower().rstrip('.')
+                if domain==panel or not is_public_domain(domain):
                     continue
+                row['domain']=domain
                 rows.append(row)
             con.close()
         except Exception:
@@ -224,7 +252,8 @@ def site_rows() -> list[dict[str, Any]]:
     known={str(r['domain']).lower() for r in rows}
     if SITES_DIR.exists():
         for p in SITES_DIR.iterdir():
-            if not p.is_dir() or not (p/'public_html').is_dir() or '.' not in p.name or p.name.lower() in known or p.name.lower()==panel:
+            domain=p.name.lower().rstrip('.')
+            if not p.is_dir() or not (p/'public_html').is_dir() or not is_public_domain(domain) or domain in known or domain==panel:
                 continue
             rows.append({'domain':p.name,'aliases':'','root_path':str(p/'public_html')})
     return rows
@@ -271,6 +300,20 @@ def remote_cert(domain: str) -> dict[str, Any] | None:
         except Exception:
             continue
     return None
+
+
+def certificate_serves_domain(info: dict[str, Any] | None, domain: str) -> bool:
+    return bool(info and info.get('fingerprint') and any(match_domain(str(name), domain) for name in info.get('domains', [])))
+
+
+def certificates_identical(expected: dict[str, Any] | None, live: dict[str, Any] | None, domain: str) -> bool:
+    return bool(
+        certificate_serves_domain(expected, domain)
+        and certificate_serves_domain(live, domain)
+        and expected.get('fingerprint')
+        and live.get('fingerprint')
+        and expected.get('fingerprint') == live.get('fingerprint')
+    )
 
 
 def nginx_has_ssl_domain(domain: str) -> bool:
@@ -381,27 +424,47 @@ def repair_one(domain: str, aliases: str, root: str, cert: dict[str,Any], panel:
 
 def audit() -> dict[str,Any]:
     certs=all_certs(); items=[]
+    canonical_failures=[]; alias_failures=[]
     for row in site_rows():
         d=str(row['domain']).strip().lower(); name_items=[]
         for name in site_names(row):
+            if not is_public_domain(name):
+                continue
             cert=choose_cert(name,certs); live=remote_cert(name)
-            live_matches=bool(cert and live and live.get('fingerprint')==cert.get('fingerprint'))
-            status='active' if live_matches else ('cert_only' if cert else 'missing')
-            if cert and cert['days_left'] < 0: status='expired'
+            live_matches=certificates_identical(cert, live, name)
+            if live_matches:
+                status='active'
+            elif cert and int(cert.get('days_left',-1)) < 0:
+                status='expired'
+            elif cert:
+                status='wrong_live_certificate' if live else 'cert_only'
+            else:
+                status='missing'
             name_items.append({'domain':name,'status':status,'certificate':cert or {},
                                'nginx_https':nginx_has_ssl_domain(name),'live_certificate':live or {},
                                'live_matches':live_matches})
         canonical=next((x for x in name_items if x['domain']==d),name_items[0] if name_items else {})
         missing=[x['domain'] for x in name_items if x.get('status')!='active']
         overall='active' if name_items and not missing else ('partial' if canonical.get('status')=='active' else canonical.get('status','missing'))
+        if canonical.get('status')!='active':
+            canonical_failures.append(d)
+        alias_failures.extend([x for x in missing if x != d])
         items.append({'domain':d,'aliases':str(row.get('aliases') or ''),'status':overall,
                       'has_certificate':bool(canonical.get('certificate')),'certificate':canonical.get('certificate',{}),
                       'nginx_https':bool(canonical.get('nginx_https')),'live_certificate':canonical.get('live_certificate',{}),
                       'live_matches':bool(canonical.get('live_matches')),'names':name_items,'missing_names':missing})
     pd=panel_domain(); pc=choose_cert(pd,certs); pl=remote_cert(pd)
-    pstatus='active' if pc and pl and pc.get('fingerprint')==pl.get('fingerprint') else ('cert_only' if pc else 'missing')
+    pstatus='active' if certificates_identical(pc,pl,pd) else ('wrong_live_certificate' if pc and pl else ('cert_only' if pc else 'missing'))
     sync_db_flags(certs)
-    return {'ok':True,'sites':items,'panel':{'domain':pd,'status':pstatus,'certificate':pc or {},'live_certificate':pl or {}},'certificates_found':len(certs)}
+    return {
+        'ok': not canonical_failures and pstatus=='active',
+        'sites':items,
+        'panel':{'domain':pd,'status':pstatus,'certificate':pc or {},'live_certificate':pl or {},
+                 'live_matches':certificates_identical(pc,pl,pd)},
+        'canonical_failures':canonical_failures,
+        'alias_failures':sorted(set(alias_failures)),
+        'certificates_found':len(certs),
+    }
 
 
 def restore() -> dict[str,Any]:
@@ -471,7 +534,9 @@ def repair_all(email: str='') -> dict[str,Any]:
         item={'domain':panel['domain'],'panel':True,'output':cp.stdout.strip()[-12000:]}
         (issued if cp.returncode==0 else failed).append(item)
     final=restore()
-    return {'ok':True,'email':email,'restore':first,'issued':issued,'failed':failed,'skipped':skipped,'final_restore':final,'audit':audit()}
+    final_audit=audit()
+    ok=not failed and bool(final_audit.get('ok'))
+    return {'ok':ok,'email':email,'restore':first,'issued':issued,'failed':failed,'skipped':skipped,'final_restore':final,'audit':final_audit}
 
 
 def main():

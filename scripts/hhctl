@@ -1448,11 +1448,15 @@ cmd_ssl_site() {
     fi
   done
 
+  if [[ -x /usr/local/sbin/hyper-host-nginx-reconcile ]]; then
+    /usr/local/sbin/hyper-host-nginx-reconcile >/dev/null || err "Не удалось пересобрать Nginx после выпуска SSL"
+  fi
   nginx_reload
 
   cert="$(find_valid_certificate_for_domain "$domain" || true)"
   [[ -n "$cert" ]] || err "Сертификат $domain после выпуска не найден"
-  local_tls_certificate_ok "$domain" || err "Сертификат найден, но Nginx не отдаёт его для $domain"
+  openssl x509 -in "$cert" -noout -checkhost "$domain" >/dev/null 2>&1 || err "Найден неправильный сертификат для $domain: $cert"
+  local_tls_certificate_ok "$domain" || err "Nginx отдаёт чужой сертификат для $domain. Успех не засчитан."
 
   # Synchronize the visual SSL flags with real certificate state.
   if [[ -x "$SSL_TRUTH_PY" ]]; then
@@ -2153,19 +2157,30 @@ cmd_mysql_import_inspect() {
 }
 
 cmd_mysql_import_start() {
-  local db="${1:-}" file="${2:-}" job_id launcher_log
+  local db="${1:-}" file="${2:-}" job_id launcher_log job_file pid
   valid_db_name "$db" || err "Некорректное имя базы: $db"
   [[ -n "$file" && -f "$file" ]] || err "Файл импорта не найден: $file"
   [[ -f "$SQL_IMPORTER" ]] || err "SQL importer не установлен: $SQL_IMPORTER"
   case "${file,,}" in *.sql|*.sql.gz|*.gz|*.zip) ;; *) err "Поддерживаются .sql, .sql.gz, .gz и .zip" ;; esac
-  mkdir -p "$SQL_IMPORT_ROOT/uploads" "$SQL_IMPORT_ROOT/jobs" "$SQL_IMPORT_ROOT/logs"
-  chmod 0750 "$SQL_IMPORT_ROOT/jobs" "$SQL_IMPORT_ROOT/logs" 2>/dev/null || true
+  mkdir -p "$SQL_IMPORT_ROOT/uploads" "$SQL_IMPORT_ROOT/jobs" "$SQL_IMPORT_ROOT/logs" "$SQL_IMPORT_ROOT/cancel"
+  chmod 0750 "$SQL_IMPORT_ROOT/jobs" "$SQL_IMPORT_ROOT/logs" "$SQL_IMPORT_ROOT/cancel" 2>/dev/null || true
   chmod 0640 "$file" 2>/dev/null || true
   chown root:www-data "$file" 2>/dev/null || true
   job_id="$(date +%Y%m%d-%H%M%S)-${db}-$(openssl rand -hex 3)"
   launcher_log="$SQL_IMPORT_ROOT/logs/${job_id}-launcher.log"
+  job_file="$SQL_IMPORT_ROOT/jobs/${job_id}.json"
+  JOB_ID="$job_id" DB_NAME="$db" FILE_PATH="$file" FILE_NAME="$(basename "$file")" JOB_FILE="$job_file" python3 - <<'PYIMPORTQUEUE'
+import datetime,json,os,pathlib
+now=datetime.datetime.now(datetime.timezone.utc).isoformat()
+data={'ok':True,'job_id':os.environ['JOB_ID'],'status':'queued','database':os.environ['DB_NAME'],'source':os.environ['FILE_PATH'],'source_name':os.environ['FILE_NAME'],'bytes_total':0,'bytes_processed':0,'progress':0.0,'pid':0,'mysql_pid':0,'heartbeat_at':now,'started_at':now,'updated_at':now,'finished_at':'','error':''}
+p=pathlib.Path(os.environ['JOB_FILE']); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(json.dumps(data,ensure_ascii=False,indent=2),'utf-8')
+PYIMPORTQUEUE
   nohup setsid python3 "$SQL_IMPORTER" run --database "$db" --file "$file" --job-id "$job_id" >"$launcher_log" 2>&1 </dev/null &
-  local pid=$!
+  pid=$!
+  sleep 1
+  if ! kill -0 "$pid" 2>/dev/null && [[ ! -s "$job_file" ]]; then
+    err "Фоновый импорт не запустился: $(tail -n 40 "$launcher_log" 2>/dev/null || true)"
+  fi
   JOB_ID="$job_id" DB_NAME="$db" FILE_NAME="$(basename "$file")" PID="$pid" python3 - <<'PYIMPORTSTART'
 import json,os
 print(json.dumps({'ok':True,'job_id':os.environ['JOB_ID'],'database':os.environ['DB_NAME'],'file':os.environ['FILE_NAME'],'pid':int(os.environ['PID']),'status':'queued'},ensure_ascii=False))
@@ -2175,6 +2190,16 @@ PYIMPORTSTART
 cmd_mysql_import_status_json() {
   [[ -f "$SQL_IMPORTER" ]] || { echo '[]'; return 0; }
   python3 "$SQL_IMPORTER" list --limit "${1:-20}"
+}
+
+cmd_mysql_import_cancel() {
+  [[ -n "${1:-}" ]] || err "Используй: mysql-import-cancel JOB_ID"
+  python3 "$SQL_IMPORTER" cancel "$1"
+}
+
+cmd_mysql_import_log() {
+  [[ -n "${1:-}" ]] || err "Используй: mysql-import-log JOB_ID"
+  python3 "$SQL_IMPORTER" log "$1"
 }
 
 ensure_bot_user() {
@@ -4070,8 +4095,15 @@ cmd_panel_ssl() {
   local existing
   existing="$(find_valid_certificate_for_domain "$domain" || true)"
   if [[ -n "$existing" ]]; then
+    if ! openssl x509 -in "$existing" -noout -checkhost "$domain" >/dev/null 2>&1; then
+      warn "Отброшен чужой сертификат панели: $existing"
+      existing=""
+    fi
+  fi
+  if [[ -n "$existing" ]]; then
+    [[ -x /usr/local/sbin/hyper-host-nginx-reconcile ]] && /usr/local/sbin/hyper-host-nginx-reconcile >/dev/null
     nginx_reload
-    local_tls_certificate_ok "$domain" || err "Сертификат панели найден, но Nginx его не отдаёт: $existing"
+    local_tls_certificate_ok "$domain" || err "Сертификат панели найден, но Nginx отдаёт другой сертификат: $existing"
     log "Panel SSL restored: https://$domain -> $existing"
     return 0
   fi
@@ -4097,9 +4129,11 @@ cmd_panel_ssl() {
     tail -n 120 "$log_file" >&2 || true
     err "SSL панели не выпущен. Лог: $log_file"
   fi
+  [[ -x /usr/local/sbin/hyper-host-nginx-reconcile ]] && /usr/local/sbin/hyper-host-nginx-reconcile >/dev/null
   nginx_reload
   existing="$(find_valid_certificate_for_domain "$domain" || true)"
   [[ -n "$existing" ]] || err "Certbot завершился, но сертификат панели не найден"
+  openssl x509 -in "$existing" -noout -checkhost "$domain" >/dev/null 2>&1 || err "Certbot создал сертификат, который не покрывает $domain"
   local_tls_certificate_ok "$domain" || err "Сертификат панели найден, но Nginx его не отдаёт"
   log "Panel SSL issued: https://$domain / log: $log_file"
 }
@@ -4259,6 +4293,8 @@ case "${1:-}" in
   mysql-import-inspect) shift; cmd_mysql_import_inspect "$@" ;;
   mysql-import-start) shift; cmd_mysql_import_start "$@" ;;
   mysql-import-status-json) shift; cmd_mysql_import_status_json "$@" ;;
+  mysql-import-cancel) shift; cmd_mysql_import_cancel "$@" ;;
+  mysql-import-log) shift; cmd_mysql_import_log "$@" ;;
   phpmyadmin-fix) shift; cmd_phpmyadmin_fix "$@" ;;
   phpmyadmin-status-json) shift; cmd_phpmyadmin_status_json "$@" ;;
   php-install-all) shift; cmd_php_install_all "$@" ;;

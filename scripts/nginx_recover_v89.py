@@ -19,6 +19,17 @@ def valid_domain(value: str) -> bool:
     return bool(DOMAIN_RE.fullmatch((value or "").strip().lower().rstrip(".")))
 
 
+def public_domain(value: str) -> bool:
+    value=(value or '').strip().lower().rstrip('.')
+    if not valid_domain(value):
+        return False
+    if value.endswith(('.local','.invalid','.test','.example')):
+        return False
+    if re.match(r'^v(?:59|60)-(?:nginx|acme)-test-', value):
+        return False
+    return True
+
+
 def valid_ip(value: str) -> bool:
     try:
         ipaddress.ip_address(value)
@@ -424,7 +435,7 @@ def main() -> int:
         folder.name.lower().rstrip(".")
         for folder in sites_root.iterdir()
         if folder.is_dir()
-        and valid_domain(folder.name)
+        and public_domain(folder.name)
         and folder.name.lower().rstrip(".") != panel_domain
         and not (folder / ".hyper-host-disabled").exists()
         and (folder / "public_html").is_dir()
@@ -444,7 +455,7 @@ def main() -> int:
         candidates = [x for x in split_names(row.get("aliases", "")) if x != panel_domain] + old_aliases.get(domain, [])
         aliases: list[str] = []
         for alias in uniq(candidates):
-            if not valid_domain(alias) or alias in {domain, panel_domain} or alias in canonical_set:
+            if not public_domain(alias) or alias in {domain, panel_domain} or alias in canonical_set:
                 continue
             if alias in claimed and claimed[alias] != domain:
                 continue
