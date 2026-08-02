@@ -47,6 +47,21 @@ function render_api(string $api): void
             echo json_encode(is_array($pm2) ? $pm2 : ['_error' => 'PM2 JSON error'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
             return;
         }
+        if ($api === 'ssl-job') {
+            $jobId = trim((string)($_GET['job'] ?? ''));
+            if (!preg_match('/^ssl-[A-Za-z0-9_.-]{8,120}$/', $jobId)) {
+                http_response_code(422);
+                echo json_encode(['ok' => false, 'state' => 'failed', 'message' => 'Некорректный ID SSL-задания'], JSON_UNESCAPED_UNICODE);
+                return;
+            }
+            $job = run_ctl_json_live(['ssl-job-json', $jobId], 8);
+            if (!empty($job['ok']) && ($job['state'] ?? '') === 'success' && !empty($job['domain'])) {
+                db()->prepare('UPDATE sites SET ssl_enabled=1 WHERE domain=?')->execute([(string)$job['domain']]);
+                hh_clear_cache();
+            }
+            echo json_encode($job, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            return;
+        }
         http_response_code(404);
         echo json_encode(['_error' => 'API not found'], JSON_UNESCAPED_UNICODE);
     } catch (Throwable $e) {
@@ -95,6 +110,22 @@ function replace_dns_records(int $zoneId, array $records): void
 }
 function back_to_current(): never { redirect($_SERVER['HTTP_REFERER'] ?? '/'); }
 
+function request_wants_json(): bool
+{
+    $accept = strtolower((string)($_SERVER['HTTP_ACCEPT'] ?? ''));
+    $requestedWith = strtolower((string)($_SERVER['HTTP_X_REQUESTED_WITH'] ?? ''));
+    return str_contains($accept, 'application/json') || in_array($requestedWith, ['fetch', 'xmlhttprequest'], true);
+}
+
+function json_response(array $payload, int $status = 200): never
+{
+    http_response_code($status);
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
 function handle_post(string $action): void
 {
     try {
@@ -119,9 +150,31 @@ function handle_post(string $action): void
                 flash('ACME challenge для SSL исправлен. Теперь снова проверь DNS/SSL.', 'success'); redirect('/?page=ssl');
             }
             case 'ssl_site': {
-                $id=(int)($_POST['id']??0); $email=trim((string)($_POST['email']??'')); if(!filter_var($email,FILTER_VALIDATE_EMAIL)) throw new RuntimeException('Укажи нормальный email');
-                $st=db()->prepare('SELECT * FROM sites WHERE id=?'); $st->execute([$id]); $s=$st->fetch(); if(!$s) throw new RuntimeException('Сайт не найден');
-                $res=run_ctl(['ssl-site',$s['domain'],$email],1200); if($res['code']!==0) throw new RuntimeException($res['output']); hh_clear_cache(); db()->prepare('UPDATE sites SET ssl_enabled=1 WHERE id=?')->execute([$id]); add_event('ssl','Выпущен SSL: '.$s['domain']); flash('SSL выпущен','success'); redirect('/?page=ssl');
+                $id=(int)($_POST['id']??0);
+                $email=trim((string)($_POST['email']??''));
+                if(!filter_var($email,FILTER_VALIDATE_EMAIL)) throw new RuntimeException('Укажи нормальный email');
+                setting_set('ssl_email', $email);
+                $st=db()->prepare('SELECT * FROM sites WHERE id=?'); $st->execute([$id]); $s=$st->fetch();
+                if(!$s) throw new RuntimeException('Сайт не найден');
+
+                // SSL выпускается отдельным системным заданием. Веб-запрос больше не
+                // держится во время reload/restart Nginx, поэтому панель не падает с
+                // ERR_EMPTY_RESPONSE даже при аварийном восстановлении Nginx.
+                $res=run_ctl_json(['ssl-site-start-json',(string)$s['domain'],$email],20);
+                if(empty($res['ok'])) throw new RuntimeException((string)($res['error']??$res['_error']??'Не удалось запустить выпуск SSL'));
+                add_event('ssl','Запущен выпуск SSL: '.$s['domain'].' / job '.(string)($res['job_id']??''));
+
+                if(request_wants_json()) {
+                    json_response([
+                        'ok'=>true,
+                        'job_id'=>(string)($res['job_id']??''),
+                        'domain'=>(string)$s['domain'],
+                        'state'=>(string)($res['state']??'queued'),
+                        'message'=>(string)($res['message']??'SSL-задание запущено'),
+                    ]);
+                }
+                flash('Выпуск SSL запущен в фоне. Страница не будет падать; обнови статус через несколько секунд.','success');
+                redirect('/?page=ssl');
             }
             case 'create_folder': {
                 $name=trim((string)($_POST['name']??'')); if(!is_valid_folder_name($name)) throw new RuntimeException('Неверное имя папки');
@@ -350,7 +403,13 @@ function handle_post(string $action): void
                 hh_clear_cache(); { sync_resources(); flash('Ресурсы синхронизированы','success'); redirect('/?page=dashboard'); }
             case 'change_password': { $current=(string)($_POST['current_password']??''); $new=(string)($_POST['new_password']??''); if(strlen($new)<10) throw new RuntimeException('Новый пароль минимум 10 символов'); $uid=(int)($_SESSION['user_id']??0); $st=db()->prepare('SELECT * FROM users WHERE id=?'); $st->execute([$uid]); $u=$st->fetch(); if(!$u||!password_verify($current,(string)$u['password_hash'])) throw new RuntimeException('Текущий пароль неверный'); db()->prepare('UPDATE users SET password_hash=? WHERE id=?')->execute([password_hash($new,PASSWORD_DEFAULT),$uid]); flash('Пароль панели изменён','success'); redirect('/?page=settings'); }
         }
-    } catch (Throwable $e) { flash($e->getMessage(), 'danger'); redirect('/?page=' . ($_GET['page'] ?? 'dashboard')); }
+    } catch (Throwable $e) {
+        if (request_wants_json()) {
+            json_response(['ok'=>false,'state'=>'failed','message'=>$e->getMessage()], 422);
+        }
+        flash($e->getMessage(), 'danger');
+        redirect('/?page=' . ($_GET['page'] ?? 'dashboard'));
+    }
 }
 
 function sync_resources(): void
@@ -466,7 +525,7 @@ function fm_delete(): void
 function rrmdir(string $path): void { if(is_dir($path)&&!is_link($path)){ foreach(scandir($path)?:[] as $i){ if($i==='.'||$i==='..') continue; rrmdir($path.'/'.$i);} if(!@rmdir($path)){ run_ctl(['repair'],180); @rmdir($path); } } else { if(!@unlink($path)){ run_ctl(['repair'],180); @unlink($path); } } }
 
 
-function hh_app_version(): string { return '1.7-v76'; }
+function hh_app_version(): string { return '1.7-v77'; }
 
 function hh_nav_config(): array
 {
@@ -484,12 +543,16 @@ function hh_active_category(string $page): string
     return 'main';
 }
 
-function nav_item(string $id,string $icon,string $label,string $page): string { $active=$id===$page?' active':''; return '<a class="nav-link'.$active.'" href="/?page='.e($id).'"><i class="fa-solid '.e($icon).'"></i><span>'.e($label).'</span></a>'; }
+function nav_item(string $id,string $icon,string $label,string $page): string
+{
+    $active=$id===$page?' active':'';
+    return '<a class="nav-link'.$active.'" href="/?page='.e($id).'"'.($active?' aria-current="page"':'').'><span class="nav-link-icon"><i class="fa-solid '.e($icon).'"></i></span><span class="nav-link-label">'.e($label).'</span><i class="fa-solid fa-chevron-right nav-link-arrow"></i></a>';
+}
 
 function render_login(): void
 {
     $flash=flash(); $need2fa=setting_get('security_2fa_enabled','0')==='1'; ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=76" rel="stylesheet"></head><body class="login-body">
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=77" rel="stylesheet"></head><body class="login-body">
 <div class="login-orb login-orb-a"></div><div class="login-orb login-orb-b"></div><div class="login-orb login-orb-c"></div>
 <main class="login-clean">
   <section class="login-card card-glass login-clean-card">
@@ -517,42 +580,57 @@ function render_page(string $page, array $user): void
 <link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
-<link href="/assets/style.css?v=76" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
+<link href="/assets/style.css?v=77" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
 <div class="mobile-nav-backdrop" id="mobileNavBackdrop"></div>
-<aside class="sidebar sidebar-v2">
-  <div class="rail" data-active-cat="<?= e($activeCat) ?>">
-    <a href="/?page=dashboard" class="rail-logo"><i class="fa-solid fa-bolt"></i></a>
-    <div class="rail-indicator"></div>
-    <?php foreach($nav as $key=>$cat): ?>
-      <button type="button" class="rail-btn<?= $key===$activeCat?' active':'' ?>" data-cat="<?= e($key) ?>" style="--cat-accent:<?= e($cat['accent']) ?>" title="<?= e($cat['label']) ?>"><i class="fa-solid <?= e($cat['icon']) ?>"></i></button>
-    <?php endforeach; ?>
-    <div class="rail-spacer"></div>
-    <a href="/?page=logout" class="rail-btn rail-logout" title="Выйти"><i class="fa-solid fa-arrow-right-from-bracket"></i></a>
+<aside class="sidebar sidebar-v3" id="mainSidebar">
+  <div class="sidebar-brand-v3">
+    <a href="/?page=dashboard" class="brand-link-v3">
+      <span class="brand-mark-v3"><i class="fa-solid fa-bolt"></i></span>
+      <span class="brand-copy-v3"><b>HYPER-HOST</b><small>server control center</small></span>
+    </a>
+    <button type="button" class="sidebar-close-v3" id="mobileNavClose" aria-label="Закрыть меню"><i class="fa-solid fa-xmark"></i></button>
   </div>
-  <div class="flyout">
-    <div class="flyout-head"><b>HYPER-HOST</b><span>powered by memes4u1337</span></div>
-    <div class="sidebar-status"><span class="status-dot"></span><div><b><?= e(host_name()) ?></b><em>сервер онлайн</em></div></div>
-    <div class="rail-live" data-live-rail>
-      <div class="rail-live-cell"><div class="rl-top"><span>CPU</span><b data-stat="railCpuPercent">—</b></div><div class="rl-bar"><i data-stat-bar="railCpu" style="width:0%"></i></div></div>
-      <div class="rail-live-cell"><div class="rl-top"><span>RAM</span><b data-stat="railMemPercent">—</b></div><div class="rl-bar"><i data-stat-bar="railMem" style="width:0%"></i></div></div>
+
+  <div class="server-card-v3">
+    <div class="server-card-main-v3"><span class="status-dot"></span><div><b><?= e(host_name()) ?></b><span>сервер работает</span></div></div>
+    <div class="server-card-live-v3" data-live-rail>
+      <div class="live-mini-v3"><div><span>CPU</span><b data-stat="railCpuPercent">—</b></div><div class="live-mini-bar-v3"><i data-stat-bar="railCpu" style="width:0%"></i></div></div>
+      <div class="live-mini-v3"><div><span>RAM</span><b data-stat="railMemPercent">—</b></div><div class="live-mini-bar-v3"><i data-stat-bar="railMem" style="width:0%"></i></div></div>
     </div>
-    <div class="flyout-panels">
+  </div>
+
+  <div class="sidebar-nav-scroll-v3">
     <?php foreach($nav as $key=>$cat): ?>
-      <div class="flyout-panel<?= $key===$activeCat?' active':'' ?>" data-panel="<?= e($key) ?>">
-        <div class="flyout-panel-title" style="--cat-accent:<?= e($cat['accent']) ?>"><i class="fa-solid <?= e($cat['icon']) ?>"></i><?= e($cat['label']) ?></div>
-        <nav class="nav flex-column">
-        <?php foreach($cat['items'] as $id=>$it): ?><?= nav_item($id,$it[0],$it[1],$page) ?><?php endforeach; ?>
+      <section class="nav-group-v3<?= $key===$activeCat?' active':'' ?>" style="--group-accent:<?= e($cat['accent']) ?>">
+        <div class="nav-group-title-v3"><span><i class="fa-solid <?= e($cat['icon']) ?>"></i></span><b><?= e($cat['label']) ?></b></div>
+        <nav class="nav nav-v3 flex-column">
+          <?php foreach($cat['items'] as $id=>$it): ?><?= nav_item($id,$it[0],$it[1],$page) ?><?php endforeach; ?>
         </nav>
-      </div>
+      </section>
     <?php endforeach; ?>
-    </div>
-    <div class="sidebar-footer">
-      <a href="/?page=logout" class="btn-logout"><i class="fa-solid fa-arrow-right-from-bracket"></i>Выйти</a>
-      <div class="sidebar-version">HYPER-HOST <b>version: <?= e(hh_app_version()) ?></b></div>
-    </div>
+  </div>
+
+  <div class="sidebar-footer-v3">
+    <div class="version-pill-v3"><span>HYPER-HOST</span><b><?= e(hh_app_version()) ?></b></div>
+    <a href="/?page=logout" class="logout-v3"><i class="fa-solid fa-arrow-right-from-bracket"></i><span>Выйти</span></a>
   </div>
 </aside>
-<main class="content" style="--cat-accent:<?= e($nav[$activeCat]['accent']??'#4f7dff') ?>"><header class="topbar"><button type="button" class="mobile-nav-toggle" id="mobileNavToggle" aria-label="Меню" aria-expanded="false"><i class="fa-solid fa-bars"></i></button><div><div class="topbar-kicker"><i class="fa-solid <?= e($nav[$activeCat]['icon']??'fa-rocket') ?>"></i><?= e($nav[$activeCat]['label']??'') ?></div><h1><?= e($title) ?></h1><div class="small muted">Сервер: <code><?= e(host_name()) ?></code></div></div><form method="post" data-async-submit><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft" data-loading-text="Синхронизирую..."><i class="fa-solid fa-rotate me-2"></i>Обновить</button></form></header><?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info me-2"></i><?= nl2br(e($flash['message'])) ?></div><?php endif; ?><?php route_view($page); ?></main></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script><script src="/assets/app.js?v=76" defer></script></body></html><?php
+
+<main class="content" style="--cat-accent:<?= e($nav[$activeCat]['accent']??'#4f7dff') ?>">
+  <header class="topbar topbar-v3">
+    <button type="button" class="mobile-nav-toggle" id="mobileNavToggle" aria-label="Открыть меню" aria-expanded="false"><i class="fa-solid fa-bars"></i></button>
+    <div class="topbar-title-v3">
+      <div class="topbar-kicker"><i class="fa-solid <?= e($nav[$activeCat]['icon']??'fa-rocket') ?>"></i><?= e($nav[$activeCat]['label']??'') ?></div>
+      <h1><?= e($title) ?></h1>
+      <div class="topbar-host-v3"><span class="status-dot"></span><span>Сервер</span><code><?= e(host_name()) ?></code></div>
+    </div>
+    <form method="post" data-async-submit class="topbar-refresh-v3"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft" data-loading-text="Синхронизирую..."><i class="fa-solid fa-rotate"></i><span>Обновить</span></button></form>
+  </header>
+  <?php if($flash): ?><div class="alert alert-<?= e($flash['type']) ?> shadow-sm"><i class="fa-solid fa-circle-info"></i><span><?= nl2br(e($flash['message'])) ?></span></div><?php endif; ?>
+  <section class="page-stage-v3"><?php route_view($page); ?></section>
+</main></div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script>
+<script src="/assets/app.js?v=77" defer></script></body></html><?php
 }
 function route_view(string $page): void { match($page){ 'files'=>view_files(), 'sites'=>view_sites(), 'ftp'=>view_ftp(), 'databases'=>view_databases(), 'pma_login'=>view_pma_login(), 'bots'=>view_bots(), 'deploy_center'=>view_deploy_center(), 'bot_logs'=>view_bot_logs(), 'deploy_logs'=>view_deploy_logs(), 'backups'=>view_backups(), 'dns'=>view_dns(), 'network'=>view_network(), 'ssl'=>view_ssl(), 'php'=>view_php(), 'cron'=>view_cron(), 'logs'=>view_logs(), 'security'=>view_security(), 'settings'=>view_settings(), 'access'=>view_access(), 'disk'=>view_disk(), default=>view_dashboard(), }; }
 function stat_card(string $icon,string $label,string $value,string $sub=''): void { ?><div class="stat-card"><div class="stat-icon"><i class="fa-solid <?= e($icon) ?>"></i></div><div><span><?= e($label) ?></span><b><?= e($value) ?></b><?php if($sub): ?><em><?= e($sub) ?></em><?php endif; ?></div></div><?php }
@@ -1385,19 +1463,24 @@ function view_ssl(): void {
       elseif($points){ $badge='info'; $label='DNS OK'; }
       else { $badge='warning'; $label='Нужна настройка'; }
       ob_start(); ?>
-      <div class="modal fade hh-modal" id="ssl<?= (int)$s['id'] ?>" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered modal-lg"><div class="modal-content"><form method="post">
+      <div class="modal fade ssl-modal" id="ssl<?= (int)$s['id'] ?>" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+        <div class="modal-dialog modal-dialog-centered modal-lg"><div class="modal-content"><form method="post" data-ssl-submit data-domain="<?= e($s['domain']) ?>">
           <?= csrf_field() ?><input type="hidden" name="action" value="ssl_site"><input type="hidden" name="id" value="<?= (int)$s['id'] ?>">
-          <div class="modal-header"><div><div class="eyebrow mb-1"><i class="fa-solid fa-certificate"></i> SSL выпуск</div><h5 class="modal-title mb-0"><?= e($s['domain']) ?></h5></div><button class="btn-close" data-bs-dismiss="modal" type="button"></button></div>
+          <div class="modal-header"><div><div class="eyebrow mb-1"><i class="fa-solid fa-certificate"></i> SSL выпуск</div><h5 class="modal-title mb-0"><?= e($s['domain']) ?></h5></div><button class="btn-close" data-bs-dismiss="modal" type="button" aria-label="Закрыть"></button></div>
           <div class="modal-body">
             <div class="ssl-ready-box <?= $ready ? 'ok' : 'warn' ?>">
               <i class="fa-solid <?= $ready ? 'fa-circle-check' : 'fa-triangle-exclamation' ?>"></i>
               <div><b><?= $ready ? 'Проверка пройдена' : 'Перед выпуском есть предупреждение' ?></b><span><?= $ready ? 'DNS и ACME challenge готовы. Можно выпускать сертификат.' : e((string)($dns['problem'] ?? 'Проверь DNS/ACME и попробуй ещё раз.')) ?></span></div>
             </div>
             <label class="form-label mt-3">Email для Let’s Encrypt</label>
-            <input class="form-control form-control-lg" name="email" type="email" placeholder="email@example.com" required>
+            <input class="form-control form-control-lg" name="email" type="email" value="<?= e(setting_get('ssl_email','')) ?>" placeholder="email@example.com" autocomplete="email" required data-ssl-email>
+            <div class="ssl-job-panel" data-ssl-job-panel hidden>
+              <div class="ssl-job-head"><span class="ssl-job-icon"><i class="fa-solid fa-rotate fa-spin"></i></span><div><b data-ssl-job-title>Запускаю выпуск SSL</b><span data-ssl-job-message>Задание создаётся на сервере…</span></div></div>
+              <div class="ssl-job-progress"><i data-ssl-job-progress></i></div>
+              <pre class="ssl-job-error" data-ssl-job-error hidden></pre>
+            </div>
           </div>
-          <div class="modal-footer"><button type="button" class="btn btn-soft" data-bs-dismiss="modal">Отмена</button><button class="btn btn-primary btn-lg"><i class="fa-solid fa-bolt me-2"></i>Выпустить SSL</button></div>
+          <div class="modal-footer"><button type="button" class="btn btn-soft" data-bs-dismiss="modal" data-ssl-cancel>Отмена</button><button class="btn btn-primary btn-lg" type="submit" data-ssl-button><i class="fa-solid fa-bolt"></i><span>Выпустить SSL</span></button></div>
         </form></div></div>
       </div>
       <?php $modals[] = ob_get_clean(); ?>

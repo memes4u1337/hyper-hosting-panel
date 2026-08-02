@@ -61,6 +61,7 @@ PM2_HOME_DIR="${PM2_HOME_DIR:-$BOTS_DIR/.pm2}"
 DEPLOY_CENTER_DIR="${DEPLOY_CENTER_DIR:-/opt/hyper-host/deploy-center}"
 DEPLOY_CENTER_PY="${DEPLOY_CENTER_PY:-$DEPLOY_CENTER_DIR/deploy_center.py}"
 SSL_TRUTH_PY="${SSL_TRUTH_PY:-/opt/hyper-host/ssl-truth.py}"
+SSL_JOB_ROOT="${SSL_JOB_ROOT:-$BASE_DIR/runtime/ssl-jobs}"
 NODE_MAJOR_MIN="${NODE_MAJOR_MIN:-18}"
 
 log() { echo "[hhctl] $*"; }
@@ -298,13 +299,40 @@ nginx_hard_restart() {
 
 nginx_reload() {
   ensure_nginx_runtime_writable
-  local output=""
+  local output="" masters=0
+
   if [[ -x /usr/local/sbin/hyper-host-nginx-reconcile ]]; then
     if ! output="$(/usr/local/sbin/hyper-host-nginx-reconcile 2>&1)"; then
       printf '%s\n' "$output" >&2
       err "Не удалось пересобрать управляемый Nginx-конфиг"
     fi
   fi
+
+  if ! output="$(nginx -t 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    err "Nginx-конфиг не прошёл проверку"
+  fi
+
+  # v77: обычный выпуск SSL больше не останавливает Nginx. Раньше каждый
+  # nginx_reload делал stop + kill + start, из-за чего веб-запрос панели
+  # обрывался с ERR_EMPTY_RESPONSE, а все сайты кратковременно лежали.
+  if systemctl is-active --quiet nginx; then
+    if systemctl reload nginx >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1; then
+      sleep 0.35
+      masters="$(ps -C nginx -o args= 2>/dev/null | awk '/nginx: master process/{c++} END{print c+0}')"
+      if systemctl is-active --quiet nginx && [[ "${masters:-0}" -le 1 ]]; then
+        return 0
+      fi
+      warn "После graceful reload найдено master-процессов Nginx: ${masters:-unknown}; выполняю аварийное восстановление"
+    else
+      warn "Graceful reload Nginx не удался; выполняю аварийное восстановление"
+    fi
+  else
+    warn "Nginx был не active; запускаю аварийное восстановление"
+  fi
+
+  # Жёсткий restart остаётся только как fallback при реально сломанном сервисе
+  # или нескольких stale master-процессах, а не выполняется при каждом SSL.
   nginx_hard_restart
 }
 
@@ -1494,6 +1522,124 @@ cmd_ssl_site() {
     SERVER_IP="$SERVER_IP" PUBLIC_IP="$expected" python3 "$SSL_TRUTH_PY" restore >/dev/null 2>&1 || true
   fi
   log "SSL готов: $domain; выпущено=$issued; подключено существующих=$restored${skipped_aliases:+; aliases без DNS: $skipped_aliases}${failed_aliases:+; ошибки aliases: $failed_aliases}"
+}
+
+
+ssl_job_valid_id() {
+  [[ "${1:-}" =~ ^ssl-[A-Za-z0-9_.-]{8,120}$ ]]
+}
+
+ssl_job_write() {
+  local job_id="${1:-}" state="${2:-}" domain="${3:-}" message="${4:-}" error_text="${5:-}" file tmp
+  ssl_job_valid_id "$job_id" || return 1
+  mkdir -p "$SSL_JOB_ROOT"
+  chmod 0750 "$SSL_JOB_ROOT" 2>/dev/null || true
+  file="$SSL_JOB_ROOT/$job_id.json"
+  tmp="$file.$$.$RANDOM.tmp"
+  JOB_ID="$job_id" JOB_STATE="$state" JOB_DOMAIN="$domain" JOB_MESSAGE="$message" JOB_ERROR="$error_text" python3 - "$tmp" <<'PYSSLJOB'
+import datetime as dt,json,os,pathlib,sys
+target=pathlib.Path(sys.argv[1])
+payload={
+  "ok": os.environ.get("JOB_STATE") not in {"failed","missing"},
+  "job_id": os.environ.get("JOB_ID",""),
+  "state": os.environ.get("JOB_STATE","unknown"),
+  "domain": os.environ.get("JOB_DOMAIN",""),
+  "message": os.environ.get("JOB_MESSAGE",""),
+  "updated_at": dt.datetime.now().isoformat(timespec="seconds"),
+}
+err=os.environ.get("JOB_ERROR","").strip()
+if err:
+  payload["error"]=err
+  payload["log_tail"]=err
+target.write_text(json.dumps(payload,ensure_ascii=False),encoding="utf-8")
+PYSSLJOB
+  mv -f "$tmp" "$file"
+  chmod 0640 "$file" 2>/dev/null || true
+}
+
+cmd_ssl_site_start_json() {
+  local domain="${1:-}" email="${2:-}" job_id unit safe_domain backend="nohup"
+  [[ -n "$domain" && -n "$email" ]] || err "Domain and email required"
+  valid_domain "$domain" || err "Invalid domain"
+  [[ "$email" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || err "Invalid email"
+  [[ -d "$SITES_DIR/$domain/public_html" ]] || err "Site root not found: $SITES_DIR/$domain/public_html"
+
+  mkdir -p "$SSL_JOB_ROOT"
+  find "$SSL_JOB_ROOT" -maxdepth 1 -type f \( -name 'ssl-*.json' -o -name 'ssl-*.log' \) -mtime +7 -delete 2>/dev/null || true
+
+  job_id="ssl-$(date +%Y%m%d%H%M%S)-$(openssl rand -hex 4)"
+  safe_domain="$(printf '%s' "$domain" | tr '.-' '__' | tr -cd 'A-Za-z0-9_')"
+  unit="hyper-host-ssl-${safe_domain:0:32}-$(date +%s)-$RANDOM"
+
+  ssl_job_write "$job_id" "queued" "$domain" "Задание создано. Запуск через несколько секунд." ""
+
+  # Отложенный старт гарантирует, что AJAX-ответ успеет вернуться в браузер до
+  # любого reload/recovery Nginx. Само задание не зависит от PHP-FPM и сессии.
+  if command -v systemd-run >/dev/null 2>&1; then
+    if systemd-run --quiet --collect --unit="$unit" --on-active=3s \
+        "$0" ssl-site-worker "$domain" "$email" "$job_id" >/dev/null 2>&1; then
+      backend="systemd"
+    else
+      ( sleep 3; exec "$0" ssl-site-worker "$domain" "$email" "$job_id" ) >/dev/null 2>&1 </dev/null &
+    fi
+  else
+    ( sleep 3; exec "$0" ssl-site-worker "$domain" "$email" "$job_id" ) >/dev/null 2>&1 </dev/null &
+  fi
+
+  JOB_ID="$job_id" DOMAIN="$domain" BACKEND="$backend" python3 - <<'PYSSLSTART'
+import json,os
+print(json.dumps({
+  "ok": True,
+  "job_id": os.environ["JOB_ID"],
+  "domain": os.environ["DOMAIN"],
+  "state": "queued",
+  "backend": os.environ.get("BACKEND",""),
+  "message": "SSL-задание запущено в фоне. Панель останется доступной."
+},ensure_ascii=False))
+PYSSLSTART
+}
+
+cmd_ssl_site_worker() {
+  local domain="${1:-}" email="${2:-}" job_id="${3:-}" log_file code error_text
+  [[ -n "$domain" && -n "$email" && -n "$job_id" ]] || exit 2
+  valid_domain "$domain" || exit 2
+  ssl_job_valid_id "$job_id" || exit 2
+
+  mkdir -p "$SSL_JOB_ROOT"
+  log_file="$SSL_JOB_ROOT/$job_id.log"
+  ssl_job_write "$job_id" "running" "$domain" "Проверяю DNS, ACME и конфигурацию Nginx." ""
+
+  set +e
+  (
+    flock -w 1800 9 || { echo "Другое SSL-задание не освободило блокировку за 30 минут"; exit 75; }
+    "$0" ssl-site "$domain" "$email"
+  ) 9>"$SSL_JOB_ROOT/issue.lock" >"$log_file" 2>&1
+  code=$?
+  set -e
+
+  if [[ "$code" -eq 0 ]]; then
+    ssl_job_write "$job_id" "success" "$domain" "Сертификат выпущен, подключён и проверен в Nginx." ""
+    exit 0
+  fi
+
+  error_text="$(tail -n 120 "$log_file" 2>/dev/null || true)"
+  [[ -n "$error_text" ]] || error_text="SSL-задание завершилось с кодом $code без текста ошибки"
+  ssl_job_write "$job_id" "failed" "$domain" "Выпуск SSL завершился ошибкой." "$error_text"
+  exit "$code"
+}
+
+cmd_ssl_job_json() {
+  local job_id="${1:-}" file
+  if ! ssl_job_valid_id "$job_id"; then
+    printf '{"ok":false,"state":"failed","message":"Некорректный ID SSL-задания"}\n'
+    return 0
+  fi
+  file="$SSL_JOB_ROOT/$job_id.json"
+  if [[ ! -f "$file" ]]; then
+    printf '{"ok":false,"state":"missing","message":"SSL-задание не найдено или уже очищено"}\n'
+    return 0
+  fi
+  cat "$file"
 }
 
 
@@ -4306,6 +4452,9 @@ case "${1:-}" in
   add-site) shift; cmd_add_site "$@" ;;
   delete-site) shift; cmd_delete_site "$@" ;;
   ssl-site) shift; cmd_ssl_site "$@" ;;
+  ssl-site-start-json) shift; cmd_ssl_site_start_json "$@" ;;
+  ssl-site-worker) shift; cmd_ssl_site_worker "$@" ;;
+  ssl-job-json) shift; cmd_ssl_job_json "$@" ;;
   ssl-fix-site) shift; cmd_ssl_fix_site "$@" ;;
   ssl-ip-selfsigned) shift; cmd_ssl_ip_selfsigned "$@" ;;
   public-ip) shift; cmd_public_ip "$@" ;;

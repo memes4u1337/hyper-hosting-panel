@@ -45,6 +45,7 @@ document.addEventListener('click', function(e){
   function init(){
     const toggle = document.getElementById('mobileNavToggle');
     const backdrop = document.getElementById('mobileNavBackdrop');
+    const closeButton = document.getElementById('mobileNavClose');
     const shell = document.getElementById('appShell');
     if(!toggle || !shell) return;
     function close(){
@@ -61,7 +62,8 @@ document.addEventListener('click', function(e){
       shell.classList.contains('nav-open') ? close() : open();
     });
     if(backdrop) backdrop.addEventListener('click', close);
-    document.querySelectorAll('.flyout-panels .nav-link').forEach(function(link){
+    if(closeButton) closeButton.addEventListener('click', close);
+    document.querySelectorAll('.sidebar .nav-link').forEach(function(link){
       link.addEventListener('click', close);
     });
     window.addEventListener('resize', function(){
@@ -113,6 +115,178 @@ document.addEventListener('click', function(e){
   }
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();
+
+
+// HYPER-HOST v77: SSL запускается в отдельном системном задании.
+// Даже если Nginx понадобится перечитать конфиг, HTTP-запрос панели уже завершён,
+// а интерфейс продолжает опрашивать статус и переживает короткий сетевой разрыв.
+(function(){
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  function setBusy(form, busy){
+    form.querySelectorAll('input,button').forEach(el => {
+      if(el.matches('input[type="hidden"]')) return;
+      el.disabled = busy;
+    });
+    const close = form.closest('.modal')?.querySelector('.btn-close');
+    if(close) close.disabled = busy;
+  }
+
+  function renderState(form, state, message, details=''){
+    const panel = form.querySelector('[data-ssl-job-panel]');
+    const title = form.querySelector('[data-ssl-job-title]');
+    const text = form.querySelector('[data-ssl-job-message]');
+    const icon = form.querySelector('.ssl-job-icon i');
+    const error = form.querySelector('[data-ssl-job-error]');
+    if(!panel) return;
+
+    panel.hidden = false;
+    panel.classList.toggle('success', state === 'success');
+    panel.classList.toggle('failed', state === 'failed');
+
+    if(state === 'queued'){
+      if(title) title.textContent = 'Задание поставлено в очередь';
+      if(icon) icon.className = 'fa-solid fa-clock';
+    }else if(state === 'running'){
+      if(title) title.textContent = 'Выпускаю и подключаю SSL';
+      if(icon) icon.className = 'fa-solid fa-rotate fa-spin';
+    }else if(state === 'success'){
+      if(title) title.textContent = 'SSL успешно выпущен';
+      if(icon) icon.className = 'fa-solid fa-circle-check';
+    }else if(state === 'failed'){
+      if(title) title.textContent = 'Не удалось выпустить SSL';
+      if(icon) icon.className = 'fa-solid fa-triangle-exclamation';
+    }else{
+      if(title) title.textContent = 'Запускаю выпуск SSL';
+      if(icon) icon.className = 'fa-solid fa-rotate fa-spin';
+    }
+    if(text) text.textContent = message || 'Ожидаю ответ сервера…';
+    if(error){
+      error.hidden = !details;
+      error.textContent = details || '';
+    }
+  }
+
+  async function fetchJsonRetry(url, attempts=4){
+    let lastError = null;
+    for(let i=0;i<attempts;i++){
+      try{
+        const res = await fetch(url + (url.includes('?') ? '&' : '?') + '_=' + Date.now(), {
+          cache:'no-store',
+          credentials:'same-origin',
+          headers:{'Accept':'application/json','X-Requested-With':'fetch'}
+        });
+        const raw = await res.text();
+        let data = {};
+        try{ data = raw ? JSON.parse(raw) : {}; }catch(_){ throw new Error(raw || ('HTTP ' + res.status)); }
+        if(!res.ok && !data.message && !data.error) throw new Error('HTTP ' + res.status);
+        return data;
+      }catch(error){
+        lastError = error;
+        if(i < attempts - 1) await sleep(1100 + i * 650);
+      }
+    }
+    throw lastError || new Error('Нет ответа от сервера');
+  }
+
+  async function pollJob(form, jobId){
+    let networkFails = 0;
+    for(let i=0;i<600;i++){
+      await sleep(i === 0 ? 700 : 1400);
+      try{
+        const data = await fetchJsonRetry('/?api=ssl-job&job=' + encodeURIComponent(jobId), 2);
+        networkFails = 0;
+        const state = String(data.state || 'running');
+        const message = String(data.message || (state === 'queued' ? 'Ожидаю запуска задания…' : 'Проверяю сертификат и конфигурацию Nginx…'));
+        const details = String(data.error || data.log_tail || '');
+        renderState(form, state, message, details);
+
+        if(state === 'success'){
+          sessionStorage.removeItem('hh_ssl_job');
+          showToast('SSL выпущен и подключён');
+          await sleep(1400);
+          window.location.assign('/?page=ssl');
+          return;
+        }
+        if(state === 'failed'){
+          sessionStorage.removeItem('hh_ssl_job');
+          setBusy(form, false);
+          const button = form.querySelector('[data-ssl-button] span');
+          if(button) button.textContent = 'Повторить выпуск';
+          return;
+        }
+      }catch(error){
+        networkFails++;
+        renderState(form, 'running', networkFails < 4
+          ? 'Nginx обновляется, переподключаюсь к панели…'
+          : 'Панель временно не отвечает, задание SSL продолжает работать.', '');
+        if(networkFails > 45){
+          renderState(form, 'failed', 'Не удалось получить статус задания.', String(error?.message || error));
+          setBusy(form, false);
+          return;
+        }
+      }
+    }
+    renderState(form, 'failed', 'Превышено время ожидания SSL.', 'Проверь журнал certbot на сервере.');
+    setBusy(form, false);
+  }
+
+  async function submitSsl(form){
+    const buttonText = form.querySelector('[data-ssl-button] span');
+    const email = form.querySelector('[data-ssl-email]');
+    if(email && !email.reportValidity()) return;
+
+    setBusy(form, true);
+    if(buttonText) buttonText.textContent = 'Запускаю…';
+    renderState(form, 'starting', 'Создаю безопасное фоновое задание…');
+
+    try{
+      const res = await fetch('/?page=ssl', {
+        method:'POST',
+        body:new FormData(form),
+        credentials:'same-origin',
+        cache:'no-store',
+        headers:{'Accept':'application/json','X-Requested-With':'fetch'}
+      });
+      const raw = await res.text();
+      let data = {};
+      try{ data = raw ? JSON.parse(raw) : {}; }catch(_){ throw new Error(raw || ('HTTP ' + res.status)); }
+      if(!res.ok || !data.ok) throw new Error(data.message || data.error || ('HTTP ' + res.status));
+      if(!data.job_id) throw new Error('Сервер не вернул ID SSL-задания');
+
+      sessionStorage.setItem('hh_ssl_job', JSON.stringify({
+        id:data.job_id,
+        domain:data.domain || form.dataset.domain || '',
+        started:Date.now()
+      }));
+      renderState(form, data.state || 'queued', data.message || 'Задание запущено. Можно не закрывать страницу.');
+      if(buttonText) buttonText.textContent = 'SSL выпускается';
+      await pollJob(form, data.job_id);
+    }catch(error){
+      renderState(form, 'failed', 'Не удалось запустить SSL-задание.', String(error?.message || error));
+      setBusy(form, false);
+      if(buttonText) buttonText.textContent = 'Повторить выпуск';
+    }
+  }
+
+  function init(){
+    document.querySelectorAll('form[data-ssl-submit]').forEach(form => {
+      form.addEventListener('submit', event => {
+        event.preventDefault();
+        submitSsl(form);
+      });
+      const email = form.querySelector('[data-ssl-email]');
+      if(email){
+        const saved = localStorage.getItem('hh_ssl_email');
+        if(!email.value && saved) email.value = saved;
+        email.addEventListener('change', () => localStorage.setItem('hh_ssl_email', email.value.trim()));
+      }
+    });
+  }
+
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+})();
+
 
 (function(){
   const fmtBytes = (bytes) => {

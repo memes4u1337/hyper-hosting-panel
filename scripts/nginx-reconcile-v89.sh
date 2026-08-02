@@ -54,10 +54,26 @@ if ! TEST_OUTPUT="$(nginx -t 2>&1)"; then
   exit 1
 fi
 
-# Do not trust a soft reload here. A stale nginx master previously kept the
-# omnistockcrm.tech certificate as the TLS fallback for every SNI domain even
-# though nginx -T already showed the new files. Restart the single systemd
-# instance so the tested configuration is certainly active.
+# v77: штатная пересборка конфигурации применяет graceful reload. Раньше этот
+# reconcile всегда делал stop/kill/start, поэтому любой выпуск SSL на несколько
+# секунд ронял панель и все сайты. Жёсткое восстановление оставлено только как
+# аварийный fallback при реально зависшем/дублированном master-процессе.
+graceful_ok=0
+if systemctl is-active --quiet nginx; then
+  if systemctl reload nginx >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1; then
+    sleep 0.5
+    masters="$(ps -C nginx -o args= 2>/dev/null | awk '/nginx: master process/{c++} END{print c+0}')"
+    if systemctl is-active --quiet nginx        && [[ "${masters:-0}" -eq 1 ]]        && ss -ltnp 'sport = :443' 2>/dev/null | grep -q nginx; then
+      graceful_ok=1
+    fi
+  fi
+fi
+
+if [[ "$graceful_ok" -eq 1 ]]; then
+  exit 0
+fi
+
+echo '[HYPER-HOST WARNING] Graceful reload не подтвердился; запускаю аварийное восстановление Nginx' >&2
 systemctl stop nginx >/dev/null 2>&1 || true
 pkill -TERM -x nginx >/dev/null 2>&1 || true
 for _ in $(seq 1 30); do
