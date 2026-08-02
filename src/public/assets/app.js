@@ -76,6 +76,33 @@ document.addEventListener('click', function(e){
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();
 
+// HYPER-HOST v79: новое компактное боковое меню без вертикальной прокрутки.
+(function(){
+  function init(){
+    const buttons = Array.from(document.querySelectorAll('[data-sidebar-category]'));
+    const panels = Array.from(document.querySelectorAll('[data-sidebar-panel]'));
+    if(!buttons.length || !panels.length) return;
+
+    function activate(category){
+      buttons.forEach(button => {
+        const active = button.dataset.sidebarCategory === category;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+      panels.forEach(panel => {
+        const active = panel.dataset.sidebarPanel === category;
+        panel.classList.toggle('active', active);
+        panel.hidden = !active;
+      });
+    }
+
+    buttons.forEach(button => button.addEventListener('click', () => {
+      activate(String(button.dataset.sidebarCategory || 'main'));
+    }));
+  }
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+})();
+
 // HYPER-HOST v31: icon-rail sidebar — sliding indicator + animated flyout switch.
 (function(){
   function init(){
@@ -231,10 +258,34 @@ document.addEventListener('click', function(e){
     setBusy(form, false);
   }
 
+  function normalizeSslEmail(value){
+    return String(value || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+  }
+
+  function updateSslCommands(form){
+    const domain = String(form.dataset.domain || '').trim();
+    const emailInput = form.querySelector('[data-ssl-email]');
+    const email = normalizeSslEmail(emailInput?.value || '') || 'email@example.com';
+    form.querySelectorAll('[data-ssl-command-template]').forEach(button => {
+      const template = String(button.dataset.sslCommandTemplate || '');
+      const command = template.replaceAll('{domain}', domain).replaceAll('{email}', email);
+      button.dataset.copy = command;
+      const code = button.querySelector('code');
+      if(code) code.textContent = command;
+    });
+  }
+
   async function submitSsl(form){
     const buttonText = form.querySelector('[data-ssl-button] span');
     const email = form.querySelector('[data-ssl-email]');
+    if(email) email.value = normalizeSslEmail(email.value);
     if(email && !email.reportValidity()) return;
+
+    // ВАЖНО: FormData создаётся до блокировки полей. Disabled-поля браузер
+    // не добавляет в FormData — именно из-за этого корректный email раньше
+    // исчезал из POST и сервер отвечал «Укажи нормальный email».
+    const payload = new FormData(form);
+    if(email) localStorage.setItem('hh_ssl_email', email.value);
 
     setBusy(form, true);
     if(buttonText) buttonText.textContent = 'Запускаю…';
@@ -243,7 +294,7 @@ document.addEventListener('click', function(e){
     try{
       const res = await fetch('/?page=ssl', {
         method:'POST',
-        body:new FormData(form),
+        body:payload,
         credentials:'same-origin',
         cache:'no-store',
         headers:{'Accept':'application/json','X-Requested-With':'fetch'}
@@ -278,8 +329,19 @@ document.addEventListener('click', function(e){
       const email = form.querySelector('[data-ssl-email]');
       if(email){
         const saved = localStorage.getItem('hh_ssl_email');
-        if(!email.value && saved) email.value = saved;
-        email.addEventListener('change', () => localStorage.setItem('hh_ssl_email', email.value.trim()));
+        if(!email.value && saved) email.value = normalizeSslEmail(saved);
+        email.value = normalizeSslEmail(email.value);
+        updateSslCommands(form);
+        email.addEventListener('input', () => {
+          updateSslCommands(form);
+        });
+        email.addEventListener('change', () => {
+          email.value = normalizeSslEmail(email.value);
+          localStorage.setItem('hh_ssl_email', email.value);
+          updateSslCommands(form);
+        });
+      }else{
+        updateSslCommands(form);
       }
     });
   }

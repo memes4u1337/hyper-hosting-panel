@@ -152,7 +152,11 @@ function handle_post(string $action): void
             case 'ssl_site': {
                 $id=(int)($_POST['id']??0);
                 $email=trim((string)($_POST['email']??''));
-                if(!filter_var($email,FILTER_VALIDATE_EMAIL)) throw new RuntimeException('Укажи нормальный email');
+                // Убираем невидимые символы, которые браузер/буфер обмена иногда
+                // добавляет к адресу. Обычный корректный email после этого проходит
+                // одинаково и через AJAX, и при обычной отправке формы.
+                $email=preg_replace('/[\x{200B}-\x{200D}\x{FEFF}]/u','',$email) ?? $email;
+                if($email==='' || !filter_var($email,FILTER_VALIDATE_EMAIL)) throw new RuntimeException('Укажи корректный email, например name@example.com');
                 setting_set('ssl_email', $email);
                 $st=db()->prepare('SELECT * FROM sites WHERE id=?'); $st->execute([$id]); $s=$st->fetch();
                 if(!$s) throw new RuntimeException('Сайт не найден');
@@ -525,7 +529,7 @@ function fm_delete(): void
 function rrmdir(string $path): void { if(is_dir($path)&&!is_link($path)){ foreach(scandir($path)?:[] as $i){ if($i==='.'||$i==='..') continue; rrmdir($path.'/'.$i);} if(!@rmdir($path)){ run_ctl(['repair'],180); @rmdir($path); } } else { if(!@unlink($path)){ run_ctl(['repair'],180); @unlink($path); } } }
 
 
-function hh_app_version(): string { return '1.7-v77'; }
+function hh_app_version(): string { return '1.7-v79'; }
 
 function hh_nav_config(): array
 {
@@ -552,7 +556,7 @@ function nav_item(string $id,string $icon,string $label,string $page): string
 function render_login(): void
 {
     $flash=flash(); $need2fa=setting_get('security_2fa_enabled','0')==='1'; ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=77" rel="stylesheet"></head><body class="login-body">
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=79" rel="stylesheet"></head><body class="login-body">
 <div class="login-orb login-orb-a"></div><div class="login-orb login-orb-b"></div><div class="login-orb login-orb-c"></div>
 <main class="login-clean">
   <section class="login-card card-glass login-clean-card">
@@ -580,7 +584,7 @@ function render_page(string $page, array $user): void
 <link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
-<link href="/assets/style.css?v=77" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
+<link href="/assets/style.css?v=79" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
 <div class="mobile-nav-backdrop" id="mobileNavBackdrop"></div>
 <aside class="sidebar sidebar-v3" id="mainSidebar">
   <div class="sidebar-brand-v3">
@@ -599,10 +603,18 @@ function render_page(string $page, array $user): void
     </div>
   </div>
 
-  <div class="sidebar-nav-scroll-v3">
+  <div class="sidebar-category-switch-v79" role="tablist" aria-label="Разделы панели">
     <?php foreach($nav as $key=>$cat): ?>
-      <section class="nav-group-v3<?= $key===$activeCat?' active':'' ?>" style="--group-accent:<?= e($cat['accent']) ?>">
-        <div class="nav-group-title-v3"><span><i class="fa-solid <?= e($cat['icon']) ?>"></i></span><b><?= e($cat['label']) ?></b></div>
+      <button type="button" class="sidebar-category-v79<?= $key===$activeCat?' active':'' ?>" data-sidebar-category="<?= e($key) ?>" style="--group-accent:<?= e($cat['accent']) ?>" role="tab" aria-selected="<?= $key===$activeCat?'true':'false' ?>">
+        <span><i class="fa-solid <?= e($cat['icon']) ?>"></i></span><b><?= e($cat['label']) ?></b>
+      </button>
+    <?php endforeach; ?>
+  </div>
+
+  <div class="sidebar-nav-stage-v79">
+    <?php foreach($nav as $key=>$cat): ?>
+      <section class="nav-panel-v79<?= $key===$activeCat?' active':'' ?>" data-sidebar-panel="<?= e($key) ?>" style="--group-accent:<?= e($cat['accent']) ?>" role="tabpanel"<?= $key===$activeCat?'':' hidden' ?>>
+        <div class="nav-panel-head-v79"><span><i class="fa-solid <?= e($cat['icon']) ?>"></i></span><div><small>Раздел</small><b><?= e($cat['label']) ?></b></div></div>
         <nav class="nav nav-v3 flex-column">
           <?php foreach($cat['items'] as $id=>$it): ?><?= nav_item($id,$it[0],$it[1],$page) ?><?php endforeach; ?>
         </nav>
@@ -630,7 +642,7 @@ function render_page(string $page, array $user): void
   <section class="page-stage-v3"><?php route_view($page); ?></section>
 </main></div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script>
-<script src="/assets/app.js?v=77" defer></script></body></html><?php
+<script src="/assets/app.js?v=79" defer></script></body></html><?php
 }
 function route_view(string $page): void { match($page){ 'files'=>view_files(), 'sites'=>view_sites(), 'ftp'=>view_ftp(), 'databases'=>view_databases(), 'pma_login'=>view_pma_login(), 'bots'=>view_bots(), 'deploy_center'=>view_deploy_center(), 'bot_logs'=>view_bot_logs(), 'deploy_logs'=>view_deploy_logs(), 'backups'=>view_backups(), 'dns'=>view_dns(), 'network'=>view_network(), 'ssl'=>view_ssl(), 'php'=>view_php(), 'cron'=>view_cron(), 'logs'=>view_logs(), 'security'=>view_security(), 'settings'=>view_settings(), 'access'=>view_access(), 'disk'=>view_disk(), default=>view_dashboard(), }; }
 function stat_card(string $icon,string $label,string $value,string $sub=''): void { ?><div class="stat-card"><div class="stat-icon"><i class="fa-solid <?= e($icon) ?>"></i></div><div><span><?= e($label) ?></span><b><?= e($value) ?></b><?php if($sub): ?><em><?= e($sub) ?></em><?php endif; ?></div></div><?php }
@@ -1430,6 +1442,7 @@ function view_ssl(): void {
     $sites=db()->query('SELECT * FROM sites ORDER BY domain')->fetchAll();
     $audit=run_ctl_json_cached(['ssl-audit-json'],20,60); $map=[]; if(!empty($audit['ok'])) foreach(($audit['sites']??[]) as $c) $map[$c['domain']]=$c;
     $savedPublicIp = setting_get('public_ip_override', (string)app_config('public_ip',''));
+    $savedSslEmail = setting_get('ssl_email','');
     $modals = [];
 ?>
 <div class="ssl-hero mb-4">
@@ -1473,7 +1486,16 @@ function view_ssl(): void {
               <div><b><?= $ready ? 'Проверка пройдена' : 'Перед выпуском есть предупреждение' ?></b><span><?= $ready ? 'DNS и ACME challenge готовы. Можно выпускать сертификат.' : e((string)($dns['problem'] ?? 'Проверь DNS/ACME и попробуй ещё раз.')) ?></span></div>
             </div>
             <label class="form-label mt-3">Email для Let’s Encrypt</label>
-            <input class="form-control form-control-lg" name="email" type="email" value="<?= e(setting_get('ssl_email','')) ?>" placeholder="email@example.com" autocomplete="email" required data-ssl-email>
+            <input class="form-control form-control-lg" name="email" type="email" value="<?= e($savedSslEmail) ?>" placeholder="email@example.com" autocomplete="email" spellcheck="false" required data-ssl-email>
+            <div class="ssl-cli-v79" data-ssl-cli-box>
+              <div class="ssl-cli-head-v79"><div><i class="fa-solid fa-terminal"></i><b>Команды для выпуска через SSH</b></div><span>Нажми на команду — она скопируется</span></div>
+              <div class="ssl-cli-grid-v79">
+                <button type="button" class="cmd-copy ssl-cli-command-v79" data-ssl-command-template="sudo hyper ssl check {domain}"><i class="fa-solid fa-stethoscope"></i><code></code></button>
+                <button type="button" class="cmd-copy ssl-cli-command-v79" data-ssl-command-template="sudo hyper ssl fix {domain}"><i class="fa-solid fa-wand-magic-sparkles"></i><code></code></button>
+                <button type="button" class="cmd-copy ssl-cli-command-v79 primary" data-ssl-command-template="sudo hyper ssl issue {domain} {email}"><i class="fa-solid fa-certificate"></i><code></code></button>
+                <button type="button" class="cmd-copy ssl-cli-command-v79" data-ssl-command-template="sudo certbot --config-dir /opt/hyper-host/letsencrypt --work-dir /opt/hyper-host/certbot-work --logs-dir /opt/hyper-host/certbot-logs certonly --webroot -w /opt/hyper-host/acme-webroot --non-interactive --agree-tos --email {email} --no-eff-email --preferred-challenges http-01 --cert-name {domain} -d {domain} && sudo /usr/local/sbin/hyper-host-nginx-reconcile && sudo nginx -t && sudo systemctl reload nginx"><i class="fa-solid fa-screwdriver-wrench"></i><code></code></button>
+              </div>
+            </div>
             <div class="ssl-job-panel" data-ssl-job-panel hidden>
               <div class="ssl-job-head"><span class="ssl-job-icon"><i class="fa-solid fa-rotate fa-spin"></i></span><div><b data-ssl-job-title>Запускаю выпуск SSL</b><span data-ssl-job-message>Задание создаётся на сервере…</span></div></div>
               <div class="ssl-job-progress"><i data-ssl-job-progress></i></div>
