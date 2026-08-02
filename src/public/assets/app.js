@@ -150,13 +150,25 @@ document.addEventListener('click', function(e){
   const botsRef = {current:null};
 
   async function updateDashboard(){
-    if(!q('[data-live-stats]')) return;
+    // Живой опрос работает на ВСЕХ страницах: даже если дашборда нет,
+    // мини-виджет CPU/RAM в меню (data-live-rail) обновляется в реальном времени.
+    const hasDash = !!q('[data-live-stats]');
+    const hasRail = !!q('[data-live-rail]');
+    if(!hasDash && !hasRail) return true;
     try{
       const d = await fetchJson('/?api=stats', statsRef);
-      if(d._error) return;
+      if(d._error) return false;
       const memP = Number(d.mem_percent ?? pct(d.mem_used,d.mem_total));
       const diskP = Number(d.disk_percent ?? pct(d.disk_used,d.disk_total));
       const cpuP = Number(d.cpu_percent || 0);
+      // мини-виджет в меню — real-time RAM/CPU везде
+      if(hasRail){
+        setText('railCpuPercent', Math.round(cpuP) + '%');
+        setText('railMemPercent', Math.round(memP) + '%');
+        setBar('railCpu', cpuP);
+        setBar('railMem', memP);
+      }
+      if(!hasDash) return true;
       setText('cpuPercent', cpuP.toFixed(1).replace('.0','') + '%');
       setText('cpuModel', d.cpu_model || 'unknown');
       setText('cpuCores', String(d.cpu_cores || 0));
@@ -264,8 +276,8 @@ document.addEventListener('click', function(e){
 
   function startLive(){
     initFtpScopeSelect();
-    scheduler(updateDashboard, 4000, () => !!q('[data-live-stats]'));
-    scheduler(updateBots, 4000, () => !!q('[data-live-bots]'));
+    scheduler(updateDashboard, 2500, () => !!q('[data-live-stats]') || !!q('[data-live-rail]'));
+    scheduler(updateBots, 3000, () => !!q('[data-live-bots]'));
   }
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startLive); else startLive();
 })();
