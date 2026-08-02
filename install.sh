@@ -72,6 +72,26 @@ fi
 
 show_install_banner
 
+# v78: install.sh предназначен для первой установки. Если панель уже стоит,
+# повторный запуск не должен снова трогать apt/dpkg, FTP, PHP и системные службы.
+# Для принудительной полной переустановки нужно явно передать
+# HYPER_HOST_FORCE_FULL_INSTALL=1.
+if [[ "${HYPER_HOST_FORCE_FULL_INSTALL:-0}" != "1"    && -f "$CONF_DIR/hyper-host.conf"    && -f "$PANEL_DIR/public/index.php" ]]; then
+  log "Обнаружена установленная HYPER-HOST — полный install.sh не запускаю"
+  UPDATE_PATCH=""
+  for candidate in     "$PROJECT_DIR/apply-v77-final-ui-ssl-safe.sh"     "$PROJECT_DIR/hyper-hosting-panel-v77-patch-only/apply-v77-final-ui-ssl-safe.sh"; do
+    if [[ -f "$candidate" ]]; then
+      UPDATE_PATCH="$candidate"
+      break
+    fi
+  done
+  if [[ -n "$UPDATE_PATCH" ]]; then
+    log "Запускаю безопасный файловый патч без apt/dpkg: $UPDATE_PATCH"
+    exec bash "$UPDATE_PATCH"
+  fi
+  fail "Файл безопасного обновления не найден. Не запускай полный install.sh. Используй apply-v78-dpkg-systemd-recovery.sh или актуальный apply-патч."
+fi
+
 # v49: раньше при занятой dpkg-блокировке (unattended-upgrades или другой apt-get,
 # который ещё не закончился) установка сразу падала с "Не удалось получить блокировку
 # файла /var/lib/dpkg/lock-frontend" и всё останавливалось. Теперь ждём освобождения
