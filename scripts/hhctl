@@ -4443,6 +4443,673 @@ cmd_ssl_repair_all() {
   SERVER_IP="$SERVER_IP" PUBLIC_IP="$(public_ip 2>/dev/null || true)" python3 "$SSL_TRUTH_PY" repair-all --email "$email"
 }
 
+# ============================================================================
+# HYPER-HOST v92 · powered by memes4u1337
+#   1) bots-usage-json     — реальная нагрузка ботов относительно ресурсов сервера
+#   2) ssl-bundle          — один сертификат на домен + www + поддомены
+#   3) ssl-host-check-json — честная диагностика SSL для любого хоста
+#   4) site-aliases-set    — привязка www/поддомена к существующему сайту
+# ============================================================================
+
+HH_V92_BOT_DISK_CACHE="${HH_V92_BOT_DISK_CACHE:-$BASE_DIR/runtime/bot-disk-cache.json}"
+
+cmd_bots_usage_json() {
+  # Панель опрашивает это каждые 3 секунды, поэтому здесь нет ensure_pm2 и
+  # никакой записи в PM2 dump. Читаем jlist + /proc, размер папок кэшируем.
+  local tmp
+  tmp="$(mktemp /tmp/hyper-host-bots-usage.XXXXXX)"
+  if command -v pm2 >/dev/null 2>&1; then
+    pm2_as_bot jlist >"$tmp" 2>/dev/null || printf '[]' >"$tmp"
+  else
+    printf '[]' >"$tmp"
+  fi
+  [[ -s "$tmp" ]] || printf '[]' >"$tmp"
+  mkdir -p "$(dirname "$HH_V92_BOT_DISK_CACHE")" 2>/dev/null || true
+  HH_PM2_FILE="$tmp" HH_BOTS_DIR="$BOTS_DIR" HH_DISK_CACHE="$HH_V92_BOT_DISK_CACHE" python3 - <<'PYBOTSUSAGE'
+import json, os, time
+
+pm2_file = os.environ.get('HH_PM2_FILE', '')
+bots_dir = os.environ.get('HH_BOTS_DIR', '/var/www/hyper-host-bots')
+cache_file = os.environ.get('HH_DISK_CACHE', '/opt/hyper-host/runtime/bot-disk-cache.json')
+now = time.time()
+
+
+def read_json(path, default):
+    try:
+        with open(path, encoding='utf-8', errors='ignore') as fh:
+            return json.load(fh)
+    except Exception:
+        return default
+
+
+data = read_json(pm2_file, [])
+if not isinstance(data, list):
+    data = []
+
+meminfo = {}
+try:
+    with open('/proc/meminfo', encoding='utf-8') as fh:
+        for line in fh:
+            key, _, rest = line.partition(':')
+            parts = rest.split()
+            if parts:
+                meminfo[key.strip()] = int(parts[0]) * 1024
+except Exception:
+    pass
+
+mem_total = meminfo.get('MemTotal', 0)
+mem_available = meminfo.get('MemAvailable', 0)
+mem_used = max(0, mem_total - mem_available)
+swap_total = meminfo.get('SwapTotal', 0)
+swap_free = meminfo.get('SwapFree', 0)
+cores = os.cpu_count() or 1
+try:
+    load1, load5, load15 = os.getloadavg()
+except Exception:
+    load1 = load5 = load15 = 0.0
+
+try:
+    ticks = os.sysconf('SC_CLK_TCK') or 100
+except Exception:
+    ticks = 100
+
+cache = read_json(cache_file, {})
+if not isinstance(cache, dict):
+    cache = {}
+cache_dirty = False
+
+
+def proc_metrics(pid):
+    out = {'rss': 0, 'threads': 0, 'cpu_seconds': 0.0, 'started_ago': 0}
+    try:
+        pid = int(pid or 0)
+    except Exception:
+        return out
+    if pid <= 0:
+        return out
+    try:
+        with open('/proc/%d/status' % pid, encoding='utf-8', errors='ignore') as fh:
+            for line in fh:
+                if line.startswith('VmRSS:'):
+                    out['rss'] = int(line.split()[1]) * 1024
+                elif line.startswith('Threads:'):
+                    out['threads'] = int(line.split()[1])
+    except Exception:
+        pass
+    try:
+        with open('/proc/%d/stat' % pid, encoding='utf-8', errors='ignore') as fh:
+            fields = fh.read().rsplit(')', 1)[-1].split()
+        # После имени процесса поле state идёт нулевым: utime -> 11, stime -> 12
+        out['cpu_seconds'] = round((int(fields[11]) + int(fields[12])) / ticks, 1)
+    except Exception:
+        pass
+    return out
+
+
+def dir_size(path):
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(path, onerror=lambda err: None):
+            for name in files:
+                try:
+                    total += os.lstat(os.path.join(root, name)).st_size
+                except OSError:
+                    pass
+    except Exception:
+        return 0
+    return total
+
+
+def disk_for(path):
+    global cache_dirty
+    if not path or not os.path.isdir(path):
+        return 0
+    entry = cache.get(path)
+    if isinstance(entry, dict):
+        try:
+            if now - float(entry.get('ts', 0)) < 300:
+                return int(entry.get('bytes', 0))
+        except Exception:
+            pass
+    size = dir_size(path)
+    cache[path] = {'ts': now, 'bytes': size}
+    cache_dirty = True
+    return size
+
+
+def uptime_text(ms):
+    try:
+        sec = max(0, int((now * 1000 - int(ms or 0)) / 1000))
+    except Exception:
+        return '—'
+    days, sec = divmod(sec, 86400)
+    hours, sec = divmod(sec, 3600)
+    minutes, _ = divmod(sec, 60)
+    if days:
+        return '%dд %dч' % (days, hours)
+    if hours:
+        return '%dч %dм' % (hours, minutes)
+    return '%dм' % minutes
+
+
+def share(part, whole):
+    try:
+        if whole and whole > 0:
+            return round(part / whole * 100, 1)
+    except Exception:
+        pass
+    return 0.0
+
+
+watch_files = ('bot.py', 'main.py', 'index.py', 'index.js', 'bot.php', '.env',
+               'requirements.txt', 'package.json', '.hyper-start.sh')
+
+bots = []
+for item in data:
+    env = item.get('pm2_env', {}) or {}
+    monit = item.get('monit', {}) or {}
+    cwd = env.get('pm_cwd', '') or ''
+    name = item.get('name', '') or ''
+    if not cwd and name:
+        candidate = os.path.join(bots_dir, name)
+        if os.path.isdir(candidate):
+            cwd = candidate
+    pid = item.get('pid') or env.get('pid') or 0
+    live = proc_metrics(pid)
+    memory = int(monit.get('memory', 0) or 0)
+    if live['rss'] > 0:
+        memory = live['rss']
+    cpu = float(monit.get('cpu', 0) or 0)
+    status = env.get('status', '') or 'unknown'
+    files = []
+    if cwd and os.path.isdir(cwd):
+        for fname in watch_files:
+            if os.path.exists(os.path.join(cwd, fname)):
+                files.append(fname)
+    restarts = int(env.get('restart_time', 0) or 0)
+    unstable = int(env.get('unstable_restarts', 0) or 0)
+    created = env.get('pm_uptime') or 0
+    interpreter = (env.get('exec_interpreter') or '').strip()
+    limit = env.get('max_memory_restart') or 0
+    try:
+        limit = int(limit)
+    except Exception:
+        limit = 0
+    bots.append({
+        'name': name,
+        'pm_id': env.get('pm_id', item.get('pm_id', '')),
+        'pid': pid,
+        'status': status,
+        'online': status == 'online',
+        'restarts': restarts,
+        'unstable_restarts': unstable,
+        'crash_loop': restarts > 50 and uptime_text(created) in ('0м', '—'),
+        'memory': memory,
+        'memory_mb': round(memory / 1024 / 1024, 1),
+        'memory_percent': share(memory, mem_total),
+        'memory_limit': limit,
+        'memory_limit_percent': share(memory, limit) if limit else 0.0,
+        'cpu': cpu,
+        'cpu_percent': round(cpu, 1),
+        'cpu_of_server': share(cpu, cores * 100),
+        'cpu_seconds': live['cpu_seconds'],
+        'threads': live['threads'],
+        'runtime': interpreter,
+        'cwd': cwd,
+        'files': files,
+        'disk_bytes': disk_for(cwd),
+        'uptime': uptime_text(created),
+        'pm_uptime': created,
+        'updated_at': int(now),
+    })
+
+if cache_dirty:
+    try:
+        tmp_path = cache_file + '.tmp'
+        with open(tmp_path, 'w', encoding='utf-8') as fh:
+            json.dump(cache, fh)
+        os.replace(tmp_path, cache_file)
+    except Exception:
+        pass
+
+total_mem = sum(b['memory'] for b in bots)
+total_cpu = round(sum(b['cpu'] for b in bots), 1)
+total_disk = sum(b['disk_bytes'] for b in bots)
+
+print(json.dumps({
+    'ok': True,
+    'server': {
+        'mem_total': mem_total,
+        'mem_used': mem_used,
+        'mem_available': mem_available,
+        'mem_percent': share(mem_used, mem_total),
+        'swap_total': swap_total,
+        'swap_used': max(0, swap_total - swap_free),
+        'cpu_cores': cores,
+        'load1': round(load1, 2),
+        'load5': round(load5, 2),
+        'load15': round(load15, 2),
+        'updated_at': int(now),
+    },
+    'totals': {
+        'count': len(bots),
+        'online': sum(1 for b in bots if b['online']),
+        'memory': total_mem,
+        'memory_percent': share(total_mem, mem_total),
+        'cpu': total_cpu,
+        'cpu_of_server': share(total_cpu, cores * 100),
+        'disk_bytes': total_disk,
+    },
+    'bots': bots,
+}, ensure_ascii=False))
+PYBOTSUSAGE
+  rm -f "$tmp" 2>/dev/null || true
+}
+
+hh_v92_expected_ip() {
+  local ip
+  ip="$(configured_public_ip)"
+  [[ -n "$ip" ]] || ip="${STATIC_PUBLIC_IP:-90.189.208.25}"
+  printf '%s\n' "$ip"
+}
+
+hh_v92_normalize_host() {
+  printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | sed 's/[[:space:]]//g; s/\.$//'
+}
+
+# Строгая готовность: A == ожидаемый IP, лишних A нет, AAAA нет.
+hh_v92_dns_strict() {
+  local host="$1" expected="$2" arec aaaarec extra
+  arec="$(resolve_domain_a_public "$host")"
+  aaaarec="$(resolve_domain_aaaa_public "$host")"
+  printf '%s\n' "$arec" | grep -qxF "$expected" || return 1
+  extra="$(printf '%s\n' "$arec" | grep -vxF "$expected" || true)"
+  [[ -z "$extra" && -z "$aaaarec" ]]
+}
+
+# Пригодность: наш IP среди A-записей, AAAA нет. Лишние A допускаем и пробуем.
+hh_v92_dns_usable() {
+  local host="$1" expected="$2" arec aaaarec
+  aaaarec="$(resolve_domain_aaaa_public "$host")"
+  [[ -z "$aaaarec" ]] || return 1
+  arec="$(resolve_domain_a_public "$host")"
+  printf '%s\n' "$arec" | grep -qxF "$expected"
+}
+
+# Ищем сайт-владельца для произвольного хоста: точное совпадение либо самый
+# длинный суффикс. www.pixel-pc.store -> pixel-pc.store.
+hh_v92_parent_site() {
+  local host entry candidate best=""
+  host="$(hh_v92_normalize_host "${1:-}")"
+  [[ -n "$host" ]] || return 1
+  if [[ -d "$SITES_DIR/$host/public_html" ]]; then
+    printf '%s\n' "$host"
+    return 0
+  fi
+  for entry in "$SITES_DIR"/*/; do
+    [[ -d "$entry" ]] || continue
+    candidate="$(basename "$entry")"
+    [[ -d "$SITES_DIR/$candidate/public_html" ]] || continue
+    valid_domain "$candidate" || continue
+    if [[ "$host" == *".$candidate" ]]; then
+      [[ ${#candidate} -gt ${#best} ]] && best="$candidate"
+    fi
+  done
+  [[ -n "$best" ]] || return 1
+  printf '%s\n' "$best"
+}
+
+cmd_ssl_host_check_json() {
+  local host parent root expected arec aaaarec dns_state acme_ok cert_path cert_ok in_names problem fix
+  host="$(hh_v92_normalize_host "${1:-}")"
+  [[ -n "$host" ]] || err "Host required"
+  valid_domain "$host" || err "Некорректный домен: $host"
+
+  expected="$(hh_v92_expected_ip)"
+  arec="$(resolve_domain_a_public "$host")"
+  aaaarec="$(resolve_domain_aaaa_public "$host")"
+  parent="$(hh_v92_parent_site "$host" 2>/dev/null || true)"
+  root=""
+  [[ -n "$parent" ]] && root="$(site_root_for_domain "$parent")"
+
+  if [[ -n "$aaaarec" ]]; then dns_state="aaaa"
+  elif [[ -z "$arec" ]]; then dns_state="missing"
+  elif ! printf '%s\n' "$arec" | grep -qxF "$expected"; then dns_state="wrong_ip"
+  elif [[ -n "$(printf '%s\n' "$arec" | grep -vxF "$expected" || true)" ]]; then dns_state="extra_a"
+  else dns_state="ok"; fi
+
+  acme_ok=0
+  if [[ -n "$root" && -d "$root" ]] && local_http_challenge_check "$host" "$root"; then acme_ok=1; fi
+
+  cert_path="$(find_valid_certificate_for_domain "$host" 2>/dev/null || true)"
+  cert_ok=0
+  [[ -n "$cert_path" ]] && cert_ok=1
+
+  in_names=0
+  if [[ -n "$parent" ]] && site_names_for_ssl "$parent" 2>/dev/null | grep -qxF "$host"; then in_names=1; fi
+
+  problem=""; fix=""
+  if [[ -z "$parent" ]]; then
+    problem="Для $host нет сайта в панели."
+    fix="Создай сайт с базовым доменом (например ${host#www.}) на вкладке «Сайты», потом вернись сюда."
+  elif [[ "$dns_state" == "missing" ]]; then
+    problem="У $host нет публичной A-записи."
+    fix="Добавь у регистратора: A    $host    $expected"
+  elif [[ "$dns_state" == "wrong_ip" ]]; then
+    problem="$host смотрит не на этот сервер: ${arec//$'\n'/, }"
+    fix="Замени A-запись на $expected и подожди обновления DNS."
+  elif [[ "$dns_state" == "aaaa" ]]; then
+    problem="У $host есть AAAA-запись (${aaaarec//$'\n'/, }), а публичного IPv6 у сервера нет."
+    fix="Удали AAAA-запись — Let's Encrypt всегда предпочитает IPv6 и попадёт в пустоту."
+  elif [[ "$dns_state" == "extra_a" ]]; then
+    problem="У $host несколько A-записей: ${arec//$'\n'/, }"
+    fix="Оставь только $expected. Выпуск попробуем всё равно, но проверка может уйти на чужой сервер."
+  elif [[ "$in_names" != 1 ]]; then
+    problem="$host не привязан к сайту $parent."
+    fix="Панель привяжет его автоматически при выпуске SSL."
+  elif [[ "$acme_ok" != 1 ]]; then
+    problem="Nginx не отдаёт /.well-known/acme-challenge для $host."
+    fix="Нажми «Выпустить SSL» — панель сама пересоберёт vhost, либо выполни: sudo hyper-host-ctl ssl-fix-site $parent"
+  fi
+
+  HOST="$host" PARENT="$parent" ROOT="$root" EXPECTED="$expected" A_REC="$arec" AAAA_REC="$aaaarec" \
+  DNS_STATE="$dns_state" ACME_OK="$acme_ok" CERT_OK="$cert_ok" CERT_PATH="$cert_path" IN_NAMES="$in_names" \
+  PROBLEM="$problem" FIXHINT="$fix" python3 - <<'PYSSLHOST'
+import json, os
+split = lambda value: [x for x in value.splitlines() if x.strip()]
+state = os.environ.get('DNS_STATE', '')
+ready = state in ('ok', 'extra_a') and os.environ.get('ACME_OK') == '1'
+print(json.dumps({
+    'ok': True,
+    'host': os.environ.get('HOST', ''),
+    'site': os.environ.get('PARENT', ''),
+    'root': os.environ.get('ROOT', ''),
+    'expected_ip': os.environ.get('EXPECTED', ''),
+    'a': split(os.environ.get('A_REC', '')),
+    'aaaa': split(os.environ.get('AAAA_REC', '')),
+    'dns_state': state,
+    'dns_ok': state == 'ok',
+    'acme_ok': os.environ.get('ACME_OK') == '1',
+    'attached': os.environ.get('IN_NAMES') == '1',
+    'cert_ok': os.environ.get('CERT_OK') == '1',
+    'cert_path': os.environ.get('CERT_PATH', ''),
+    'can_issue': bool(ready and os.environ.get('PARENT')),
+    'problem': os.environ.get('PROBLEM', ''),
+    'fix': os.environ.get('FIXHINT', ''),
+}, ensure_ascii=False))
+PYSSLHOST
+}
+
+hh_v92_certbot_issue() {
+  local domain="$1" email="$2" log_file host
+  shift 2
+  [[ $# -gt 0 ]] || return 2
+  local args=()
+  for host in "$@"; do args+=(-d "$host"); done
+  mkdir -p "$LE_LOGS_DIR" 2>/dev/null || true
+  log_file="$LE_LOGS_DIR/hyper-host-bundle-${domain}-$(date +%F-%H%M%S)-$RANDOM.log"
+  if certbot_run certonly --webroot -w "$ACME_WEBROOT" \
+      --non-interactive --agree-tos --email "$email" --no-eff-email \
+      --keep-until-expiring --expand --preferred-challenges http-01 \
+      --deploy-hook /usr/local/sbin/hyper-host-nginx-reconcile \
+      --cert-name "$domain" "${args[@]}" >"$log_file" 2>&1; then
+    printf '%s\n' "$log_file"
+    return 0
+  fi
+  printf '%s\n' "$log_file"
+  return 1
+}
+
+# ssl-bundle DOMAIN EMAIL [ОБЯЗАТЕЛЬНЫЙ_ХОСТ]
+# Выпускает ОДИН сертификат на сайт: домен + www + все живые алиасы.
+cmd_ssl_bundle() {
+  local domain="${1:-}" email="${2:-}" want="${3:-}" expected root host log_file cert ok=0
+  [[ -n "$domain" && -n "$email" ]] || err "Нужны домен и email"
+  valid_domain "$domain" || err "Некорректный домен: $domain"
+  [[ "$email" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || err "Некорректный email: $email"
+  [[ -d "$SITES_DIR/$domain/public_html" ]] || err "Сайт не найден: $SITES_DIR/$domain/public_html"
+  command -v certbot >/dev/null 2>&1 || err "certbot не установлен"
+  [[ -z "$want" ]] || want="$(hh_v92_normalize_host "$want")"
+
+  cleanup_hyper_host_mounts
+  ensure_dirs
+  ufw allow 80/tcp >/dev/null 2>&1 || true
+  ufw allow 443/tcp >/dev/null 2>&1 || true
+  ensure_certbot_dirs
+  install_certbot_renew_cron || true
+
+  # Сначала честно пересобираем vhost: все алиасы сайта должны реально
+  # отдавать ACME, иначе Let's Encrypt не подтвердит www.
+  if [[ -x /usr/local/sbin/hyper-host-nginx-reconcile ]]; then
+    /usr/local/sbin/hyper-host-nginx-reconcile >/dev/null || err "Nginx reconcile не отработал"
+  fi
+  cmd_ssl_fix_site "$domain"
+
+  expected="$(hh_v92_expected_ip)"
+  root="$(site_root_for_domain "$domain")"
+
+  local all=() usable=() strict=() skipped=()
+  mapfile -t all < <(site_names_for_ssl "$domain")
+  [[ ${#all[@]} -gt 0 ]] || all=("$domain")
+  if [[ -n "$want" ]]; then
+    local found=0 item
+    for item in "${all[@]}"; do [[ "$item" == "$want" ]] && found=1; done
+    [[ "$found" == 1 ]] || all+=("$want")
+  fi
+
+  for host in "${all[@]}"; do
+    valid_domain "$host" || continue
+    if ! local_http_challenge_check "$host" "$root"; then
+      skipped+=("$host (nginx не отдаёт ACME)")
+      warn "$host пропущен: локальный ACME challenge не отвечает"
+      continue
+    fi
+    if hh_v92_dns_strict "$host" "$expected"; then
+      strict+=("$host")
+      usable+=("$host")
+    elif hh_v92_dns_usable "$host" "$expected"; then
+      usable+=("$host")
+      warn "$host: у домена есть лишние A-записи, пробую выпустить всё равно"
+    else
+      skipped+=("$host (DNS не указывает на $expected)")
+      warn "$host пропущен: DNS не указывает на $expected"
+    fi
+  done
+
+  if [[ ${#usable[@]} -eq 0 ]]; then
+    err "Ни одно имя сайта $domain не готово к выпуску. Пропущено: ${skipped[*]:-нет данных}"
+  fi
+  if [[ -n "$want" ]]; then
+    local want_ok=0 item
+    for item in "${usable[@]}"; do [[ "$item" == "$want" ]] && want_ok=1; done
+    if [[ "$want_ok" != 1 ]]; then
+      err "$want не проходит проверку и не попадёт в сертификат. Причина: ${skipped[*]:-неизвестна}. Нужна A-запись $want -> $expected без AAAA."
+    fi
+  fi
+
+  log "Выпускаю один сертификат $domain на имена: ${usable[*]}"
+  if log_file="$(hh_v92_certbot_issue "$domain" "$email" "${usable[@]}")"; then
+    ok=1
+  else
+    warn "Первая попытка не прошла. Хвост лога:"
+    tail -n 40 "$log_file" >&2 || true
+  fi
+
+  if [[ "$ok" != 1 && ${#strict[@]} -gt 0 && ${#strict[@]} -ne ${#usable[@]} ]]; then
+    log "Повторяю только со строго проверенными именами: ${strict[*]}"
+    if log_file="$(hh_v92_certbot_issue "$domain" "$email" "${strict[@]}")"; then ok=1; fi
+  fi
+
+  if [[ "$ok" != 1 && -z "$want" ]]; then
+    log "Повторяю только для основного домена $domain"
+    if log_file="$(hh_v92_certbot_issue "$domain" "$email" "$domain")"; then ok=1; fi
+  fi
+
+  if [[ "$ok" != 1 ]]; then
+    tail -n 120 "$log_file" >&2 || true
+    err "SSL не выпущен для $domain. Полный лог: $log_file"
+  fi
+
+  if [[ -x /usr/local/sbin/hyper-host-nginx-reconcile ]]; then
+    /usr/local/sbin/hyper-host-nginx-reconcile >/dev/null || err "Nginx не пересобрался после выпуска SSL"
+  fi
+  nginx_reload
+
+  cert="$(find_valid_certificate_for_domain "$domain" 2>/dev/null || true)"
+  [[ -n "$cert" ]] || err "Сертификат для $domain после выпуска не найден"
+
+  local covered=() missing=()
+  for host in "${usable[@]}"; do
+    if openssl x509 -in "$cert" -noout -checkhost "$host" >/dev/null 2>&1; then
+      covered+=("$host")
+    else
+      missing+=("$host")
+    fi
+  done
+
+  if [[ -n "$want" ]]; then
+    openssl x509 -in "$cert" -noout -checkhost "$want" >/dev/null 2>&1 \
+      || err "$want не попал в сертификат $cert. Лог: $log_file"
+    local_tls_certificate_ok "$want" \
+      || err "Nginx пока не отдаёт правильный сертификат для $want. Проверь: sudo nginx -t && sudo systemctl reload nginx"
+  fi
+  local_tls_certificate_ok "$domain" || err "Nginx отдаёт чужой сертификат для $domain"
+
+  if [[ -x "$SSL_TRUTH_PY" ]]; then
+    SERVER_IP="$SERVER_IP" PUBLIC_IP="$expected" python3 "$SSL_TRUTH_PY" restore >/dev/null 2>&1 || true
+  fi
+
+  log "SSL готов: сертификат $cert закрывает ${covered[*]:-$domain}${missing:+; не вошли: ${missing[*]}}${skipped:+; пропущено: ${skipped[*]}}"
+}
+
+cmd_ssl_bundle_start_json() {
+  local domain="${1:-}" email="${2:-}" want="${3:-}" job_id unit safe_domain backend="nohup"
+  [[ -n "$domain" && -n "$email" ]] || err "Нужны домен и email"
+  valid_domain "$domain" || err "Некорректный домен"
+  [[ "$email" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || err "Некорректный email"
+  [[ -d "$SITES_DIR/$domain/public_html" ]] || err "Сайт не найден: $SITES_DIR/$domain/public_html"
+  if [[ -n "$want" ]]; then
+    want="$(hh_v92_normalize_host "$want")"
+    valid_domain "$want" || err "Некорректный хост: $want"
+  fi
+
+  mkdir -p "$SSL_JOB_ROOT"
+  find "$SSL_JOB_ROOT" -maxdepth 1 -type f \( -name 'ssl-*.json' -o -name 'ssl-*.log' \) -mtime +7 -delete 2>/dev/null || true
+
+  job_id="ssl-$(date +%Y%m%d%H%M%S)-$(openssl rand -hex 4)"
+  safe_domain="$(printf '%s' "$domain" | tr '.-' '__' | tr -cd 'A-Za-z0-9_')"
+  unit="hyper-host-sslb-${safe_domain:0:32}-$(date +%s)-$RANDOM"
+
+  ssl_job_write "$job_id" "queued" "${want:-$domain}" "Задание создано: один сертификат на $domain и все его домены." ""
+
+  if command -v systemd-run >/dev/null 2>&1; then
+    if systemd-run --quiet --collect --unit="$unit" --on-active=3s \
+        "$0" ssl-bundle-worker "$domain" "$email" "$job_id" "$want" >/dev/null 2>&1; then
+      backend="systemd"
+    else
+      ( sleep 3; exec "$0" ssl-bundle-worker "$domain" "$email" "$job_id" "$want" ) >/dev/null 2>&1 </dev/null &
+    fi
+  else
+    ( sleep 3; exec "$0" ssl-bundle-worker "$domain" "$email" "$job_id" "$want" ) >/dev/null 2>&1 </dev/null &
+  fi
+
+  JOB_ID="$job_id" DOMAIN="${want:-$domain}" SITE="$domain" BACKEND="$backend" python3 - <<'PYSSLBSTART'
+import json, os
+print(json.dumps({
+    'ok': True,
+    'job_id': os.environ['JOB_ID'],
+    'domain': os.environ['DOMAIN'],
+    'site': os.environ['SITE'],
+    'state': 'queued',
+    'backend': os.environ.get('BACKEND', ''),
+    'message': 'Выпуск запущен в фоне. Панель останется доступной.',
+}, ensure_ascii=False))
+PYSSLBSTART
+}
+
+cmd_ssl_bundle_worker() {
+  local domain="${1:-}" email="${2:-}" job_id="${3:-}" want="${4:-}" log_file code error_text label
+  [[ -n "$domain" && -n "$email" && -n "$job_id" ]] || exit 2
+  valid_domain "$domain" || exit 2
+  ssl_job_valid_id "$job_id" || exit 2
+  label="${want:-$domain}"
+
+  mkdir -p "$SSL_JOB_ROOT"
+  log_file="$SSL_JOB_ROOT/$job_id.log"
+  ssl_job_write "$job_id" "running" "$label" "Проверяю DNS, ACME и Nginx для всех доменов сайта $domain." ""
+
+  set +e
+  (
+    flock -w 1800 9 || { echo "Другое SSL-задание не освободило блокировку за 30 минут"; exit 75; }
+    "$0" ssl-bundle "$domain" "$email" "$want"
+  ) 9>"$SSL_JOB_ROOT/issue.lock" >"$log_file" 2>&1
+  code=$?
+  set -e
+
+  if [[ "$code" -eq 0 ]]; then
+    ssl_job_write "$job_id" "success" "$label" "Сертификат выпущен, подключён и проверен в Nginx." ""
+    exit 0
+  fi
+
+  error_text="$(tail -n 120 "$log_file" 2>/dev/null || true)"
+  [[ -n "$error_text" ]] || error_text="SSL-задание завершилось с кодом $code без текста ошибки"
+  ssl_job_write "$job_id" "failed" "$label" "Выпуск SSL завершился ошибкой." "$error_text"
+  exit "$code"
+}
+
+# site-aliases-set DOMAIN "www.domain,alias2"
+# Переписывает server_name существующего сайта и пересобирает Nginx.
+# PHP-версию и root не трогает — сокет остаётся прежним.
+cmd_site_aliases_set() {
+  local domain="${1:-}" aliases="${2:-}" conf tmp names alias
+  [[ -n "$domain" ]] || err "Domain required"
+  valid_domain "$domain" || err "Некорректный домен: $domain"
+  [[ -d "$SITES_DIR/$domain/public_html" ]] || err "Сайт не найден: $SITES_DIR/$domain/public_html"
+
+  names="$domain"
+  aliases="$(printf '%s' "$aliases" | tr ';[:space:]' ',,')"
+  if [[ -n "$aliases" ]]; then
+    local arr=()
+    IFS=',' read -ra arr <<< "$aliases"
+    for alias in "${arr[@]}"; do
+      alias="$(hh_v92_normalize_host "$alias")"
+      [[ -z "$alias" ]] && continue
+      [[ "$alias" == "$domain" ]] && continue
+      valid_domain "$alias" || err "Некорректный alias: $alias"
+      if [[ -n "$PANEL_DOMAIN" && "$PANEL_DOMAIN" != "_" && "$alias" == "$PANEL_DOMAIN" ]]; then
+        err "Alias $alias закреплён за панелью"
+      fi
+      [[ ! -d "$SITES_DIR/$alias/public_html" ]] || err "$alias уже отдельный сайт, алиасом его сделать нельзя"
+      [[ " $names " == *" $alias "* ]] || names="$names $alias"
+    done
+  fi
+
+  conf="$NGINX_AVAILABLE/hyper-host-site-$domain.conf"
+  if [[ -f "$conf" ]]; then
+    tmp="$(mktemp /tmp/hyper-host-aliases.XXXXXX)"
+    NAMES="$names" python3 - "$conf" "$tmp" <<'PYALIASES'
+import os, pathlib, re, sys
+conf, tmp = sys.argv[1:3]
+names = os.environ['NAMES']
+text = pathlib.Path(conf).read_text(encoding='utf-8', errors='ignore')
+new, count = re.subn(r'(?m)^([ \t]*)server_name\s+[^;]+;', lambda m: '%sserver_name %s;' % (m.group(1), names), text)
+if count < 1:
+    raise SystemExit('В конфиге не найден server_name')
+pathlib.Path(tmp).write_text(new, encoding='utf-8')
+PYALIASES
+    safe_replace_file "$conf" "$tmp"
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+
+  if [[ -x /usr/local/sbin/hyper-host-nginx-reconcile ]]; then
+    /usr/local/sbin/hyper-host-nginx-reconcile >/dev/null || err "Nginx reconcile не отработал"
+  fi
+  nginx -t >/dev/null 2>&1 || { nginx -t 2>&1 | tail -n 20 >&2; err "nginx -t не проходит после смены доменов"; }
+  nginx_reload
+  log "Домены сайта $domain: $names"
+}
+
+
 case "${1:-}" in
   nginx-runtime-fix) shift; cmd_nginx_runtime_fix "$@" ;;
   nginx-runtime-doctor-json) shift; cmd_nginx_runtime_doctor_json "$@" ;;
@@ -4456,6 +5123,11 @@ case "${1:-}" in
   ssl-site-worker) shift; cmd_ssl_site_worker "$@" ;;
   ssl-job-json) shift; cmd_ssl_job_json "$@" ;;
   ssl-fix-site) shift; cmd_ssl_fix_site "$@" ;;
+  ssl-bundle) shift; cmd_ssl_bundle "$@" ;;
+  ssl-bundle-start-json) shift; cmd_ssl_bundle_start_json "$@" ;;
+  ssl-bundle-worker) shift; cmd_ssl_bundle_worker "$@" ;;
+  ssl-host-check-json) shift; cmd_ssl_host_check_json "$@" ;;
+  site-aliases-set) shift; cmd_site_aliases_set "$@" ;;
   ssl-ip-selfsigned) shift; cmd_ssl_ip_selfsigned "$@" ;;
   public-ip) shift; cmd_public_ip "$@" ;;
   ip-autofix) shift; cmd_ip_autofix "$@" ;;
@@ -4487,6 +5159,7 @@ case "${1:-}" in
   bot-delete) shift; cmd_bot_delete "$@" ;;
   bot) shift; cmd_bot_action "$@" ;;
   bot-list-json) shift; cmd_bot_list_json "$@" ;;
+  bots-usage-json) shift; cmd_bots_usage_json "$@" ;;
   bot-doctor) shift; cmd_bot_doctor "$@" ;;
   pm2-persist) shift; cmd_pm2_persist "$@" ;;
   deploy-center-install) shift; cmd_deploy_center_install "$@" ;;

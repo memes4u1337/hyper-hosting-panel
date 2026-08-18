@@ -449,28 +449,101 @@ document.addEventListener('click', function(e){
     }catch(e){ if(e.name !== 'AbortError') console.debug('dashboard live update failed', e); return false; }
   }
 
+  // v92: панель показывает реальную долю ресурсов сервера, а не абстрактные МБ.
   async function updateBots(){
-    if(!q('[data-live-bots]')) return true;
+    const page = q('[data-live-bots]');
+    if(!page) return true;
     try{
       const data = await fetchJson('/?api=bots', botsRef);
-      if(!Array.isArray(data)) return true;
-      const map = new Map(data.map(b => [String(b.name || ''), b]));
+      const list = Array.isArray(data) ? data : (data && Array.isArray(data.bots) ? data.bots : null);
+      if(!list) return false;
+      const server = (data && data.server) || {};
+      const totals = (data && data.totals) || {};
+      const memTotal = Number(server.mem_total || page.dataset.memTotal || 0);
+      const cores = Number(server.cpu_cores || page.dataset.cpuCores || 0);
+      const botMem = Number(totals.memory != null ? totals.memory : list.reduce((sum,b)=>sum+Number(b.memory||0),0));
+      const botCpu = Number(totals.cpu != null ? totals.cpu : list.reduce((sum,b)=>sum+Number(b.cpu||0),0));
+      const online = totals.online != null ? Number(totals.online) : list.filter(b=>b.status==='online').length;
+      const count = totals.count != null ? Number(totals.count) : list.length;
+      const round1 = v => Math.round(Number(v||0) * 10) / 10;
+
+      setNode(q('[data-bots-online]'), online + ' / ' + count);
+      if(server.load1 != null) setNode(q('[data-bots-load]'), 'load ' + server.load1);
+      setNode(q('[data-bots-mem]'), fmtBytes(botMem));
+      setNode(q('[data-bots-mem-pct]'),
+        (totals.memory_percent != null ? totals.memory_percent : pct(botMem, memTotal)) + '% от ' + fmtBytes(memTotal));
+      setNode(q('[data-bots-cpu]'), round1(botCpu) + '%');
+      setNode(q('[data-bots-cpu-pct]'),
+        (totals.cpu_of_server != null ? totals.cpu_of_server : (cores ? round1(botCpu/cores) : 0)) + '% от ' + cores + ' ядер');
+      if(totals.disk_bytes != null) setNode(q('[data-bots-disk]'), fmtBytes(totals.disk_bytes));
+
+      const map = new Map(list.map(b => [String(b.name || ''), b]));
       qa('.bot-card-live').forEach(card => {
         const name = card.getAttribute('data-bot-name') || '';
-        const b = map.get(name) || {status:'not_found',memory:0,cpu_percent:0,uptime:'—',restarts:0};
-        const st = q('[data-bot-status]', card);
-        if(st){
-          st.textContent = b.status || 'not_found';
-          st.classList.toggle('ok', b.status === 'online');
-          st.classList.toggle('bad', b.status !== 'online');
+        const b = map.get(name) || {status:'not_found', memory:0, cpu_percent:0, uptime:'—', restarts:0};
+        const isOnline = b.status === 'online';
+        const crash = !!b.crash_loop;
+
+        card.classList.toggle('is-down', !isOnline);
+        card.classList.toggle('is-warn', isOnline && crash);
+
+        const state = q('[data-bot-status]', card);
+        if(state){
+          state.textContent = b.status || 'not_found';
+          state.classList.toggle('ok', isOnline);
+          state.classList.toggle('bad', !isOnline);
         }
+
         const mem = Number(b.memory || 0);
-        const cpu = Number(b.cpu_percent ?? b.cpu ?? 0);
-        setNode(q('[data-bot-memory]', card), fmtBytes(mem));
-        setNode(q('[data-bot-cpu]', card), cpu.toFixed(1).replace('.0','') + '%');
+        const cpu = Number(b.cpu_percent != null ? b.cpu_percent : (b.cpu || 0));
+        const memPct = b.memory_percent != null ? Number(b.memory_percent) : pct(mem, memTotal);
+        const cpuServer = b.cpu_of_server != null ? Number(b.cpu_of_server) : (cores ? round1(cpu/cores) : 0);
+        const memShare = botMem > 0 ? round1(mem / botMem * 100) : 0;
+
+        setNode(q('[data-bot-mem]', card), fmtBytes(mem));
+        setNode(q('[data-bot-mem-pct]', card), memPct + '% сервера');
+        setNode(q('[data-bot-mem-share]', card), 'доля среди ботов ' + memShare + '%');
+        setNode(q('[data-bot-cpu]', card), round1(cpu) + '% ядра');
+        setNode(q('[data-bot-cpu-pct]', card), cpuServer + '% сервера');
+        setNode(q('[data-bot-cputime]', card), 'CPU time ' + (b.cpu_seconds != null ? b.cpu_seconds : 0) + 'с');
         setNode(q('[data-bot-uptime]', card), b.uptime || '—');
-        setNode(q('[data-bot-restarts]', card), String(b.restarts ?? 0));
-        const bar = q('[data-bot-memory-bar]', card); if(bar) bar.style.width = Math.max(2, Math.min(100, mem / 1024 / 1024 / 10)) + '%';
+        setNode(q('[data-bot-threads]', card), b.threads ? String(b.threads) : '—');
+        setNode(q('[data-bot-pid]', card), b.pid ? String(b.pid) : '—');
+        if(b.disk_bytes != null) setNode(q('[data-bot-disk]', card), fmtBytes(b.disk_bytes));
+
+        const restarts = Number(b.restarts || 0);
+        const restartsNode = q('[data-bot-restarts]', card);
+        if(restartsNode){
+          setNode(restartsNode, String(restarts));
+          restartsNode.classList.toggle('bad', restarts > 50);
+          restartsNode.classList.toggle('warn', restarts > 5 && restarts <= 50);
+        }
+
+        const memBar = q('[data-bot-mem-bar]', card);
+        if(memBar) memBar.style.width = Math.max(0, Math.min(100, memShare)) + '%';
+        const cpuBar = q('[data-bot-cpu-bar]', card);
+        if(cpuBar) cpuBar.style.width = Math.max(0, Math.min(100, cpu)) + '%';
+        const cpuRow = cpuBar ? cpuBar.closest('.bot-load-row-v92') : null;
+        if(cpuRow) cpuRow.classList.toggle('hot', cpu >= 70);
+
+        const alert = q('[data-bot-alert]', card);
+        const alertText = q('[data-bot-alert-text]', card);
+        if(alert){
+          let message = '';
+          if(crash) message = 'Бот в цикле перезапусков: ' + restarts + ' рестартов и нулевой uptime. Смотри Logs — процесс падает сразу после старта.';
+          else if(!isOnline && b.status !== 'not_found') message = 'Процесс не запущен. Нажми Start или проверь логи.';
+          else if(!isOnline) message = 'PM2 не видит этот процесс. Нажми Start, чтобы поднять его заново.';
+          alert.hidden = !message;
+          if(alertText && message) alertText.textContent = message;
+        }
+
+        const filesNode = q('[data-bot-files]', card);
+        if(filesNode && Array.isArray(b.files)){
+          const next = b.files.length
+            ? b.files.map(f => '<span>' + String(f).replace(/[<>&]/g, '') + '</span>').join('')
+            : '<em>файлы не прочитаны</em>';
+          if(filesNode.innerHTML !== next) filesNode.innerHTML = next;
+        }
       });
       return true;
     }catch(e){ if(e.name !== 'AbortError') console.debug('bot live update failed', e); return false; }
@@ -516,4 +589,100 @@ document.addEventListener('click', function(e){
     scheduler(updateBots, 3000, () => !!q('[data-live-bots]'));
   }
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startLive); else startLive();
+})();
+
+
+/* ============================================================
+   HYPER-HOST v92 — честная проверка домена перед выпуском SSL
+   powered by memes4u1337
+   ============================================================ */
+(function(){
+  const esc = value => String(value == null ? '' : value)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+  function line(state, title, detail){
+    const icon = state === 'ok' ? 'fa-circle-check' : (state === 'warn' ? 'fa-triangle-exclamation' : 'fa-circle-xmark');
+    return '<div class="ssl-check-line-v92 ' + state + '"><i class="fa-solid ' + icon + '"></i>'
+      + '<div><b>' + esc(title) + '</b>' + (detail ? '<span>' + esc(detail) + '</span>' : '') + '</div></div>';
+  }
+
+  function render(box, data){
+    if(!data || data.ok === false){
+      box.innerHTML = line('bad', 'Проверка не выполнена', (data && (data.problem || data._error)) || 'Сервер не ответил');
+      return;
+    }
+    const rows = [];
+    const dnsState = String(data.dns_state || '');
+    const aList = (data.a || []).join(', ') || 'нет A-записей';
+    const aaaaList = (data.aaaa || []).join(', ');
+
+    if(dnsState === 'ok'){
+      rows.push(line('ok', 'DNS указывает на этот сервер', aList));
+    }else if(dnsState === 'extra_a'){
+      rows.push(line('warn', 'Несколько A-записей', aList + ' — нужен только ' + (data.expected_ip || '')));
+    }else if(dnsState === 'aaaa'){
+      rows.push(line('bad', 'Есть AAAA-запись, а IPv6 у сервера нет', aaaaList));
+    }else if(dnsState === 'wrong_ip'){
+      rows.push(line('bad', 'A-запись смотрит не сюда', aList + ' вместо ' + (data.expected_ip || '')));
+    }else{
+      rows.push(line('bad', 'A-записи нет', 'Добавь A ' + (data.host || '') + ' → ' + (data.expected_ip || '')));
+    }
+
+    rows.push(data.site
+      ? line(data.attached ? 'ok' : 'warn',
+             data.attached ? 'Привязан к сайту ' + data.site : 'Будет привязан к сайту ' + data.site,
+             data.root || '')
+      : line('bad', 'Сайта для этого домена нет', 'Создай сайт с базовым доменом на вкладке «Сайты»'));
+
+    rows.push(data.acme_ok
+      ? line('ok', 'ACME challenge отдаётся', '/.well-known/acme-challenge доступен локально')
+      : line('warn', 'ACME challenge пока не отдаётся', 'Панель пересоберёт vhost при выпуске'));
+
+    rows.push(data.cert_ok
+      ? line('ok', 'Живой сертификат уже есть', data.cert_path || '')
+      : line('warn', 'Сертификата пока нет', 'Нажми «Выпустить SSL»'));
+
+    let html = rows.join('');
+    if(data.problem){
+      html += '<div class="ssl-fix-hint-v92"><b>' + esc(data.problem) + '</b>'
+        + (data.fix ? '<br>' + esc(data.fix) : '') + '</div>';
+    }else if(data.can_issue){
+      html += '<div class="ssl-fix-hint-v92">Всё готово. Жми «Выпустить SSL» — сертификат закроет домен и его www одним разом.</div>';
+    }
+    box.innerHTML = html;
+  }
+
+  function init(){
+    document.querySelectorAll('[data-ssl-check]').forEach(button => {
+      const form = button.closest('form');
+      if(!form) return;
+      const box = form.parentElement ? form.parentElement.querySelector('[data-ssl-report]') : null;
+      button.addEventListener('click', async () => {
+        const input = form.querySelector('[data-ssl-host]');
+        const host = String(input && input.value || '').trim().toLowerCase().replace(/\.$/, '');
+        if(!host){ if(input) input.reportValidity(); return; }
+        if(!box) return;
+        button.disabled = true;
+        const original = button.innerHTML;
+        button.innerHTML = '<i class="fa-solid fa-rotate fa-spin me-2"></i>Проверяю…';
+        box.innerHTML = '<div class="placeholder">Спрашиваю публичные DNS-резолверы и проверяю Nginx…</div>';
+        try{
+          const res = await fetch('/?api=ssl-host&host=' + encodeURIComponent(host) + '&_=' + Date.now(), {
+            cache:'no-store', credentials:'same-origin', headers:{'Accept':'application/json'}
+          });
+          const raw = await res.text();
+          let data = {};
+          try{ data = raw ? JSON.parse(raw) : {}; }catch(_){ data = {ok:false, problem: raw || ('HTTP ' + res.status)}; }
+          render(box, data);
+        }catch(error){
+          render(box, {ok:false, problem:String(error && error.message || error)});
+        }finally{
+          button.disabled = false;
+          button.innerHTML = original;
+        }
+      });
+    });
+  }
+
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();

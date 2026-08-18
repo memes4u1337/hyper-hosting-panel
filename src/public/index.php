@@ -43,8 +43,19 @@ function render_api(string $api): void
             return;
         }
         if ($api === 'bots') {
-            $pm2 = run_ctl_json_live(['bot-list-json'], 8);
-            echo json_encode(is_array($pm2) ? $pm2 : ['_error' => 'PM2 JSON error'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            $data = bots_usage_data();
+            echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            return;
+        }
+        if ($api === 'ssl-host') {
+            $host = strtolower(trim((string)($_GET['host'] ?? '')));
+            if ($host === '' || !is_valid_domain($host)) {
+                http_response_code(422);
+                echo json_encode(['ok' => false, 'problem' => 'Укажи полный домен, например www.pixel-pc.store'], JSON_UNESCAPED_UNICODE);
+                return;
+            }
+            $check = run_ctl_json(['ssl-host-check-json', $host], 45);
+            echo json_encode($check, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
             return;
         }
         if ($api === 'ssl-job') {
@@ -179,6 +190,89 @@ function handle_post(string $action): void
                 }
                 flash('Выпуск SSL запущен в фоне. Страница не будет падать; обнови статус через несколько секунд.','success');
                 redirect('/?page=ssl');
+            }
+            case 'ssl_any': {
+                $host = strtolower(trim((string)($_POST['host'] ?? '')));
+                $host = preg_replace('/[\x{200B}-\x{200D}\x{FEFF}\s]/u', '', $host) ?? $host;
+                $host = rtrim($host, '.');
+                $email = trim((string)($_POST['email'] ?? ''));
+                $email = preg_replace('/[\x{200B}-\x{200D}\x{FEFF}]/u', '', $email) ?? $email;
+                if (!is_valid_domain($host)) throw new RuntimeException('Укажи полный домен, например www.pixel-pc.store');
+                if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) throw new RuntimeException('Укажи корректный email, например name@example.com');
+                setting_set('ssl_email', $email);
+
+                // Ищем сайт-владельца: точное совпадение, иначе самый длинный суффикс.
+                $sites = db()->query('SELECT * FROM sites')->fetchAll();
+                $parent = null;
+                foreach ($sites as $s) { if (strtolower((string)$s['domain']) === $host) { $parent = $s; break; } }
+                if (!$parent) {
+                    $bestLen = 0;
+                    foreach ($sites as $s) {
+                        $d = strtolower((string)$s['domain']);
+                        if ($d !== '' && str_ends_with($host, '.' . $d) && strlen($d) > $bestLen) { $parent = $s; $bestLen = strlen($d); }
+                    }
+                }
+                if (!$parent) {
+                    $base = preg_replace('/^[^.]+\./', '', $host);
+                    throw new RuntimeException('Для ' . $host . ' нет сайта в панели. Сначала создай сайт с базовым доменом ' . $base . ' на вкладке «Сайты», потом выпускай SSL.');
+                }
+
+                // Привязываем www/поддомен к сайту, иначе certbot про него не узнает.
+                $siteDomain = (string)$parent['domain'];
+                if (strtolower($siteDomain) !== $host) {
+                    $set = [];
+                    foreach (preg_split('/[\s,;]+/', (string)($parent['aliases'] ?? '')) as $a) {
+                        $a = strtolower(trim($a));
+                        if ($a !== '' && is_valid_domain($a) && $a !== strtolower($siteDomain)) $set[$a] = true;
+                    }
+                    if (!isset($set[$host])) {
+                        $set[$host] = true;
+                        $clean = implode(',', array_keys($set));
+                        db()->prepare('UPDATE sites SET aliases=? WHERE id=?')->execute([$clean, (int)$parent['id']]);
+                        $r = run_ctl(['site-aliases-set', $siteDomain, $clean], 240);
+                        if ($r['code'] !== 0) throw new RuntimeException('Не удалось привязать ' . $host . ' к сайту ' . $siteDomain . ":\n" . $r['output']);
+                        add_event('site', 'Домен ' . $host . ' привязан к сайту ' . $siteDomain);
+                        hh_clear_cache();
+                    }
+                }
+
+                $res = run_ctl_json(['ssl-bundle-start-json', $siteDomain, $email, $host], 30);
+                if (empty($res['ok'])) throw new RuntimeException((string)($res['error'] ?? $res['_error'] ?? 'Не удалось запустить выпуск SSL'));
+                add_event('ssl', 'Запущен выпуск SSL: ' . $host . ' (сайт ' . $siteDomain . ') / job ' . (string)($res['job_id'] ?? ''));
+
+                if (request_wants_json()) {
+                    json_response([
+                        'ok' => true,
+                        'job_id' => (string)($res['job_id'] ?? ''),
+                        'domain' => $host,
+                        'site' => $siteDomain,
+                        'state' => (string)($res['state'] ?? 'queued'),
+                        'message' => (string)($res['message'] ?? 'SSL-задание запущено'),
+                    ]);
+                }
+                flash('Выпуск SSL для ' . $host . ' запущен в фоне. Обнови статус через минуту.', 'success');
+                redirect('/?page=ssl');
+            }
+            case 'save_site_aliases': {
+                $id = (int)($_POST['id'] ?? 0);
+                $st = db()->prepare('SELECT * FROM sites WHERE id=?'); $st->execute([$id]); $s = $st->fetch();
+                if (!$s) throw new RuntimeException('Сайт не найден');
+                $set = [];
+                foreach (preg_split('/[\s,;]+/', strtolower(trim((string)($_POST['aliases'] ?? '')))) as $a) {
+                    $a = trim($a);
+                    if ($a === '') continue;
+                    if (!is_valid_domain($a)) throw new RuntimeException('Неверный домен: ' . $a);
+                    if ($a === strtolower((string)$s['domain'])) continue;
+                    $set[$a] = true;
+                }
+                $clean = implode(',', array_keys($set));
+                db()->prepare('UPDATE sites SET aliases=? WHERE id=?')->execute([$clean, $id]);
+                $res = run_ctl(['site-aliases-set', (string)$s['domain'], $clean], 240);
+                if ($res['code'] !== 0) throw new RuntimeException($res['output']);
+                hh_clear_cache();
+                add_event('site', 'Домены сайта ' . $s['domain'] . ': ' . ($clean ?: 'только основной'));
+                flash('Домены сайта обновлены: ' . $s['domain'] . ($clean ? ' + ' . $clean : ''), 'success');
+                redirect('/?page=sites');
             }
             case 'create_folder': {
                 $name=trim((string)($_POST['name']??'')); if(!is_valid_folder_name($name)) throw new RuntimeException('Неверное имя папки');
@@ -529,7 +623,7 @@ function fm_delete(): void
 function rrmdir(string $path): void { if(is_dir($path)&&!is_link($path)){ foreach(scandir($path)?:[] as $i){ if($i==='.'||$i==='..') continue; rrmdir($path.'/'.$i);} if(!@rmdir($path)){ run_ctl(['repair'],180); @rmdir($path); } } else { if(!@unlink($path)){ run_ctl(['repair'],180); @unlink($path); } } }
 
 
-function hh_app_version(): string { return '1.7-v79'; }
+function hh_app_version(): string { return '1.8-v92'; }
 
 function hh_nav_config(): array
 {
@@ -556,7 +650,7 @@ function nav_item(string $id,string $icon,string $label,string $page): string
 function render_login(): void
 {
     $flash=flash(); $need2fa=setting_get('security_2fa_enabled','0')==='1'; ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=79" rel="stylesheet"></head><body class="login-body">
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=92" rel="stylesheet"></head><body class="login-body">
 <div class="login-orb login-orb-a"></div><div class="login-orb login-orb-b"></div><div class="login-orb login-orb-c"></div>
 <main class="login-clean">
   <section class="login-card card-glass login-clean-card">
@@ -584,7 +678,7 @@ function render_page(string $page, array $user): void
 <link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
-<link href="/assets/style.css?v=79" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
+<link href="/assets/style.css?v=92" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
 <div class="mobile-nav-backdrop" id="mobileNavBackdrop"></div>
 <aside class="sidebar sidebar-v3" id="mainSidebar">
   <div class="sidebar-brand-v3">
@@ -642,7 +736,7 @@ function render_page(string $page, array $user): void
   <section class="page-stage-v3"><?php route_view($page); ?></section>
 </main></div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script>
-<script src="/assets/app.js?v=79" defer></script></body></html><?php
+<script src="/assets/app.js?v=92" defer></script></body></html><?php
 }
 function route_view(string $page): void { match($page){ 'files'=>view_files(), 'sites'=>view_sites(), 'ftp'=>view_ftp(), 'databases'=>view_databases(), 'pma_login'=>view_pma_login(), 'bots'=>view_bots(), 'deploy_center'=>view_deploy_center(), 'bot_logs'=>view_bot_logs(), 'deploy_logs'=>view_deploy_logs(), 'backups'=>view_backups(), 'dns'=>view_dns(), 'network'=>view_network(), 'ssl'=>view_ssl(), 'php'=>view_php(), 'cron'=>view_cron(), 'logs'=>view_logs(), 'security'=>view_security(), 'settings'=>view_settings(), 'access'=>view_access(), 'disk'=>view_disk(), default=>view_dashboard(), }; }
 function stat_card(string $icon,string $label,string $value,string $sub=''): void { ?><div class="stat-card"><div class="stat-icon"><i class="fa-solid <?= e($icon) ?>"></i></div><div><span><?= e($label) ?></span><b><?= e($value) ?></b><?php if($sub): ?><em><?= e($sub) ?></em><?php endif; ?></div></div><?php }
@@ -784,7 +878,7 @@ function view_files(): void
 
 function view_sites(): void
 { $sites=db()->query('SELECT * FROM sites ORDER BY id DESC')->fetchAll(); $folders=db()->query('SELECT * FROM folders ORDER BY id DESC')->fetchAll(); $php=run_ctl_json_cached(['php-list-json'],10,300); ?>
-<div class="row g-4"><div class="col-lg-4"><div class="panel-card"><h2>Создать сайт</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="add_site"><input class="form-control" name="domain" placeholder="hyper-host.pw" required><input class="form-control" name="aliases" placeholder="www.hyper-host.pw"><select class="form-select" name="php_version"><option value="">PHP по умолчанию</option><?php foreach(($php['_error']??null)?[]:$php as $p): ?><option value="<?= e($p['version']) ?>">PHP <?= e($p['version']) ?></option><?php endforeach; ?></select><button class="btn btn-primary">Создать сайт</button></form></div><div class="panel-card mt-4"><h2>Создать папку-сайт</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_folder"><input class="form-control" name="name" placeholder="test-site" required><button class="btn btn-primary">Создать папку</button></form></div></div><div class="col-lg-8"><div class="panel-card"><h2>Сайты</h2><div class="table-responsive"><table class="table table-dark-soft align-middle"><thead><tr><th>Домен</th><th>Папка</th><th>PHP/SSL</th><th></th></tr></thead><tbody><?php foreach($sites as $s): ?><tr><td><b><?= e($s['domain']) ?></b><div class="small muted"><?= e($s['aliases']) ?></div></td><td><code><?= e($s['root_path']) ?></code></td><td><span class="badge text-bg-info">PHP <?= e($s['php_version']?:'default') ?></span> <span class="badge text-bg-<?= (int)$s['ssl_enabled']?'success':'secondary' ?>"><?= (int)$s['ssl_enabled']?'SSL':'HTTP' ?></span></td><td class="text-end"><a class="btn btn-sm btn-soft" href="/?page=files&root=sites&path=<?= e($s['domain'].'/public_html') ?>">Файлы</a><form method="post" class="d-inline" onsubmit="return confirm('Удалить сайт?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_site"><input type="hidden" name="id" value="<?= (int)$s['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form></td></tr><?php endforeach; if(!$sites): ?><tr><td colspan="4" class="empty">Сайтов пока нет</td></tr><?php endif; ?></tbody></table></div><h2 class="mt-4">Папки</h2><div class="table-responsive"><table class="table table-dark-soft"><tbody><?php foreach($folders as $f): ?><tr><td><b><?= e($f['name']) ?></b></td><td><code><?= e($f['path']) ?></code></td><td class="text-end"><a class="btn btn-sm btn-soft" href="/?page=files&root=sites&path=<?= e($f['name'].'/public_html') ?>">Файлы</a></td></tr><?php endforeach; if(!$folders): ?><tr><td class="empty">Папок пока нет</td></tr><?php endif; ?></tbody></table></div></div></div></div><?php }
+<div class="row g-4"><div class="col-lg-4"><div class="panel-card"><h2>Создать сайт</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="add_site"><input class="form-control" name="domain" placeholder="hyper-host.pw" required><input class="form-control" name="aliases" placeholder="www.hyper-host.pw"><select class="form-select" name="php_version"><option value="">PHP по умолчанию</option><?php foreach(($php['_error']??null)?[]:$php as $p): ?><option value="<?= e($p['version']) ?>">PHP <?= e($p['version']) ?></option><?php endforeach; ?></select><button class="btn btn-primary">Создать сайт</button></form></div><div class="panel-card mt-4"><h2>Создать папку-сайт</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_folder"><input class="form-control" name="name" placeholder="test-site" required><button class="btn btn-primary">Создать папку</button></form></div></div><div class="col-lg-8"><div class="panel-card"><h2>Сайты</h2><div class="table-responsive"><table class="table table-dark-soft align-middle"><thead><tr><th>Домен</th><th>Папка</th><th>PHP/SSL</th><th></th></tr></thead><tbody><?php foreach($sites as $s): ?><tr><td><b><?= e($s['domain']) ?></b><div class="site-domains-v92"><?php foreach(array_filter(preg_split('/[\s,;]+/',(string)$s['aliases'])) as $al): ?><span><?= e($al) ?></span><?php endforeach; ?></div><form method="post" class="site-alias-form-v92"><?= csrf_field() ?><input type="hidden" name="action" value="save_site_aliases"><input type="hidden" name="id" value="<?= (int)$s['id'] ?>"><input class="form-control form-control-sm" name="aliases" value="<?= e($s['aliases']) ?>" placeholder="www.<?= e($s['domain']) ?>"><button class="btn btn-sm btn-soft">Сохранить домены</button></form></td><td><code><?= e($s['root_path']) ?></code></td><td><span class="badge text-bg-info">PHP <?= e($s['php_version']?:'default') ?></span> <span class="badge text-bg-<?= (int)$s['ssl_enabled']?'success':'secondary' ?>"><?= (int)$s['ssl_enabled']?'SSL':'HTTP' ?></span></td><td class="text-end"><a class="btn btn-sm btn-soft" href="/?page=files&root=sites&path=<?= e($s['domain'].'/public_html') ?>">Файлы</a><form method="post" class="d-inline" onsubmit="return confirm('Удалить сайт?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_site"><input type="hidden" name="id" value="<?= (int)$s['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form></td></tr><?php endforeach; if(!$sites): ?><tr><td colspan="4" class="empty">Сайтов пока нет</td></tr><?php endif; ?></tbody></table></div><h2 class="mt-4">Папки</h2><div class="table-responsive"><table class="table table-dark-soft"><tbody><?php foreach($folders as $f): ?><tr><td><b><?= e($f['name']) ?></b></td><td><code><?= e($f['path']) ?></code></td><td class="text-end"><a class="btn btn-sm btn-soft" href="/?page=files&root=sites&path=<?= e($f['name'].'/public_html') ?>">Файлы</a></td></tr><?php endforeach; if(!$folders): ?><tr><td class="empty">Папок пока нет</td></tr><?php endif; ?></tbody></table></div></div></div></div><?php }
 
 function view_pma_login(): void
 {
@@ -1023,8 +1117,8 @@ function ftp_scope_label_ui(string $scope, string $target = ''): string
 
 function view_ftp(): void
 { $rows=db()->query('SELECT * FROM ftp_accounts ORDER BY id DESC')->fetchAll(); $siteOptions=db()->query('SELECT domain FROM sites ORDER BY domain ASC')->fetchAll(); $gen=default_ftp_password(); $doctor=run_ctl_json_cached(['ftp-doctor-json'],8,30); $publicHost=(string)(($doctor['configured_public_ip']??'') ?: ($doctor['public_ip']??'') ?: current_public_ipv4() ?: host_name()); $lanHost=(string)(($doctor['server_ip']??'') ?: app_config('server_ip','')); $ftpHost=$publicHost; $ftpIssue=(string)($doctor['issue']??''); $ftpHint=(string)($doctor['hint']??''); ?>
-<div class="ftp-layout-v34 row g-4">
-  <div class="col-lg-4">
+<div class="ftp-layout-v92">
+  <div>
     <div class="panel-card ftp-create-card">
       <div class="kicker"><i class="fa-solid fa-folder-tree me-2"></i>FTP</div>
       <h2>Аккаунты доступа</h2>
@@ -1055,7 +1149,7 @@ function view_ftp(): void
       <form method="post" class="mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="ftp_fix"><button class="btn btn-soft w-100"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Починить FTP</button></form>
     </div>
   </div>
-  <div class="col-lg-8">
+  <div>
     <div class="panel-card mb-3 ftp-connection-card">
       <div class="connection-line"><span>FileZilla</span><code>FTP <?= e($ftpHost) ?> : 21</code><b>Plain + Passive</b></div>
       <div class="connection-line"><span>LAN</span><code>FTP <?= e($lanHost ?: '192.168.x.x') ?> : 21</code><b>для локальной сети</b></div>
@@ -1091,7 +1185,7 @@ function view_ftp(): void
 </div><?php }
 
 
-function pm2_status_map(): array { $d=run_ctl_json_live(['bot-list-json'],8); $m=[]; if(!isset($d['_error'])) foreach($d as $p) $m[(string)$p['name']]=$p; return $m; }
+function pm2_status_map(): array { $d=bots_usage_data(); $m=[]; foreach(($d['bots']??[]) as $p) { $name=(string)($p['name']??''); if($name!=='') $m[$name]=$p; } return $m; }
 function view_deploy_center(): void
 {
   $cfg=deploy_center_config();
@@ -1210,85 +1304,175 @@ function view_deploy_logs(): void
   <div class="panel-card"><div class="card-title-row"><h2><?= $master?'Логи главного deploy-бота':'Логи проекта #'.$pid ?></h2><a class="btn btn-soft" href="/?page=deploy_center">Назад</a></div><pre class="logs"><?= e($text) ?></pre></div><?php
 }
 
+function bots_usage_data(): array
+{
+  // v92: одна команда отдаёт и телеметрию ботов, и контекст сервера,
+  // чтобы в панели было видно не абстрактные мегабайты, а реальную долю.
+  $data = run_ctl_json_live(['bots-usage-json'], 10);
+  if (is_array($data) && empty($data['_error']) && isset($data['bots']) && is_array($data['bots'])) {
+    return $data;
+  }
+  $legacy = run_ctl_json_live(['bot-list-json'], 8);
+  $bots = (is_array($legacy) && empty($legacy['_error'])) ? array_values($legacy) : [];
+  return [
+    'ok' => false,
+    'server' => [],
+    'totals' => ['count' => count($bots), 'online' => 0, 'memory' => 0, 'cpu' => 0, 'disk_bytes' => 0],
+    'bots' => $bots,
+    '_error' => (string)($data['_error'] ?? ''),
+  ];
+}
+
+function bots_bar_percent(float $part, float $whole): float
+{
+  if ($whole <= 0) return 0.0;
+  return max(0.0, min(100.0, round($part / $whole * 100, 1)));
+}
+
 function view_bots(): void
 {
-  $bots=db()->query('SELECT * FROM bots ORDER BY id DESC')->fetchAll();
-  $status=pm2_status_map();
-  $modals=[];
+  $bots = db()->query('SELECT * FROM bots ORDER BY id DESC')->fetchAll();
+  $usage = bots_usage_data();
+  $status = [];
+  foreach (($usage['bots'] ?? []) as $p) { $status[(string)($p['name'] ?? '')] = $p; }
+  $server = $usage['server'] ?? [];
+  $totals = $usage['totals'] ?? [];
+  $memTotal = (float)($server['mem_total'] ?? 0);
+  $cores = (int)($server['cpu_cores'] ?? 0);
+  $totalBotMem = (float)($totals['memory'] ?? 0);
+  $modals = [];
   ?>
-<div class="bots-live-page-v29" data-live-bots>
-  <div class="row g-4">
-    <div class="col-lg-4">
-      <div class="panel-card bot-upload-card bot-upload-card-v29">
-        <div class="eyebrow"><i class="fa-solid fa-robot"></i> PM2 24/7</div>
-        <h2>Загрузить бота</h2>
-        <form method="post" enctype="multipart/form-data" class="vstack gap-3" data-async-submit>
-          <?= csrf_field() ?><input type="hidden" name="action" value="create_bot">
-          <input class="form-control" name="name" placeholder="HYPER-HOST-BOT" required>
-          <div class="row g-2"><div class="col-5"><select class="form-select" name="runtime"><option value="python">Python</option><option value="node">Node.js</option><option value="php">PHP</option><option value="custom">Custom</option></select></div><div class="col-7"><input class="form-control" name="main_file" value="bot.py" placeholder="bot.py"></div></div>
-          <label class="upload-mini"><span>Основной файл</span><input class="form-control" type="file" name="bot_file" accept=".py,.js,.php,.sh,.txt"></label>
-          <label class="upload-mini"><span>.env</span><input class="form-control" type="file" name="env_file" accept=".env,.txt"></label>
-          <label class="upload-mini"><span>requirements.txt / package.json</span><input class="form-control" type="file" name="requirements_file" accept=".txt,.json"></label>
-          <input class="form-control" type="number" name="memory_limit_mb" placeholder="RAM лимит, MB, например 512">
-          <button class="btn btn-primary btn-lg w-100" data-loading-text="Устанавливаю и запускаю... (обычно 10-40с, дольше — если ставятся тяжёлые зависимости)"><i class="fa-solid fa-play me-2"></i>Загрузить и запустить</button>
-        </form>
-        <div class="small muted mt-2" data-async-hint style="display:none">Не закрывай вкладку — идёт установка зависимостей и запуск через PM2. Как закончится, страница сама обновится.</div>
-        <form method="post" class="mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="pm2_persist"><button class="btn btn-soft w-100"><i class="fa-solid fa-shield-heart me-2"></i>Включить 24/7</button></form>
+<div class="bots-page-v92" data-live-bots data-mem-total="<?= e((string)$memTotal) ?>" data-cpu-cores="<?= e((string)$cores) ?>">
+  <div class="panel-card bot-upload-card bot-upload-card-v29">
+    <div class="eyebrow"><i class="fa-solid fa-robot"></i> PM2 24/7</div>
+    <h2>Загрузить бота</h2>
+    <form method="post" enctype="multipart/form-data" class="vstack gap-3" data-async-submit>
+      <?= csrf_field() ?><input type="hidden" name="action" value="create_bot">
+      <input class="form-control" name="name" placeholder="HYPER-HOST-BOT" required>
+      <div class="row g-2"><div class="col-5"><select class="form-select" name="runtime"><option value="python">Python</option><option value="node">Node.js</option><option value="php">PHP</option><option value="custom">Custom</option></select></div><div class="col-7"><input class="form-control" name="main_file" value="bot.py" placeholder="bot.py"></div></div>
+      <label class="upload-mini"><span>Основной файл</span><input class="form-control" type="file" name="bot_file" accept=".py,.js,.php,.sh,.txt"></label>
+      <label class="upload-mini"><span>.env</span><input class="form-control" type="file" name="env_file" accept=".env,.txt"></label>
+      <label class="upload-mini"><span>requirements.txt / package.json</span><input class="form-control" type="file" name="requirements_file" accept=".txt,.json"></label>
+      <input class="form-control" type="number" name="memory_limit_mb" placeholder="RAM лимит, MB, например 512">
+      <button class="btn btn-primary btn-lg w-100" data-loading-text="Устанавливаю и запускаю... (обычно 10-40с, дольше — если ставятся тяжёлые зависимости)"><i class="fa-solid fa-play me-2"></i>Загрузить и запустить</button>
+    </form>
+    <div class="small muted mt-2" data-async-hint style="display:none">Не закрывай вкладку — идёт установка зависимостей и запуск через PM2. Как закончится, страница сама обновится.</div>
+    <form method="post" class="mt-3"><?= csrf_field() ?><input type="hidden" name="action" value="pm2_persist"><button class="btn btn-soft w-100"><i class="fa-solid fa-shield-heart me-2"></i>Включить 24/7</button></form>
+  </div>
+
+  <div class="panel-card bots-panel-v29">
+    <div class="card-title-row flex-wrap"><h2><i class="fa-solid fa-list-check me-2"></i>Нагрузка на сервер</h2><a class="btn btn-sm btn-soft" href="/?page=files&root=bots">Файлы ботов</a></div>
+
+    <?php if (!empty($usage['_error'])): ?>
+      <div class="alert alert-warning"><?= e((string)$usage['_error']) ?></div>
+    <?php endif; ?>
+
+    <div class="bots-summary-v92">
+      <div class="bots-summary-item-v92">
+        <span>Ботов онлайн</span>
+        <b data-bots-online><?= (int)($totals['online'] ?? 0) ?> / <?= (int)($totals['count'] ?? count($bots)) ?></b>
+        <em data-bots-load>load <?= e((string)($server['load1'] ?? '—')) ?></em>
+      </div>
+      <div class="bots-summary-item-v92">
+        <span>RAM всех ботов</span>
+        <b data-bots-mem><?= e(human_bytes($totalBotMem)) ?></b>
+        <em data-bots-mem-pct><?= e((string)($totals['memory_percent'] ?? 0)) ?>% от <?= e(human_bytes($memTotal)) ?></em>
+      </div>
+      <div class="bots-summary-item-v92">
+        <span>CPU всех ботов</span>
+        <b data-bots-cpu><?= e((string)($totals['cpu'] ?? 0)) ?>%</b>
+        <em data-bots-cpu-pct><?= e((string)($totals['cpu_of_server'] ?? 0)) ?>% от <?= (int)$cores ?> ядер</em>
+      </div>
+      <div class="bots-summary-item-v92">
+        <span>Диск ботов</span>
+        <b data-bots-disk><?= e(human_bytes((float)($totals['disk_bytes'] ?? 0))) ?></b>
+        <em>код и зависимости</em>
       </div>
     </div>
-    <div class="col-lg-8">
-      <div class="panel-card bots-panel-v29">
-        <div class="card-title-row flex-wrap"><h2><i class="fa-solid fa-list-check me-2"></i>Боты — статистика</h2><a class="btn btn-sm btn-soft" href="/?page=files&root=bots">Файлы ботов</a></div>
-        <div class="bot-grid-v29">
-        <?php foreach($bots as $b): $pm=$status[$b['name']]??[]; $st=(string)($pm['status']??'not_found'); $files=$pm['files']??[]; $mem=(float)($pm['memory']??0); $cpu=(float)($pm['cpu_percent']??($pm['cpu']??0)); ob_start(); ?>
-          <div class="modal fade hh-modal bot-delete-modal" id="deleteBot<?= (int)$b['id'] ?>" tabindex="-1" aria-hidden="true">
-            <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-              <div class="modal-header"><div><div class="eyebrow"><i class="fa-solid fa-trash"></i> Удаление</div><h5 class="modal-title mb-0"><?= e($b['name']) ?></h5></div><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
-              <div class="modal-body">
-                
-                <div class="small muted mb-3">Папка: <code><?= e($b['path']) ?></code></div>
-                <form method="post" class="mb-3">
-                  <?= csrf_field() ?><input type="hidden" name="action" value="delete_bot"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>">
-                  <button class="btn btn-outline-warning w-100">Удалить только из PM2, файлы оставить</button>
-                </form>
-                <form method="post" class="vstack gap-3">
-                  <?= csrf_field() ?><input type="hidden" name="action" value="delete_bot"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="delete_files" value="1">
-                  <label class="form-label">Подтверди имя бота:</label>
-                  <input class="form-control form-control-lg" name="confirm_name" placeholder="<?= e($b['name']) ?>" autocomplete="off" required>
-                  <button class="btn btn-danger btn-lg w-100">Удалить PM2 + файлы с сервера</button>
-                </form>
-              </div>
-            </div></div>
+
+    <div class="bot-grid-v92">
+    <?php foreach ($bots as $b):
+      $pm = $status[$b['name']] ?? [];
+      $st = (string)($pm['status'] ?? 'not_found');
+      $online = $st === 'online';
+      $files = $pm['files'] ?? [];
+      $mem = (float)($pm['memory'] ?? 0);
+      $memPct = (float)($pm['memory_percent'] ?? 0);
+      $cpu = (float)($pm['cpu_percent'] ?? ($pm['cpu'] ?? 0));
+      $cpuServer = (float)($pm['cpu_of_server'] ?? 0);
+      $restarts = (int)($pm['restarts'] ?? 0);
+      $crash = !empty($pm['crash_loop']);
+      $memShare = bots_bar_percent($mem, $totalBotMem);
+      $cpuBar = max(0.0, min(100.0, $cpu));
+      $cardClass = $online ? ($crash ? 'is-warn' : '') : 'is-down';
+      ob_start(); ?>
+      <div class="modal fade hh-modal bot-delete-modal" id="deleteBot<?= (int)$b['id'] ?>" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+          <div class="modal-header"><div><div class="eyebrow"><i class="fa-solid fa-trash"></i> Удаление</div><h5 class="modal-title mb-0"><?= e($b['name']) ?></h5></div><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+          <div class="modal-body">
+            <div class="small muted mb-3">Папка: <code><?= e($b['path']) ?></code></div>
+            <form method="post" class="mb-3">
+              <?= csrf_field() ?><input type="hidden" name="action" value="delete_bot"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>">
+              <button class="btn btn-outline-warning w-100">Удалить только из PM2, файлы оставить</button>
+            </form>
+            <form method="post" class="vstack gap-3">
+              <?= csrf_field() ?><input type="hidden" name="action" value="delete_bot"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="delete_files" value="1">
+              <label class="form-label">Подтверди имя бота:</label>
+              <input class="form-control form-control-lg" name="confirm_name" placeholder="<?= e($b['name']) ?>" autocomplete="off" required>
+              <button class="btn btn-danger btn-lg w-100">Удалить PM2 + файлы с сервера</button>
+            </form>
           </div>
-        <?php $modals[] = ob_get_clean(); ?>
-          <div class="bot-card-v29 bot-card-live" data-bot-name="<?= e($b['name']) ?>">
-            <div class="bot-top-v29">
-              <div class="bot-avatar-v29"><i class="fa-solid fa-robot"></i></div>
-              <div class="bot-title-v29"><b><?= e($b['name']) ?></b><span><?= e($b['runtime']) ?> / <?= e($b['start_command']?:'bot.py') ?></span></div>
-              <span class="bot-status-v29 <?= $st==='online'?'ok':'bad' ?>" data-bot-status><?= e($st) ?></span>
-            </div>
-            <div class="bot-live-stats-v29">
-              <div><span>RAM</span><b data-bot-memory><?= e(human_bytes($mem)) ?></b></div>
-              <div><span>CPU</span><b data-bot-cpu><?= e((string)$cpu) ?>%</b></div>
-              <div><span>UPTIME</span><b data-bot-uptime><?= e((string)($pm['uptime']??'—')) ?></b></div>
-              <div><span>RESTARTS</span><b data-bot-restarts><?= e((string)($pm['restarts']??0)) ?></b></div>
-            </div>
-            <div class="bot-meter-row-v29"><span>Нагрузка RAM</span><div class="mini-meter"><i data-bot-memory-bar style="width:<?= min(100, max(2, round($mem/1024/1024/10))) ?>%"></i></div></div>
-            <div class="bot-path"><code><?= e($b['path']) ?></code></div>
-            <div class="bot-files"><?php if($files): foreach($files as $f): ?><span><?= e($f) ?></span><?php endforeach; else: ?><em>файлы не прочитаны</em><?php endif; ?></div>
-            <div class="bot-actions">
-              <?php foreach(['start'=>'Start','stop'=>'Stop','restart'=>'Restart','install'=>'Deps'] as $cmd=>$label): ?>
-                <form method="post" data-async-submit><?= csrf_field() ?><input type="hidden" name="action" value="bot_action"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="bot_action" value="<?= e($cmd) ?>"><button class="btn btn-sm btn-soft" data-loading-text="<?= $cmd==='install'?'Ставлю зависимости...':'...' ?>"><?= e($label) ?></button></form>
-              <?php endforeach; ?>
-              <form method="post" onsubmit="return confirm('Остановить локальные дубли этого бота?')"><?= csrf_field() ?><input type="hidden" name="action" value="bot_action"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="bot_action" value="kill-conflicts"><button class="btn btn-sm btn-outline-warning">Fix</button></form>
-              <a class="btn btn-sm btn-soft" href="/?page=bot_logs&id=<?= (int)$b['id'] ?>">Logs</a>
-              <a class="btn btn-sm btn-soft" href="/?page=files&root=bots&path=<?= e($b['name']) ?>">Files</a>
-              <button type="button" class="btn btn-sm btn-outline-danger" data-bs-toggle="modal" data-bs-target="#deleteBot<?= (int)$b['id'] ?>">Delete</button>
-            </div>
+        </div></div>
+      </div>
+      <?php $modals[] = ob_get_clean(); ?>
+
+      <div class="bot-card-v92 bot-card-live <?= e($cardClass) ?>" data-bot-name="<?= e($b['name']) ?>">
+        <div class="bot-head-v92">
+          <div class="bot-mark-v92"><i class="fa-solid fa-robot"></i></div>
+          <div class="bot-id-v92"><b><?= e($b['name']) ?></b><span><?= e($b['runtime']) ?> · <?= e($b['start_command'] ?: 'bot.py') ?></span></div>
+          <span class="bot-state-v92 <?= $online ? 'ok' : 'bad' ?>" data-bot-status><?= e($st) ?></span>
+        </div>
+
+        <div class="bot-alert-v92" data-bot-alert<?= $crash ? '' : ' hidden' ?>>
+          <i class="fa-solid fa-triangle-exclamation"></i>
+          <span data-bot-alert-text><?= $crash ? 'Бот в цикле перезапусков: '.(int)$restarts.' рестартов и нулевой uptime. Смотри Logs — процесс падает сразу после старта.' : '' ?></span>
+        </div>
+
+        <div class="bot-load-v92">
+          <div class="bot-load-row-v92 ram">
+            <div class="bot-load-top-v92"><span>RAM</span><b><span data-bot-mem><?= e(human_bytes($mem)) ?></span><em data-bot-mem-pct><?= e((string)$memPct) ?>% сервера</em></b></div>
+            <div class="bot-load-bar-v92"><i data-bot-mem-bar style="width:<?= e((string)$memShare) ?>%"></i></div>
+            <div class="bot-load-foot-v92"><span>из <?= e(human_bytes($memTotal)) ?> на сервере</span><span data-bot-mem-share>доля среди ботов <?= e((string)$memShare) ?>%</span></div>
           </div>
-        <?php endforeach; if(!$bots): ?><div class="empty">Ботов пока нет</div><?php endif; ?>
+          <div class="bot-load-row-v92 cpu">
+            <div class="bot-load-top-v92"><span>CPU</span><b><span data-bot-cpu><?= e((string)$cpu) ?>% ядра</span><em data-bot-cpu-pct><?= e((string)$cpuServer) ?>% сервера</em></b></div>
+            <div class="bot-load-bar-v92"><i data-bot-cpu-bar style="width:<?= e((string)$cpuBar) ?>%"></i></div>
+            <div class="bot-load-foot-v92"><span><?= (int)$cores ?> ядер всего</span><span data-bot-cputime>CPU time <?= e((string)($pm['cpu_seconds'] ?? 0)) ?>с</span></div>
+          </div>
+        </div>
+
+        <div class="bot-facts-v92">
+          <div><span>Uptime</span><b data-bot-uptime><?= e((string)($pm['uptime'] ?? '—')) ?></b></div>
+          <div><span>Restarts</span><b data-bot-restarts class="<?= $restarts > 50 ? 'bad' : ($restarts > 5 ? 'warn' : '') ?>"><?= (int)$restarts ?></b></div>
+          <div><span>Threads</span><b data-bot-threads><?= e((string)($pm['threads'] ?? '—')) ?></b></div>
+          <div><span>PID</span><b data-bot-pid><?= e((string)($pm['pid'] ?? '—')) ?></b></div>
+          <div><span>Папка</span><b data-bot-disk><?= e(human_bytes((float)($pm['disk_bytes'] ?? 0))) ?></b></div>
+        </div>
+
+        <div class="bot-path-v92"><?= e($b['path']) ?></div>
+        <div class="bot-files-v92" data-bot-files><?php if ($files): foreach ($files as $f): ?><span><?= e($f) ?></span><?php endforeach; else: ?><em>файлы не прочитаны</em><?php endif; ?></div>
+
+        <div class="bot-actions-v92">
+          <?php foreach (['start' => 'Start', 'stop' => 'Stop', 'restart' => 'Restart', 'install' => 'Deps'] as $cmd => $label): ?>
+            <form method="post" data-async-submit><?= csrf_field() ?><input type="hidden" name="action" value="bot_action"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="bot_action" value="<?= e($cmd) ?>"><button class="btn btn-sm btn-soft" data-loading-text="<?= $cmd === 'install' ? 'Ставлю зависимости...' : '...' ?>"><?= e($label) ?></button></form>
+          <?php endforeach; ?>
+          <form method="post" onsubmit="return confirm('Остановить локальные дубли этого бота?')"><?= csrf_field() ?><input type="hidden" name="action" value="bot_action"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="bot_action" value="kill-conflicts"><button class="btn btn-sm btn-outline-warning">Fix</button></form>
+          <a class="btn btn-sm btn-soft" href="/?page=bot_logs&id=<?= (int)$b['id'] ?>">Logs</a>
+          <a class="btn btn-sm btn-soft" href="/?page=files&root=bots&path=<?= e($b['name']) ?>">Files</a>
+          <button type="button" class="btn btn-sm btn-outline-danger" data-bs-toggle="modal" data-bs-target="#deleteBot<?= (int)$b['id'] ?>">Delete</button>
         </div>
       </div>
+    <?php endforeach; if (!$bots): ?><div class="empty">Ботов пока нет. Загрузи первого через форму слева.</div><?php endif; ?>
     </div>
   </div>
 </div>
@@ -1457,6 +1641,30 @@ function view_ssl(): void {
       <button class="btn btn-soft"><i class="fa-solid fa-floppy-disk me-2"></i>IP</button>
     </form>
     <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_restore_existing"><button class="btn btn-soft"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Восстановить SSL на всех доменах</button></form><form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="ssl_renew_all"><button class="btn btn-primary"><i class="fa-solid fa-arrows-rotate me-2"></i>Автопродление</button></form>
+  </div>
+</div>
+<div class="ssl-any-card-v92 mb-4">
+  <div class="eyebrow"><i class="fa-solid fa-globe"></i> Любой домен</div>
+  <h2 class="mb-2">SSL на www и поддомены</h2>
+  <p class="muted mb-0">Впиши полный хост — например <code>www.pixel-pc.store</code>. Панель привяжет его к нужному сайту, пересоберёт Nginx и выпустит <b>один</b> сертификат сразу на домен и все его имена.</p>
+  <div class="ssl-any-grid-v92">
+    <form method="post" class="ssl-any-form-v92" data-ssl-submit data-ssl-any data-domain="">
+      <?= csrf_field() ?><input type="hidden" name="action" value="ssl_any">
+      <input class="form-control form-control-lg" name="host" placeholder="www.pixel-pc.store" autocomplete="off" spellcheck="false" required data-ssl-host>
+      <input class="form-control form-control-lg" name="email" type="email" value="<?= e($savedSslEmail) ?>" placeholder="email@example.com" autocomplete="email" spellcheck="false" required data-ssl-email>
+      <div class="ssl-any-actions-v92">
+        <button type="button" class="btn btn-soft" data-ssl-check><i class="fa-solid fa-stethoscope me-2"></i>Проверить домен</button>
+        <button class="btn btn-primary btn-lg" type="submit" data-ssl-button><i class="fa-solid fa-bolt me-2"></i><span>Выпустить SSL</span></button>
+      </div>
+      <div class="ssl-job-panel" data-ssl-job-panel hidden>
+        <div class="ssl-job-head"><span class="ssl-job-icon"><i class="fa-solid fa-rotate fa-spin"></i></span><div><b data-ssl-job-title>Запускаю выпуск SSL</b><span data-ssl-job-message>Задание создаётся на сервере…</span></div></div>
+        <div class="ssl-job-progress"><i data-ssl-job-progress></i></div>
+        <pre class="ssl-job-error" data-ssl-job-error hidden></pre>
+      </div>
+    </form>
+    <div class="ssl-any-report-v92" data-ssl-report>
+      <div class="placeholder">Нажми «Проверить домен» — покажу A и AAAA записи, к какому сайту привязан хост, отдаётся ли ACME challenge и есть ли уже живой сертификат.</div>
+    </div>
   </div>
 </div>
 <div class="panel-card ssl-card">
