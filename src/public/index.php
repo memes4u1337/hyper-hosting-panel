@@ -623,7 +623,7 @@ function fm_delete(): void
 function rrmdir(string $path): void { if(is_dir($path)&&!is_link($path)){ foreach(scandir($path)?:[] as $i){ if($i==='.'||$i==='..') continue; rrmdir($path.'/'.$i);} if(!@rmdir($path)){ run_ctl(['repair'],180); @rmdir($path); } } else { if(!@unlink($path)){ run_ctl(['repair'],180); @unlink($path); } } }
 
 
-function hh_app_version(): string { return '1.8-v92'; }
+function hh_app_version(): string { return '1.9-v93'; }
 
 function hh_nav_config(): array
 {
@@ -650,7 +650,7 @@ function nav_item(string $id,string $icon,string $label,string $page): string
 function render_login(): void
 {
     $flash=flash(); $need2fa=setting_get('security_2fa_enabled','0')==='1'; ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=92" rel="stylesheet"></head><body class="login-body">
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=93" rel="stylesheet"></head><body class="login-body">
 <div class="login-orb login-orb-a"></div><div class="login-orb login-orb-b"></div><div class="login-orb login-orb-c"></div>
 <main class="login-clean">
   <section class="login-card card-glass login-clean-card">
@@ -678,7 +678,7 @@ function render_page(string $page, array $user): void
 <link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
-<link href="/assets/style.css?v=92" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
+<link href="/assets/style.css?v=93" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
 <div class="mobile-nav-backdrop" id="mobileNavBackdrop"></div>
 <aside class="sidebar sidebar-v3" id="mainSidebar">
   <div class="sidebar-brand-v3">
@@ -736,7 +736,7 @@ function render_page(string $page, array $user): void
   <section class="page-stage-v3"><?php route_view($page); ?></section>
 </main></div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script>
-<script src="/assets/app.js?v=92" defer></script></body></html><?php
+<script src="/assets/app.js?v=93" defer></script></body></html><?php
 }
 function route_view(string $page): void { match($page){ 'files'=>view_files(), 'sites'=>view_sites(), 'ftp'=>view_ftp(), 'databases'=>view_databases(), 'pma_login'=>view_pma_login(), 'bots'=>view_bots(), 'deploy_center'=>view_deploy_center(), 'bot_logs'=>view_bot_logs(), 'deploy_logs'=>view_deploy_logs(), 'backups'=>view_backups(), 'dns'=>view_dns(), 'network'=>view_network(), 'ssl'=>view_ssl(), 'php'=>view_php(), 'cron'=>view_cron(), 'logs'=>view_logs(), 'security'=>view_security(), 'settings'=>view_settings(), 'access'=>view_access(), 'disk'=>view_disk(), default=>view_dashboard(), }; }
 function stat_card(string $icon,string $label,string $value,string $sub=''): void { ?><div class="stat-card"><div class="stat-icon"><i class="fa-solid <?= e($icon) ?>"></i></div><div><span><?= e($label) ?></span><b><?= e($value) ?></b><?php if($sub): ?><em><?= e($sub) ?></em><?php endif; ?></div></div><?php }
@@ -921,155 +921,259 @@ function view_databases(): void
     $mysqlLanHost=(string)app_config('server_ip','192.168.0.179');
     $listen=!empty($mysql['listen_3306']);
     $accountByUser=[]; foreach($accounts as $a){ $accountByUser[$a['username']]=$a; }
+    $serviceOk=(($mysql['service']??'')==='active');
     ?>
-<div class="db-layout-v24">
-  <section class="db-top panel-card">
-    <div class="card-title-row align-items-start flex-wrap">
-      <div>
-        <div class="eyebrow"><i class="fa-solid fa-database"></i> MySQL / phpMyAdmin</div>
-        <h2 class="mb-1">Базы данных</h2>
-        
+<div class="db-page-v93">
+
+  <section class="db-hero-v93">
+    <div class="db-hero-top-v93">
+      <div class="db-hero-title-v93">
+        <div class="eyebrow"><i class="fa-solid fa-database"></i> MySQL / MariaDB</div>
+        <h2>Базы данных</h2>
+        <p>Создание баз, аккаунты phpMyAdmin и фоновый импорт больших дампов.</p>
       </div>
-      <div class="d-flex gap-2 flex-wrap">
-        <a class="btn btn-primary" href="<?= e($pma) ?>" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square me-2"></i>phpMyAdmin</a>
-        <form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="phpmyadmin_fix"><button class="btn btn-soft"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Настроить phpMyAdmin</button></form>
-        <form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="mysql_external"><input type="hidden" name="state" value="enable"><button class="btn btn-soft"><i class="fa-solid fa-plug-circle-bolt me-2"></i>Внешний SQL</button></form>
+      <div class="db-hero-actions-v93">
+        <a class="btn btn-primary" href="<?= e($pma) ?>" target="_blank" rel="noopener"><i class="fa-solid fa-arrow-up-right-from-square me-2"></i>Открыть phpMyAdmin</a>
+        <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="phpmyadmin_fix"><button class="btn btn-soft"><i class="fa-solid fa-screwdriver-wrench me-2"></i>Настроить phpMyAdmin</button></form>
+        <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="mysql_external"><input type="hidden" name="state" value="enable"><button class="btn btn-soft"><i class="fa-solid fa-plug-circle-bolt me-2"></i>Внешний SQL</button></form>
       </div>
     </div>
-    <div class="db-status-grid mt-3">
-      <div><span>MariaDB</span><b class="<?= (($mysql['service']??'')==='active')?'hh-ok':'hh-warn' ?>"><?= e((string)($mysql['service']??'unknown')) ?></b></div>
-      <div><span>3306</span><b class="<?= $listen?'hh-ok':'hh-bad' ?>"><?= $listen?'слушает':'закрыт' ?></b></div>
-      <div><span>Доступ</span><b class="<?= $external?'hh-ok':'hh-warn' ?>"><?= $external?'внешний включён':'локально' ?></b></div>
-      <div><span>SQL host</span><b><?= e($mysqlExternalHost) ?></b></div>
-      <div><span>pmadb</span><b class="<?= !empty($pmaStatus['ready'])?'hh-ok':'hh-warn' ?>"><?= !empty($pmaStatus['ready'])?'готово':'настроить' ?></b></div>
-      <div><span>Импорт</span><b><?= e((string)($pmaStatus['upload_max_filesize']??'8192M')) ?></b></div>
-      <div><span>Экспорт</span><b><?= e((string)($pmaStatus['memory_limit']??'2048M')) ?></b></div>
+
+    <div class="db-status-v93">
+      <div class="db-status-item-v93">
+        <span>Сервер</span>
+        <b class="<?= $serviceOk?'hh-ok':'hh-warn' ?>"><?= e((string)($mysql['service']??'unknown')) ?></b>
+      </div>
+      <div class="db-status-item-v93">
+        <span>Порт 3306</span>
+        <b class="<?= $listen?'hh-ok':'hh-bad' ?>"><?= $listen?'слушает':'закрыт' ?></b>
+      </div>
+      <div class="db-status-item-v93">
+        <span>Доступ</span>
+        <b class="<?= $external?'hh-ok':'hh-warn' ?>"><?= $external?'внешний':'локальный' ?></b>
+      </div>
+      <div class="db-status-item-v93">
+        <span>SQL host</span>
+        <code class="db-copy-v93" data-copy-text="<?= e($mysqlExternalHost) ?>" title="Нажми, чтобы скопировать"><?= e($mysqlExternalHost) ?></code>
+      </div>
+      <div class="db-status-item-v93">
+        <span>Служебная база pma</span>
+        <b class="<?= !empty($pmaStatus['ready'])?'hh-ok':'hh-warn' ?>"><?= !empty($pmaStatus['ready'])?'готова':'настроить' ?></b>
+      </div>
+      <div class="db-status-item-v93">
+        <span>Лимит импорта</span>
+        <code><?= e((string)($pmaStatus['upload_max_filesize']??'8192M')) ?></code>
+      </div>
+      <div class="db-status-item-v93">
+        <span>Память экспорта</span>
+        <code><?= e((string)($pmaStatus['memory_limit']??'2048M')) ?></code>
+      </div>
+      <div class="db-status-item-v93">
+        <span>Всего баз</span>
+        <code><?= count($rows) ?> · аккаунтов <?= count($accounts) ?></code>
+      </div>
     </div>
-    <?php if(!empty($doctor['problem'])): ?><div class="alert alert-warning mt-3 mb-0"><i class="fa-solid fa-triangle-exclamation me-2"></i><?= e((string)$doctor['problem']) ?></div><?php endif; ?>
+
+    <?php if(!empty($doctor['problem'])): ?>
+      <div class="db-problem-v93"><i class="fa-solid fa-triangle-exclamation"></i><span><?= e((string)$doctor['problem']) ?></span></div>
+    <?php endif; ?>
   </section>
 
-  <div class="row g-4 mt-1">
-    <div class="col-xl-4">
-      <div class="panel-card db-form-card">
-        <h2><i class="fa-solid fa-plus me-2"></i>Новая база</h2>
-        <form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_db">
-          <input class="form-control" name="db_name" placeholder="Имя базы, например hyper_host_bot" value="hyper_host_bot" required>
-          <input class="form-control" name="db_user" placeholder="Пользователь, например hyper_bot" value="hyper_bot" required>
-          <div class="input-group"><input class="form-control" id="dbPass" name="password" value="<?= e($gen) ?>" minlength="10" required><button class="btn btn-outline-light" type="button" onclick="copyValue('dbPass')"><i class="fa-regular fa-copy"></i></button></div>
+  <div class="db-columns-v93">
+    <aside class="db-side-v93">
+
+      <div class="panel-card db-form-card-v93">
+        <div class="db-form-head-v93"><span><i class="fa-solid fa-plus"></i></span><div><b>Новая база</b><small>база и пользователь одной кнопкой</small></div></div>
+        <form method="post" class="db-form-v93"><?= csrf_field() ?><input type="hidden" name="action" value="create_db">
+          <label class="db-field-v93"><span>Имя базы</span><input class="form-control" name="db_name" placeholder="hyper_host_bot" value="hyper_host_bot" required></label>
+          <label class="db-field-v93"><span>Пользователь</span><input class="form-control" name="db_user" placeholder="hyper_bot" value="hyper_bot" required></label>
+          <label class="db-field-v93"><span>Пароль</span>
+            <span class="input-group"><input class="form-control" id="dbPass" name="password" value="<?= e($gen) ?>" minlength="10" required><button class="btn btn-outline-light" type="button" onclick="copyValue('dbPass')"><i class="fa-regular fa-copy"></i></button></span>
+          </label>
           <div class="db-access-pills">
-            <label><input type="radio" name="remote_allowed" value="0" checked><span><i class="fa-solid fa-house"></i> Локально</span></label>
-            <label><input type="radio" name="remote_allowed" value="1"><span><i class="fa-solid fa-globe"></i> Внешний вход</span></label>
+            <label><input type="radio" name="remote_allowed" value="0" checked><span><i class="fa-solid fa-house"></i>Локально</span></label>
+            <label><input type="radio" name="remote_allowed" value="1"><span><i class="fa-solid fa-globe"></i>Внешний вход</span></label>
           </div>
           <div class="remote-options db-hidden">
-            <select class="form-select" name="host_pattern" onchange="this.closest('.remote-options').querySelector('.custom-host').style.display=this.value==='custom'?'block':'none'">
-              <option value="%">Любой IP</option>
-              <option value="<?= e($mysqlLanHost) ?>">Только LAN: <?= e($mysqlLanHost) ?></option>
-              <option value="custom">Свой IP или маска</option>
-            </select>
-            <input class="form-control custom-host mt-2" style="display:none" name="custom_host" placeholder="пример: 1.2.3.4 или 90.189.208.%">
+            <label class="db-field-v93"><span>Откуда пускать</span>
+              <select class="form-select" name="host_pattern" onchange="this.closest('.remote-options').querySelector('.custom-host').style.display=this.value==='custom'?'block':'none'">
+                <option value="%">Любой IP</option>
+                <option value="<?= e($mysqlLanHost) ?>">Только LAN: <?= e($mysqlLanHost) ?></option>
+                <option value="custom">Свой IP или маска</option>
+              </select>
+            </label>
+            <input class="form-control custom-host mt-2" style="display:none" name="custom_host" placeholder="1.2.3.4 или 90.189.208.%">
           </div>
-          <button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Создать</button>
+          <button class="btn btn-primary btn-lg w-100"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Создать базу</button>
         </form>
       </div>
 
-      <div class="panel-card db-form-card mt-4" id="imports">
-        <h2><i class="fa-solid fa-file-import me-2"></i>Большой SQL-импорт</h2>
-        <p class="muted small">Файлы <code>.sql</code>, <code>.sql.gz</code> и <code>.zip</code> загружаются один раз, затем импорт продолжается в фоне без удержания соединения браузера.</p>
+      <div class="panel-card db-form-card-v93" id="imports">
+        <div class="db-form-head-v93"><span><i class="fa-solid fa-file-import"></i></span><div><b>Импорт дампа</b><small>.sql, .sql.gz и .zip до 8 ГБ</small></div></div>
         <?php if($rows): ?>
-        <form method="post" enctype="multipart/form-data" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="import_db">
-          <select class="form-select" name="id" required><?php foreach($rows as $r): ?><option value="<?= (int)$r['id'] ?>"><?= e($r['db_name']) ?></option><?php endforeach; ?></select>
-          <input class="form-control" type="file" name="sql_file" accept=".sql,.gz,.zip,application/sql,application/zip,application/gzip" required>
-          <button class="btn btn-primary w-100"><i class="fa-solid fa-cloud-arrow-up me-2"></i>Загрузить и импортировать в фоне</button>
+        <form method="post" enctype="multipart/form-data" class="db-form-v93"><?= csrf_field() ?><input type="hidden" name="action" value="import_db">
+          <label class="db-field-v93"><span>В какую базу</span>
+            <select class="form-select" name="id" required><?php foreach($rows as $r): ?><option value="<?= (int)$r['id'] ?>"><?= e($r['db_name']) ?></option><?php endforeach; ?></select>
+          </label>
+          <label class="db-field-v93"><span>Файл дампа</span>
+            <input class="form-control" type="file" name="sql_file" accept=".sql,.gz,.zip,application/sql,application/zip,application/gzip" required>
+          </label>
+          <button class="btn btn-primary w-100"><i class="fa-solid fa-cloud-arrow-up me-2"></i>Загрузить и импортировать</button>
         </form>
-        <?php else: ?><div class="alert alert-warning mb-0">Сначала создай базу данных.</div><?php endif; ?>
-        <div class="small muted mt-3">Лимит панели: 8 ГБ. Дамп на 2 ГБ может импортироваться 30–120 минут. Ниже отображаются живой PID, скорость, размер базы и число созданных таблиц — поэтому видно, идёт работа или процесс действительно остановился.</div>
+        <p class="db-note-v93">Файл загружается один раз, дальше импорт идёт в фоне — вкладку можно закрыть. Дамп на 2 ГБ занимает 30–120 минут. Живой прогресс, скорость и число созданных таблиц видно справа.</p>
+        <?php else: ?>
+          <div class="db-empty-v93">Сначала создай базу — тогда появится выбор, куда импортировать.</div>
+        <?php endif; ?>
       </div>
 
-      <div class="panel-card db-form-card mt-4">
-        <h2><i class="fa-solid fa-user-lock me-2"></i>Аккаунт phpMyAdmin</h2>
-        <form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_mysql_account">
-          <input class="form-control" name="mysql_user" placeholder="Логин" required>
-          <div class="input-group"><input class="form-control" id="pmaPass" name="password" value="<?= e(default_db_password()) ?>" minlength="10" required><button class="btn btn-outline-light" type="button" onclick="copyValue('pmaPass')"><i class="fa-regular fa-copy"></i></button></div>
-          <select class="form-select" name="grant_db"><option value="">Без привязки к базе</option><?php foreach($rows as $r): ?><option value="<?= e($r['db_name']) ?>"><?= e($r['db_name']) ?></option><?php endforeach; ?><option value="*">Все базы</option></select>
-          <select class="form-select" name="privileges"><option value="ALL">Полный доступ</option><option value="SELECT">Только чтение</option></select>
+      <div class="panel-card db-form-card-v93">
+        <div class="db-form-head-v93"><span><i class="fa-solid fa-user-lock"></i></span><div><b>Аккаунт phpMyAdmin</b><small>отдельный вход под свои права</small></div></div>
+        <form method="post" class="db-form-v93"><?= csrf_field() ?><input type="hidden" name="action" value="create_mysql_account">
+          <label class="db-field-v93"><span>Логин</span><input class="form-control" name="mysql_user" placeholder="pma_user" required></label>
+          <label class="db-field-v93"><span>Пароль</span>
+            <span class="input-group"><input class="form-control" id="pmaPass" name="password" value="<?= e(default_db_password()) ?>" minlength="10" required><button class="btn btn-outline-light" type="button" onclick="copyValue('pmaPass')"><i class="fa-regular fa-copy"></i></button></span>
+          </label>
+          <label class="db-field-v93"><span>Доступ к базе</span>
+            <select class="form-select" name="grant_db"><option value="">Без привязки к базе</option><?php foreach($rows as $r): ?><option value="<?= e($r['db_name']) ?>"><?= e($r['db_name']) ?></option><?php endforeach; ?><option value="*">Все базы</option></select>
+          </label>
+          <label class="db-field-v93"><span>Права</span>
+            <select class="form-select" name="privileges"><option value="ALL">Полный доступ</option><option value="SELECT">Только чтение</option></select>
+          </label>
           <div class="db-access-pills">
-            <label><input type="radio" name="remote_allowed" value="0" checked><span><i class="fa-solid fa-house"></i> Локально</span></label>
-            <label><input type="radio" name="remote_allowed" value="1"><span><i class="fa-solid fa-globe"></i> Внешний вход</span></label>
+            <label><input type="radio" name="remote_allowed" value="0" checked><span><i class="fa-solid fa-house"></i>Локально</span></label>
+            <label><input type="radio" name="remote_allowed" value="1"><span><i class="fa-solid fa-globe"></i>Внешний вход</span></label>
           </div>
           <div class="remote-options db-hidden">
-            <select class="form-select" name="host_pattern" onchange="this.closest('.remote-options').querySelector('.custom-host').style.display=this.value==='custom'?'block':'none'">
-              <option value="%">Любой IP</option>
-              <option value="<?= e($mysqlLanHost) ?>">Только <?= e($mysqlLanHost) ?></option>
-              <option value="custom">Свой IP или маска</option>
-            </select>
-            <input class="form-control custom-host mt-2" style="display:none" name="custom_host" placeholder="пример: 1.2.3.4">
+            <label class="db-field-v93"><span>Откуда пускать</span>
+              <select class="form-select" name="host_pattern" onchange="this.closest('.remote-options').querySelector('.custom-host').style.display=this.value==='custom'?'block':'none'">
+                <option value="%">Любой IP</option>
+                <option value="<?= e($mysqlLanHost) ?>">Только <?= e($mysqlLanHost) ?></option>
+                <option value="custom">Свой IP или маска</option>
+              </select>
+            </label>
+            <input class="form-control custom-host mt-2" style="display:none" name="custom_host" placeholder="1.2.3.4">
           </div>
           <button class="btn btn-soft w-100"><i class="fa-solid fa-user-plus me-2"></i>Создать аккаунт</button>
         </form>
       </div>
-    </div>
 
-    <div class="col-xl-8">
+    </aside>
+
+    <div class="db-main-v93">
+
       <div class="panel-card">
-        <div class="card-title-row"><h2><i class="fa-solid fa-table me-2"></i>Базы</h2><div class="d-flex gap-2"><button class="btn btn-sm btn-soft" onclick="copyText('<?= e($mysqlExternalHost) ?>')">SQL host</button><button class="btn btn-sm btn-soft" onclick="copyText('<?= e($pma) ?>')">phpMyAdmin</button></div></div>
-        <div class="db-cards-list">
-        <?php foreach($rows as $r): $a=$accountByUser[$r['db_user']]??null; $hostPattern=(string)($a['host_pattern']??($r['remote_allowed']?'%':'localhost')); $connHost=(int)$r['remote_allowed']?$mysqlLanHost:$mysqlLocalHost; ?>
-          <div class="db-row-card">
-            <div><span>База</span><b><?= e($r['db_name']) ?></b><small><?= (int)$r['remote_allowed']?'Внешний вход':'Локально' ?></small></div>
-            <div><span>Пользователь</span><code><?= e($r['db_user']) ?></code><small><?= e(mysql_host_label($hostPattern)) ?></small></div>
-            <div><span>Пароль</span><code><?= e($r['db_password_plain']?:'не сохранён') ?></code></div>
-            <div class="db-actions">
-              <a class="btn btn-sm btn-primary" href="/?page=pma_login&type=db&id=<?= (int)$r['id'] ?>">Войти</a>
-              <button class="btn btn-sm btn-soft" onclick="copyText('Host: <?= e($connHost) ?>\nDatabase: <?= e($r['db_name']) ?>\nUser: <?= e($r['db_user']) ?>\nPassword: <?= e($r['db_password_plain']) ?>')">Данные</button>
-              <form method="post" onsubmit="return confirm('Удалить базу?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_db"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form>
-            </div>
+        <div class="card-title-row flex-wrap">
+          <h2><i class="fa-solid fa-table me-2"></i>Базы <span class="db-count-v93"><?= count($rows) ?></span></h2>
+          <div class="d-flex gap-2 flex-wrap">
+            <button class="btn btn-sm btn-soft" onclick="copyText('<?= e($mysqlExternalHost) ?>')">Копировать SQL host</button>
+            <button class="btn btn-sm btn-soft" onclick="copyText('<?= e($pma) ?>')">Ссылка phpMyAdmin</button>
           </div>
-        <?php endforeach; if(!$rows): ?><div class="empty">Баз пока нет</div><?php endif; ?>
+        </div>
+        <div class="db-cards-v93">
+        <?php foreach($rows as $r):
+          $a=$accountByUser[$r['db_user']]??null;
+          $hostPattern=(string)($a['host_pattern']??($r['remote_allowed']?'%':'localhost'));
+          $connHost=(int)$r['remote_allowed']?$mysqlLanHost:$mysqlLocalHost;
+          $remote=(int)$r['remote_allowed'];
+          $pass=(string)($r['db_password_plain']?:'');
+        ?>
+          <article class="db-card-v93<?= $remote?' is-remote':'' ?>">
+            <header class="db-card-head-v93">
+              <span class="db-card-icon-v93"><i class="fa-solid fa-database"></i></span>
+              <div class="db-card-name-v93"><b><?= e($r['db_name']) ?></b><small><?= e(mysql_host_label($hostPattern)) ?></small></div>
+              <span class="<?= $remote?'hh-warn':'hh-ok' ?>"><i class="fa-solid <?= $remote?'fa-globe':'fa-house' ?>"></i><?= $remote?'внешний вход':'только локально' ?></span>
+            </header>
+            <div class="db-fields-v93">
+              <div><span>Пользователь</span><code class="db-copy-v93" data-copy-text="<?= e($r['db_user']) ?>" title="Скопировать"><?= e($r['db_user']) ?></code></div>
+              <div><span>Хост подключения</span><code class="db-copy-v93" data-copy-text="<?= e($connHost) ?>" title="Скопировать"><?= e($connHost) ?></code></div>
+              <div><span>Порт</span><code>3306</code></div>
+              <div><span>Пароль</span><?php if($pass!==''): ?><code class="db-copy-v93 db-secret-v93" data-copy-text="<?= e($pass) ?>" title="Скопировать"><?= e($pass) ?></code><?php else: ?><code class="db-muted-v93">не сохранён</code><?php endif; ?></div>
+            </div>
+            <div class="db-actions">
+              <a class="btn btn-sm btn-primary" href="/?page=pma_login&type=db&id=<?= (int)$r['id'] ?>"><i class="fa-solid fa-right-to-bracket me-1"></i>Войти</a>
+              <button class="btn btn-sm btn-soft" onclick="copyText('Host: <?= e($connHost) ?>\nPort: 3306\nDatabase: <?= e($r['db_name']) ?>\nUser: <?= e($r['db_user']) ?>\nPassword: <?= e($pass) ?>')"><i class="fa-regular fa-copy me-1"></i>Все данные</button>
+              <form method="post" onsubmit="return confirm('Удалить базу <?= e($r['db_name']) ?> вместе со всеми таблицами?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_db"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form>
+            </div>
+          </article>
+        <?php endforeach; if(!$rows): ?><div class="db-empty-v93">Баз пока нет. Создай первую в форме слева.</div><?php endif; ?>
         </div>
       </div>
 
-      <div class="panel-card mt-4" id="import-jobs">
-        <div class="card-title-row"><h2><i class="fa-solid fa-bars-progress me-2"></i>Импорт SQL</h2><button class="btn btn-sm btn-soft" type="button" onclick="location.reload()">Обновить</button></div>
-        <div class="db-cards-list">
+      <div class="panel-card" id="import-jobs">
+        <div class="card-title-row flex-wrap">
+          <h2><i class="fa-solid fa-bars-progress me-2"></i>Импорт SQL</h2>
+          <button class="btn btn-sm btn-soft" type="button" onclick="location.reload()"><i class="fa-solid fa-rotate me-1"></i>Обновить</button>
+        </div>
+        <div class="db-cards-v93">
         <?php $hasRunning=false; foreach($imports as $job):
           $status=(string)($job['status']??'unknown');
-          if(in_array($status,['queued','running','waiting_mysql'],true))$hasRunning=true;
-          $progress=(float)($job['progress']??0);
+          $running=in_array($status,['queued','running','waiting_mysql'],true);
+          if($running) $hasRunning=true;
+          $progress=max(0,min(100,(float)($job['progress']??0)));
           $elapsed=(int)($job['elapsed_seconds']??0); $eta=$job['eta_seconds']??null;
           $speed=(float)($job['speed_mib_s']??0); $alive=!empty($job['worker_alive']);
-          $statusText=match($status){'done'=>'готово','failed'=>'ошибка','cancelled'=>'отменён','waiting_mysql'=>'MySQL обрабатывает данные','queued'=>'в очереди',default=>'импортируется'};
+          $statusText=match($status){'done'=>'готово','failed'=>'ошибка','cancelled'=>'отменён','waiting_mysql'=>'MySQL обрабатывает блок','queued'=>'в очереди',default=>'импортируется'};
+          $statusClass=$status==='done'?'hh-ok':(in_array($status,['failed','cancelled'],true)?'hh-bad':'hh-warn');
+          $barClass=$status==='done'?' done':(in_array($status,['failed','cancelled'],true)?' failed':'');
         ?>
-          <div class="db-row-card compact">
-            <div><span>База</span><b><?= e((string)($job['database']??'')) ?></b><small><?= e((string)($job['source_name']??'')) ?></small></div>
-            <div><span>Статус</span><b class="<?= $status==='done'?'hh-ok':(in_array($status,['failed','cancelled'],true)?'hh-bad':'hh-warn') ?>"><?= e($statusText) ?></b><small><?= round($progress,1) ?>% · процесс <?= $alive?'жив':'не найден' ?></small></div>
-            <div style="min-width:220px"><span>Прогресс</span><div class="progress" style="height:9px"><div class="progress-bar" style="width:<?= max(0,min(100,$progress)) ?>%"></div></div><small><?= e(human_bytes((float)($job['bytes_processed']??0))) ?> / <?= e(human_bytes((float)($job['bytes_total']??0))) ?> · <?= round($speed,1) ?> МиБ/с</small></div>
-            <div><span>Результат в базе</span><b><?= (int)($job['tables_count']??0) ?> таблиц</b><small><?= e(human_bytes((float)($job['database_size_bytes']??0))) ?> · прошло <?= gmdate('H:i:s',max(0,$elapsed)) ?><?= is_numeric($eta)?' · осталось ~'.gmdate('H:i:s',max(0,(int)$eta)):'' ?></small></div>
-            <div><span>Задание</span><code><?= e((string)($job['job_id']??'')) ?></code><?php if(!empty($job['error'])): ?><small class="text-danger" title="<?= e((string)$job['error']) ?>"><?= e(mb_substr((string)$job['error'],0,220)) ?></small><?php elseif(!empty($job['log_tail']) && $status==='waiting_mysql'): ?><small title="<?= e((string)$job['log_tail']) ?>">MySQL занят обработкой последнего блока — это не зависание</small><?php endif; ?>
-              <?php if(in_array($status,['queued','running','waiting_mysql'],true)): ?><form method="post" class="mt-2" onsubmit="return confirm('Остановить импорт? Уже загруженные таблицы останутся в базе.')"><?= csrf_field() ?><input type="hidden" name="action" value="cancel_import"><input type="hidden" name="job_id" value="<?= e((string)($job['job_id']??'')) ?>"><button class="btn btn-sm btn-outline-danger">Остановить</button></form><?php endif; ?>
+          <article class="db-job-v93">
+            <header class="db-card-head-v93">
+              <span class="db-card-icon-v93 job"><i class="fa-solid fa-file-arrow-down"></i></span>
+              <div class="db-card-name-v93"><b><?= e((string)($job['database']??'')) ?></b><small><?= e((string)($job['source_name']??'')) ?></small></div>
+              <span class="<?= $statusClass ?>"><?= e($statusText) ?></span>
+            </header>
+            <div class="db-job-bar-v93<?= $barClass ?>"><i style="width:<?= round($progress,1) ?>%"></i></div>
+            <div class="db-job-meta-v93">
+              <div><span>Прогресс</span><b><?= round($progress,1) ?>%</b></div>
+              <div><span>Прочитано</span><b><?= e(human_bytes((float)($job['bytes_processed']??0))) ?></b><em>из <?= e(human_bytes((float)($job['bytes_total']??0))) ?></em></div>
+              <div><span>Скорость</span><b><?= round($speed,1) ?> МиБ/с</b><em>процесс <?= $alive?'жив':'не найден' ?></em></div>
+              <div><span>Таблиц создано</span><b><?= (int)($job['tables_count']??0) ?></b><em><?= e(human_bytes((float)($job['database_size_bytes']??0))) ?> в базе</em></div>
+              <div><span>Прошло</span><b><?= gmdate('H:i:s',max(0,$elapsed)) ?></b><?php if(is_numeric($eta)): ?><em>осталось ~<?= gmdate('H:i:s',max(0,(int)$eta)) ?></em><?php endif; ?></div>
+              <div><span>Задание</span><b class="db-job-id-v93"><?= e((string)($job['job_id']??'')) ?></b></div>
             </div>
-          </div>
-        <?php endforeach; if(!$imports): ?><div class="empty">Импорты ещё не запускались</div><?php endif; ?>
+            <?php if(!empty($job['error'])): ?>
+              <div class="db-job-error-v93"><i class="fa-solid fa-circle-exclamation"></i><span><?= e(mb_substr((string)$job['error'],0,400)) ?></span></div>
+            <?php elseif(!empty($job['log_tail']) && $status==='waiting_mysql'): ?>
+              <div class="db-job-hint-v93"><i class="fa-solid fa-circle-info"></i><span>MySQL занят обработкой последнего блока — это не зависание.</span></div>
+            <?php endif; ?>
+            <?php if($running): ?>
+              <div class="db-actions"><form method="post" onsubmit="return confirm('Остановить импорт? Уже загруженные таблицы останутся в базе.')"><?= csrf_field() ?><input type="hidden" name="action" value="cancel_import"><input type="hidden" name="job_id" value="<?= e((string)($job['job_id']??'')) ?>"><button class="btn btn-sm btn-outline-danger">Остановить импорт</button></form></div>
+            <?php endif; ?>
+          </article>
+        <?php endforeach; if(!$imports): ?><div class="db-empty-v93">Импорты ещё не запускались.</div><?php endif; ?>
         </div>
       </div>
       <?php if(!empty($hasRunning)): ?><script>setTimeout(function(){location.reload()},5000);</script><?php endif; ?>
 
-      <div class="panel-card mt-4">
-        <h2><i class="fa-solid fa-users-gear me-2"></i>Аккаунты MySQL / phpMyAdmin</h2>
-        <div class="db-cards-list">
-        <?php foreach($accounts as $a): $connHost=((int)$a['remote_allowed']?$mysqlExternalHost:$mysqlLanHost); ?>
-          <div class="db-row-card compact">
-            <div><span>Логин</span><code><?= e($a['username']) ?></code><small><?= e(mysql_host_label((string)$a['host_pattern'])) ?></small></div>
-            <div><span>Доступ</span><b><?= e($a['db_name']?:'без базы') ?></b><small><?= e($a['privileges']) ?></small></div>
-            <div><span>Пароль</span><code><?= e($a['password_plain']) ?></code></div>
-            <div class="db-actions">
-              <a class="btn btn-sm btn-primary" href="/?page=pma_login&type=account&id=<?= (int)$a['id'] ?>">Войти</a>
-              <button class="btn btn-sm btn-soft" onclick="copyText('Host: <?= e($connHost) ?>\nDatabase: <?= e($a['db_name']) ?>\nUser: <?= e($a['username']) ?>\nPassword: <?= e($a['password_plain']) ?>')">Данные</button>
-              <form method="post" onsubmit="return confirm('Удалить MySQL аккаунт?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_mysql_account"><input type="hidden" name="id" value="<?= (int)$a['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form>
+      <div class="panel-card">
+        <div class="card-title-row flex-wrap"><h2><i class="fa-solid fa-users-gear me-2"></i>Аккаунты MySQL <span class="db-count-v93"><?= count($accounts) ?></span></h2></div>
+        <div class="db-cards-v93">
+        <?php foreach($accounts as $a):
+          $remote=(int)$a['remote_allowed'];
+          $connHost=$remote?$mysqlExternalHost:$mysqlLanHost;
+        ?>
+          <article class="db-card-v93<?= $remote?' is-remote':'' ?>">
+            <header class="db-card-head-v93">
+              <span class="db-card-icon-v93 user"><i class="fa-solid fa-user-lock"></i></span>
+              <div class="db-card-name-v93"><b><?= e($a['username']) ?></b><small><?= e(mysql_host_label((string)$a['host_pattern'])) ?></small></div>
+              <span class="<?= $remote?'hh-warn':'hh-ok' ?>"><i class="fa-solid <?= $remote?'fa-globe':'fa-house' ?>"></i><?= $remote?'внешний вход':'только локально' ?></span>
+            </header>
+            <div class="db-fields-v93">
+              <div><span>База</span><code><?= e($a['db_name']?:'без привязки') ?></code></div>
+              <div><span>Права</span><code><?= e($a['privileges']) ?></code></div>
+              <div><span>Хост подключения</span><code class="db-copy-v93" data-copy-text="<?= e($connHost) ?>" title="Скопировать"><?= e($connHost) ?></code></div>
+              <div><span>Пароль</span><code class="db-copy-v93 db-secret-v93" data-copy-text="<?= e($a['password_plain']) ?>" title="Скопировать"><?= e($a['password_plain']) ?></code></div>
             </div>
-          </div>
-        <?php endforeach; if(!$accounts): ?><div class="empty">Аккаунтов пока нет</div><?php endif; ?>
+            <div class="db-actions">
+              <a class="btn btn-sm btn-primary" href="/?page=pma_login&type=account&id=<?= (int)$a['id'] ?>"><i class="fa-solid fa-right-to-bracket me-1"></i>Войти</a>
+              <button class="btn btn-sm btn-soft" onclick="copyText('Host: <?= e($connHost) ?>\nPort: 3306\nDatabase: <?= e($a['db_name']) ?>\nUser: <?= e($a['username']) ?>\nPassword: <?= e($a['password_plain']) ?>')"><i class="fa-regular fa-copy me-1"></i>Все данные</button>
+              <form method="post" onsubmit="return confirm('Удалить MySQL аккаунт <?= e($a['username']) ?>?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_mysql_account"><input type="hidden" name="id" value="<?= (int)$a['id'] ?>"><button class="btn btn-sm btn-outline-danger">Удалить</button></form>
+            </div>
+          </article>
+        <?php endforeach; if(!$accounts): ?><div class="db-empty-v93">Аккаунтов пока нет.</div><?php endif; ?>
         </div>
       </div>
+
     </div>
   </div>
 </div>
@@ -1082,6 +1186,16 @@ document.querySelectorAll('.db-access-pills input[type="radio"]').forEach(functi
     remote.classList.toggle('db-hidden', !(yes && yes.checked));
   }
   r.addEventListener('change', upd); upd();
+});
+document.querySelectorAll('.db-copy-v93').forEach(function(el){
+  el.addEventListener('click', function(){
+    var value = el.getAttribute('data-copy-text') || el.textContent || '';
+    if(!value) return;
+    if(typeof copyText === 'function'){ copyText(value); }
+    else if(navigator.clipboard){ navigator.clipboard.writeText(value); }
+    el.classList.add('copied');
+    setTimeout(function(){ el.classList.remove('copied'); }, 900);
+  });
 });
 </script><?php
 }

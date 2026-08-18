@@ -937,3 +937,178 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 .site-alias-form-v92 input{max-width:280px}
 .site-domains-v92{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}
 .site-domains-v92 span{font-family:var(--mono);font-size:10.5px;padding:2px 8px;border-radius:99px;background:rgba(255,255,255,.04);border:1px solid var(--line-2);color:var(--muted)}
+
+/* ============================================================
+   HYPER-HOST v93 — СТРАНИЦА БАЗ ДАННЫХ
+   powered by memes4u1337
+   Было: .db-layout-v24 (grid 360px+1fr) запихивал шапку в узкую
+   колонку, .db-row-card>div не имел правил и подписи слипались
+   со значениями, bootstrap row/col бился с внешним grid.
+   Стало: собственная сетка, карточки с полями, ничего не липнет.
+   ============================================================ */
+
+.db-page-v93{display:flex;flex-direction:column;gap:22px}
+
+/* ---------- шапка ---------- */
+.db-hero-v93{
+  background:radial-gradient(620px 300px at 88% 0,rgba(79,125,255,.15),transparent 62%),
+             linear-gradient(135deg,var(--surface),var(--surface-2));
+  border:1px solid var(--line);border-radius:var(--r-lg);padding:26px
+}
+.db-hero-top-v93{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;flex-wrap:wrap}
+.db-hero-title-v93 h2{margin:6px 0 0;font-size:27px;letter-spacing:-.02em}
+.db-hero-title-v93 p{margin:7px 0 0;color:var(--muted);font-size:13px;max-width:52ch;line-height:1.5}
+.db-hero-actions-v93{display:flex;flex-wrap:wrap;gap:9px;align-items:center}
+.db-hero-actions-v93 form{display:contents}
+
+.db-status-v93{
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(178px,1fr));
+  gap:11px;margin-top:20px
+}
+.db-status-item-v93{
+  display:flex;flex-direction:column;gap:7px;min-width:0;
+  background:rgba(255,255,255,.025);border:1px solid var(--line-2);
+  border-radius:var(--r-sm);padding:12px 14px
+}
+.db-status-item-v93>span{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;font-weight:600;color:var(--faint)}
+.db-status-item-v93>b{align-self:flex-start}
+.db-status-item-v93>code{font-family:var(--mono);font-size:12.5px;color:#fff;word-break:break-all;background:none;padding:0}
+
+.db-problem-v93{
+  display:flex;align-items:flex-start;gap:10px;margin-top:16px;
+  background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.24);
+  border-radius:var(--r-sm);padding:13px 15px;font-size:12.5px;color:#fcd34d;line-height:1.45
+}
+.db-problem-v93>i{margin-top:2px;flex:0 0 auto}
+.db-problem-v93>span{color:#f6e2b0}
+
+/* ---------- две колонки без bootstrap ---------- */
+.db-columns-v93{display:grid;grid-template-columns:minmax(320px,390px) minmax(0,1fr);gap:22px;align-items:start}
+.db-columns-v93>*{min-width:0}
+.db-side-v93,.db-main-v93{display:flex;flex-direction:column;gap:22px;min-width:0}
+@media (max-width:1180px){.db-columns-v93{grid-template-columns:1fr}}
+
+/* ---------- формы слева ---------- */
+.db-form-card-v93{padding:20px}
+.db-form-head-v93{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+.db-form-head-v93>span{
+  width:40px;height:40px;border-radius:12px;flex:0 0 auto;display:grid;place-items:center;
+  font-size:15px;color:#051019;background:linear-gradient(135deg,var(--brand-a),var(--brand-b))
+}
+.db-form-head-v93 b{display:block;font-size:15px;font-weight:600;color:#fff;line-height:1.2}
+.db-form-head-v93 small{display:block;font-size:11.5px;color:var(--muted);margin-top:2px}
+.db-form-v93{display:flex;flex-direction:column;gap:13px}
+.db-field-v93{display:flex;flex-direction:column;gap:6px;margin:0}
+.db-field-v93>span{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;font-weight:600;color:var(--faint)}
+.db-note-v93{margin:14px 0 0;font-size:11.5px;color:var(--faint);line-height:1.5}
+
+/* переключатель локально / внешний вход */
+.db-access-pills{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.db-access-pills label{margin:0;cursor:pointer}
+.db-access-pills input{position:absolute;opacity:0;pointer-events:none}
+.db-access-pills span{
+  display:flex;align-items:center;justify-content:center;gap:7px;
+  padding:10px 12px;border-radius:var(--r-sm);font-size:12px;font-weight:600;
+  background:rgba(255,255,255,.03);border:1px solid var(--line-2);color:var(--muted);
+  transition:border-color .18s,background .18s,color .18s
+}
+.db-access-pills span i{font-size:11px}
+.db-access-pills label:hover span{border-color:var(--line-strong);color:var(--text)}
+.db-access-pills input:checked+span{
+  background:rgba(79,125,255,.14);border-color:rgba(79,125,255,.42);color:#cddcff
+}
+.db-access-pills input:focus-visible+span{outline:2px solid var(--brand-a);outline-offset:2px}
+.db-hidden{display:none}
+.remote-options{display:flex;flex-direction:column}
+
+/* ---------- карточки баз и аккаунтов ---------- */
+.db-count-v93{
+  display:inline-block;margin-left:8px;padding:2px 9px;border-radius:99px;
+  font-family:var(--mono);font-size:12px;font-weight:600;color:var(--muted);
+  background:rgba(255,255,255,.05);border:1px solid var(--line-2)
+}
+.db-cards-v93{display:flex;flex-direction:column;gap:14px}
+
+.db-card-v93,.db-job-v93{
+  position:relative;overflow:hidden;
+  background:rgba(255,255,255,.02);border:1px solid var(--line-2);
+  border-radius:var(--r);padding:17px 18px;
+  transition:border-color .22s,transform .22s var(--ease)
+}
+.db-card-v93:hover,.db-job-v93:hover{border-color:var(--line-strong);transform:translateY(-1px)}
+.db-card-v93::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--green);opacity:.8}
+.db-card-v93.is-remote::before{background:var(--amber)}
+.db-job-v93::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--blue);opacity:.8}
+
+.db-card-head-v93{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+.db-card-icon-v93{
+  width:38px;height:38px;border-radius:11px;flex:0 0 auto;display:grid;place-items:center;
+  font-size:14px;color:#051019;background:linear-gradient(135deg,var(--brand-a),var(--brand-b))
+}
+.db-card-icon-v93.user{background:linear-gradient(135deg,var(--violet),var(--brand-b))}
+.db-card-icon-v93.job{background:linear-gradient(135deg,var(--blue),var(--violet))}
+.db-card-name-v93{flex:1 1 180px;min-width:0}
+.db-card-name-v93 b{display:block;font-size:15.5px;font-weight:600;color:#fff;word-break:break-all;line-height:1.25}
+.db-card-name-v93 small{display:block;font-size:11px;color:var(--faint);margin-top:3px;font-family:var(--mono);word-break:break-all}
+
+/* поля: подпись сверху, значение снизу — больше ничего не слипается */
+.db-fields-v93{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px}
+.db-fields-v93>div{
+  display:flex;flex-direction:column;gap:5px;min-width:0;
+  background:rgba(255,255,255,.02);border:1px solid var(--line-2);
+  border-radius:var(--r-xs);padding:10px 12px
+}
+.db-fields-v93>div>span{font-size:9.5px;text-transform:uppercase;letter-spacing:.07em;font-weight:600;color:var(--faint)}
+.db-fields-v93>div>code{
+  font-family:var(--mono);font-size:12.5px;color:#fff;word-break:break-all;
+  background:none;padding:0;line-height:1.35
+}
+.db-muted-v93{color:var(--faint)!important}
+
+.db-copy-v93{cursor:pointer;transition:color .18s}
+.db-copy-v93:hover{color:var(--brand-a)!important}
+.db-copy-v93.copied{color:var(--green)!important}
+.db-copy-v93.copied::after{content:" скопировано";font-size:10px;color:var(--green)}
+.db-secret-v93{letter-spacing:.02em}
+
+.db-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.db-actions form{display:contents}
+
+/* ---------- карточка импорта ---------- */
+.db-job-bar-v93{position:relative;height:8px;border-radius:99px;background:rgba(255,255,255,.06);overflow:hidden;margin-bottom:14px}
+.db-job-bar-v93>i{display:block;height:100%;min-width:2px;border-radius:99px;background:var(--grad-brand);transition:width .6s var(--ease)}
+.db-job-bar-v93.done>i{background:var(--green)}
+.db-job-bar-v93.failed>i{background:var(--red)}
+
+.db-job-meta-v93{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:10px;margin-bottom:12px}
+.db-job-meta-v93>div{
+  display:flex;flex-direction:column;gap:4px;min-width:0;
+  background:rgba(255,255,255,.02);border:1px solid var(--line-2);
+  border-radius:var(--r-xs);padding:10px 12px
+}
+.db-job-meta-v93 span{font-size:9.5px;text-transform:uppercase;letter-spacing:.07em;font-weight:600;color:var(--faint)}
+.db-job-meta-v93 b{font-family:var(--mono);font-size:14px;font-weight:600;color:#fff;line-height:1.2}
+.db-job-meta-v93 em{font-style:normal;font-size:10.5px;color:var(--muted);font-family:var(--mono)}
+.db-job-id-v93{font-size:11px!important;word-break:break-all;color:var(--muted)!important}
+
+.db-job-error-v93,.db-job-hint-v93{
+  display:flex;align-items:flex-start;gap:9px;margin-bottom:12px;
+  border-radius:var(--r-sm);padding:11px 13px;font-size:11.5px;line-height:1.45
+}
+.db-job-error-v93{background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.24);color:#ffc9c9}
+.db-job-hint-v93{background:rgba(79,125,255,.08);border:1px solid rgba(79,125,255,.22);color:#c7d6ff}
+.db-job-error-v93>i,.db-job-hint-v93>i{margin-top:2px;flex:0 0 auto}
+.db-job-error-v93>span{word-break:break-word}
+
+.db-empty-v93{
+  background:rgba(255,255,255,.02);border:1px dashed var(--line);
+  border-radius:var(--r-sm);padding:22px;text-align:center;
+  color:var(--faint);font-size:13px
+}
+
+@media (max-width:560px){
+  .db-hero-v93{padding:20px}
+  .db-hero-title-v93 h2{font-size:23px}
+  .db-access-pills{grid-template-columns:1fr}
+  .db-fields-v93,.db-job-meta-v93{grid-template-columns:1fr}
+}
