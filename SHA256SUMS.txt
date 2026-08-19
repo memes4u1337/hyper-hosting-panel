@@ -1,0 +1,6 @@
+e3ad55049e12a3cf3f70acecb91ea8ff46a5a2f6fde1bfa653faeda1206bf768  apply-v1.3-cloud-storage.sh
+99b8a976a9164cd631703c600051097f82d2555760c6d54b48cee1d5e58ba73e  src/app/cloud.php
+7fbe27377fc8124799cd578af10afb730379b36ae6b1767eff936d0e9fc52652  src/public/assets/cloud.css
+bffd577fccc0dd0ce2c36ce0e5393e50145e55d6e8d206c92c206368c33aad4c  src/public/assets/cloud.js
+8023877b76c92da0db509005eb8b7e5e72e3a354e10fcb72cc2c33ad38e10be4  PATCH-v95-CLOUD.md
+94e786e241365ba7ff8250e73efdd07f6ac793ccfb231ed87ac69d50eb03f19b  README-INSTALL-CLOUD.txt

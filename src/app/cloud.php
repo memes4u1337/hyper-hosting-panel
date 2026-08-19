@@ -2,9 +2,25 @@
 declare(strict_types=1);
 
 /**
- * HYPER-HOST Cloud Storage v94
+ * HYPER-HOST Cloud Storage v95
  * Separate private storage mounted at /var/www/hyper-host-cloud.
  */
+
+// cloud.php is an application module, not a public endpoint.
+// It must only be loaded after bootstrap.php from the authenticated panel.
+if (!function_exists('current_user') || !function_exists('app_config')) {
+    http_response_code(403);
+    exit('Forbidden');
+}
+
+function hh_cloud_require_panel_auth(): array
+{
+    $user = current_user();
+    if (!$user) {
+        redirect('/?page=login');
+    }
+    return $user;
+}
 
 function hh_cloud_root(): string
 {
@@ -256,6 +272,7 @@ function hh_cloud_rrmdir(string $path): void
 
 function hh_cloud_handle_get(string $action): never
 {
+    hh_cloud_require_panel_auth();
     $rel = (string)($_GET['path'] ?? '');
     [, , $path] = hh_cloud_resolve($rel, true);
     if ($action === 'download') hh_cloud_stream_file($path, false);
@@ -266,6 +283,7 @@ function hh_cloud_handle_get(string $action): never
 
 function hh_cloud_handle_post(string $action): never
 {
+    hh_cloud_require_panel_auth();
     try {
         $current = hh_cloud_clean_rel((string)($_POST['path'] ?? ''));
         [, , $dir] = hh_cloud_resolve($current, true);
@@ -280,6 +298,10 @@ function hh_cloud_handle_post(string $action): never
             add_event('cloud', 'Создана папка: ' . ($current !== '' ? $current . '/' : '') . $name);
             flash('Папка создана: ' . $name, 'success');
         } elseif ($action === 'cloud_upload') {
+            // Upload destination is selected explicitly: root, current folder or any existing cloud folder.
+            $uploadTarget = hh_cloud_clean_rel((string)($_POST['upload_target'] ?? $current));
+            [, , $uploadDir] = hh_cloud_resolve($uploadTarget, true);
+            if (!is_dir($uploadDir) || is_link($uploadDir)) throw new RuntimeException('Папка загрузки не найдена');
             if (!isset($_FILES['files'])) throw new RuntimeException('Выберите файлы');
             $names = is_array($_FILES['files']['name'] ?? null) ? $_FILES['files']['name'] : [$_FILES['files']['name'] ?? ''];
             $tmps = is_array($_FILES['files']['tmp_name'] ?? null) ? $_FILES['files']['tmp_name'] : [$_FILES['files']['tmp_name'] ?? ''];
@@ -301,14 +323,14 @@ function hh_cloud_handle_post(string $action): never
                 $tmp = (string)($tmps[$i] ?? '');
                 if ($tmp === '' || !is_uploaded_file($tmp)) continue;
                 $name = hh_cloud_valid_name(basename((string)$rawName));
-                $target = hh_cloud_unique_target($dir, $name);
+                $target = hh_cloud_unique_target($uploadDir, $name);
                 if (!move_uploaded_file($tmp, $target)) throw new RuntimeException('Не удалось сохранить: ' . $name);
                 @chmod($target, 0660); @chown($target, 'www-data'); @chgrp($target, 'www-data');
                 $uploaded++;
             }
             if ($uploaded < 1) throw new RuntimeException('Не удалось загрузить ни одного файла');
-            add_event('cloud', 'Загружено файлов: ' . $uploaded . ' в /' . $current);
-            flash('Загружено файлов: ' . $uploaded, 'success');
+            add_event('cloud', 'Загружено файлов: ' . $uploaded . ' в /' . $uploadTarget);
+            flash('Загружено файлов: ' . $uploaded . ' → /' . ($uploadTarget !== '' ? $uploadTarget : 'корень'), 'success');
         } elseif ($action === 'cloud_delete') {
             $targetRel = hh_cloud_clean_rel((string)($_POST['target'] ?? ''));
             if ($targetRel === '') throw new RuntimeException('Корень облака удалить нельзя');
@@ -357,6 +379,28 @@ function hh_cloud_is_text(string $path): bool
     return is_string($sample) && !str_contains($sample, "\0");
 }
 
+function hh_cloud_folder_tree(string $root, int $limit = 500, int $maxDepth = 20): array
+{
+    $result = [];
+    $seen = 0;
+    $walk = function (string $dir, string $rel, int $depth) use (&$walk, &$result, &$seen, $limit, $maxDepth): void {
+        if ($seen >= $limit || $depth > $maxDepth) return;
+        $names = array_values(array_filter(scandir($dir) ?: [], static fn($v) => $v !== '.' && $v !== '..'));
+        natcasesort($names);
+        foreach ($names as $name) {
+            if ($seen >= $limit) break;
+            $path = $dir . '/' . $name;
+            if (!is_dir($path) || is_link($path)) continue;
+            $childRel = trim($rel . '/' . $name, '/');
+            $result[] = ['path' => $childRel, 'name' => $name, 'depth' => $depth];
+            $seen++;
+            $walk($path, $childRel, $depth + 1);
+        }
+    };
+    $walk($root, '', 0);
+    return $result;
+}
+
 function hh_cloud_breadcrumb(string $rel): string
 {
     $html = '<a href="' . e(hh_cloud_url()) . '"><i class="fa-solid fa-cloud"></i> Облако</a>';
@@ -370,6 +414,7 @@ function hh_cloud_breadcrumb(string $rel): string
 
 function view_cloud(): void
 {
+    hh_cloud_require_panel_auth();
     $rel = hh_cloud_clean_rel((string)($_GET['path'] ?? ''));
     [$root, , $dir] = hh_cloud_resolve($rel, true);
     if (!is_dir($dir)) { $rel = dirname($rel); if ($rel === '.') $rel = ''; [, , $dir] = hh_cloud_resolve($rel, true); }
@@ -384,15 +429,13 @@ function view_cloud(): void
     if ($previewRel !== '') {
         try { [, , $previewPath] = hh_cloud_resolve($previewRel, true); if (!is_file($previewPath)) $previewPath = null; } catch (Throwable) { $previewPath = null; }
     }
+    $folderTree = hh_cloud_folder_tree($root);
     $diskTotal = (float)(@disk_total_space($root) ?: 0);
     $diskFree = (float)(@disk_free_space($root) ?: 0);
     $folderBytes = 0; $fileCount = 0; $folderCount = 0;
     foreach ($items as $it) { $p = $dir . '/' . $it; if (is_dir($p)) $folderCount++; elseif (is_file($p)) { $fileCount++; $folderBytes += (float)(filesize($p) ?: 0); } }
     ?>
-<style>
-.cloud-page{display:grid;gap:18px}.cloud-hero{position:relative;overflow:hidden;padding:24px;border:1px solid rgba(92,142,255,.18);background:linear-gradient(135deg,rgba(33,55,96,.88),rgba(16,24,43,.96));border-radius:22px}.cloud-hero:after{content:"";position:absolute;width:260px;height:260px;border-radius:50%;right:-80px;top:-120px;background:rgba(74,125,255,.18);filter:blur(10px)}.cloud-hero-top{position:relative;z-index:1;display:flex;justify-content:space-between;gap:20px;align-items:flex-start;flex-wrap:wrap}.cloud-kicker{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:#87a8ff;font-weight:800}.cloud-hero h2{margin:8px 0 5px;font-size:30px}.cloud-path{display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:#9baccc}.cloud-path a{color:#d8e4ff;text-decoration:none}.cloud-stats{position:relative;z-index:1;display:grid;grid-template-columns:repeat(3,minmax(110px,1fr));gap:10px;min-width:min(100%,430px)}.cloud-stat{padding:12px 14px;border:1px solid rgba(255,255,255,.08);background:rgba(8,14,28,.45);border-radius:15px}.cloud-stat span{display:block;color:#8899ba;font-size:12px}.cloud-stat b{display:block;margin-top:4px}.cloud-grid{display:grid;grid-template-columns:minmax(260px,330px) minmax(0,1fr);gap:18px}.cloud-side{display:grid;gap:16px;align-content:start}.cloud-card{background:rgba(16,23,39,.92);border:1px solid rgba(255,255,255,.07);border-radius:20px;padding:18px}.cloud-drop{display:block;border:1px dashed rgba(110,154,255,.42);border-radius:16px;padding:20px;text-align:center;background:rgba(64,102,190,.08)}.cloud-drop i{font-size:34px;color:#79a0ff}.cloud-drop b,.cloud-drop span{display:block}.cloud-drop span{font-size:12px;color:#8999b8;margin-top:4px}.cloud-file-table td{vertical-align:middle}.cloud-name{display:flex;align-items:center;gap:11px;min-width:230px}.cloud-name i{width:24px;text-align:center;font-size:18px}.cloud-name a{color:#e7eeff;text-decoration:none;font-weight:650}.cloud-actions{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}.cloud-empty{text-align:center;padding:48px 20px;color:#8798b9}.cloud-preview{margin-top:18px}.cloud-preview-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px}.cloud-preview-body{border:1px solid rgba(255,255,255,.07);border-radius:16px;background:#0a101c;overflow:hidden}.cloud-preview-body pre{margin:0;padding:18px;max-height:620px;overflow:auto;color:#dbe7ff;font-size:13px;white-space:pre-wrap;word-break:break-word}.cloud-preview-img{display:block;max-width:100%;max-height:70vh;margin:auto}.cloud-preview-frame{width:100%;height:70vh;border:0;background:white}.cloud-archive{max-height:560px;overflow:auto}.cloud-archive table{margin:0}.cloud-archive small{color:#8ea0c2}.cloud-rename{display:flex;gap:6px;min-width:210px}.cloud-rename input{min-width:120px}.cloud-size{white-space:nowrap;color:#aab8d2}.cloud-meta{font-size:12px;color:#8394b5}.cloud-up{display:inline-flex;align-items:center;gap:8px;text-decoration:none}.cloud-progress{height:7px;background:rgba(255,255,255,.07);border-radius:999px;overflow:hidden;margin-top:12px}.cloud-progress i{display:block;height:100%;background:linear-gradient(90deg,#4f7dff,#65d4ff)}
-@media(max-width:980px){.cloud-grid{grid-template-columns:1fr}.cloud-stats{width:100%;min-width:0}}@media(max-width:620px){.cloud-stats{grid-template-columns:1fr}.cloud-card{padding:13px}.cloud-hero{padding:18px}.cloud-file-table td:nth-child(2),.cloud-file-table th:nth-child(2){display:none}.cloud-actions{justify-content:flex-start}}
-</style>
+
 <div class="cloud-page">
   <section class="cloud-hero">
     <div class="cloud-hero-top">
@@ -415,10 +458,34 @@ function view_cloud(): void
     <aside class="cloud-side">
       <section class="cloud-card">
         <h3 class="h5 mb-3"><i class="fa-solid fa-cloud-arrow-up me-2 text-primary"></i>Загрузить</h3>
-        <form method="post" enctype="multipart/form-data">
-          <?= csrf_field() ?><input type="hidden" name="action" value="cloud_upload"><input type="hidden" name="path" value="<?= e($rel) ?>">
-          <label class="cloud-drop"><i class="fa-solid fa-arrow-up-from-bracket"></i><b class="mt-2">Выберите файлы</b><span>Можно несколько сразу: ZIP, RAR, фото, документы и любые другие файлы</span><input class="form-control mt-3" type="file" name="files[]" multiple required></label>
-          <button class="btn btn-primary w-100 mt-3"><i class="fa-solid fa-cloud-arrow-up me-2"></i>Загрузить в облако</button>
+        <form method="post" enctype="multipart/form-data" class="cloud-upload-form" id="cloudUploadForm">
+          <?= csrf_field() ?>
+          <input type="hidden" name="action" value="cloud_upload">
+          <input type="hidden" name="path" value="<?= e($rel) ?>">
+          <div class="cloud-current-folder"><i class="fa-solid fa-folder-open"></i><span>Сейчас открыта:</span><b>/<?= e($rel !== '' ? $rel : 'корень') ?></b></div>
+          <div class="cloud-destination">
+            <label for="cloudUploadTarget">Куда загрузить</label>
+            <select class="form-select" id="cloudUploadTarget" name="upload_target">
+              <option value=""<?= $rel === '' ? ' selected' : '' ?>>☁ Корень облака</option>
+              <?php foreach($folderTree as $folder): $fpath=(string)$folder['path']; $depth=(int)$folder['depth']; ?>
+                <option value="<?= e($fpath) ?>"<?= $fpath === $rel ? ' selected' : '' ?>><?= e(str_repeat('— ', min($depth + 1, 10)) . (string)$folder['name'] . ($fpath === $rel ? '  · текущая' : '')) ?></option>
+              <?php endforeach; ?>
+            </select>
+          </div>
+          <div class="cloud-dropzone" id="cloudDropzone" tabindex="0" role="button" aria-label="Перетащите файлы или выберите их">
+            <div>
+              <div class="cloud-drop-icon"><i class="fa-solid fa-cloud-arrow-up"></i></div>
+              <strong>Перетащите файлы сюда</strong>
+              <p>Drag & Drop: ZIP, RAR, 7z, фото, видео, документы и другие файлы. Можно выбрать сразу несколько.</p>
+              <button type="button" class="btn btn-sm btn-soft cloud-browse-btn" id="cloudBrowseButton"><i class="fa-solid fa-folder-open me-2"></i>Выбрать файлы</button>
+            </div>
+            <input type="file" id="cloudFiles" name="files[]" multiple hidden required>
+          </div>
+          <div class="cloud-upload-queue" id="cloudUploadQueue" aria-live="polite">
+            <div class="cloud-upload-queue-head"><b id="cloudQueueTitle">Файлы готовы к загрузке</b><span id="cloudQueueSize"></span></div>
+            <div class="cloud-upload-files" id="cloudUploadFiles"></div>
+          </div>
+          <button class="btn btn-primary w-100 cloud-upload-submit" id="cloudUploadSubmit"><i class="fa-solid fa-cloud-arrow-up me-2"></i>Загрузить</button>
         </form>
       </section>
       <section class="cloud-card">
@@ -446,7 +513,7 @@ function view_cloud(): void
               <td class="cloud-size"><?= $isDir ? 'папка' : e(human_bytes((float)(filesize($p) ?: 0))) ?></td>
               <td class="cloud-meta"><?= e(date('d.m.Y H:i', filemtime($p) ?: time())) ?></td>
               <td><div class="cloud-actions">
-                <?php if(!$isDir): ?><a class="btn btn-sm btn-soft" title="Открыть" href="<?= e(hh_cloud_url(['path'=>$rel,'preview'=>$childRel])) ?>"><i class="fa-solid fa-eye"></i></a><a class="btn btn-sm btn-soft" title="Скачать" href="<?= e(hh_cloud_url(['cloud_action'=>'download','path'=>$childRel])) ?>"><i class="fa-solid fa-download"></i></a><?php endif; ?>
+                <?php if($isDir): ?><a class="btn btn-sm btn-soft cloud-folder-button" title="Открыть папку" href="<?= e(hh_cloud_url(['path'=>$childRel])) ?>"><i class="fa-solid fa-folder-open"></i><span class="cloud-file-actions-label ms-1">Открыть</span></a><?php else: ?><a class="btn btn-sm btn-soft" title="Открыть" href="<?= e(hh_cloud_url(['path'=>$rel,'preview'=>$childRel])) ?>"><i class="fa-solid fa-eye"></i></a><a class="btn btn-sm btn-soft" title="Скачать" href="<?= e(hh_cloud_url(['cloud_action'=>'download','path'=>$childRel])) ?>"><i class="fa-solid fa-download"></i></a><?php endif; ?>
                 <button class="btn btn-sm btn-soft" type="button" data-bs-toggle="collapse" data-bs-target="#rename-<?= md5($childRel) ?>" title="Переименовать"><i class="fa-solid fa-pen"></i></button>
                 <form method="post" onsubmit="return confirm('Удалить <?= e(addslashes($name)) ?>?')"><?= csrf_field() ?><input type="hidden" name="action" value="cloud_delete"><input type="hidden" name="path" value="<?= e($rel) ?>"><input type="hidden" name="target" value="<?= e($childRel) ?>"><button class="btn btn-sm btn-outline-danger" title="Удалить"><i class="fa-solid fa-trash"></i></button></form>
               </div><div class="collapse mt-2" id="rename-<?= md5($childRel) ?>"><form method="post" class="cloud-rename"><?= csrf_field() ?><input type="hidden" name="action" value="cloud_rename"><input type="hidden" name="path" value="<?= e($rel) ?>"><input type="hidden" name="target" value="<?= e($childRel) ?>"><input class="form-control form-control-sm" name="new_name" value="<?= e($name) ?>" required><button class="btn btn-sm btn-primary"><i class="fa-solid fa-check"></i></button></form></div></td>

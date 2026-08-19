@@ -1,0 +1,7 @@
+HYPER-HOST CLOUD v95 files
+apply-v1.3-cloud-storage.sh
+src/app/cloud.php
+src/public/assets/cloud.css
+src/public/assets/cloud.js
+PATCH-v95-CLOUD.md
+README-INSTALL-CLOUD.txt
