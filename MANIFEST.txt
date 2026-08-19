@@ -1,7 +1,6 @@
-HYPER-HOST CLOUD v95 files
-apply-v1.3-cloud-storage.sh
-src/app/cloud.php
-src/public/assets/cloud.css
-src/public/assets/cloud.js
-PATCH-v95-CLOUD.md
-README-INSTALL-CLOUD.txt
+apply-v1.4-cloud-standalone.sh        installer / migrator from embedded Cloud
+src/public/cloud/index.php            standalone private Cloud application
+src/public/cloud/cloud.css            completely separate Cloud design
+src/public/cloud/cloud.js             Drag & Drop, dialogs, search, grid/list UI
+PATCH-v96-CLOUD-STANDALONE.md          full notes
+README-INSTALL.txt                     short install instructions

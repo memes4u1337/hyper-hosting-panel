@@ -1,13 +1,23 @@
-HYPER-HOST v1.2 — branding + FTP/FTPS restore
+HYPER CLOUD v96
+===============
 
-Apply on server from the extracted patch directory:
+Главное изменение: Cloud больше НЕ открывается внутри HYPER-HOST.
+Новый standalone URL: https://panel.hyper-host.pw/cloud/
 
-sudo chmod +x apply-v1.2-branding-ftp-restore.sh
-sudo ./apply-v1.2-branding-ftp-restore.sh /root/hyper-hosting-panel
+Файлы:
+- apply-v1.4-cloud-standalone.sh
+- src/public/cloud/index.php
+- src/public/cloud/cloud.css
+- src/public/cloud/cloud.js
 
-Open menu:
-sudo hyper-host-installer
+Хранилище:
+/var/www/hyper-host-cloud
 
-FTP repair/status:
-sudo hyper ftp fix
-sudo hyper ftp doctor
+Установка после загрузки overlay в GitHub main:
+
+cd /root && \
+rm -rf /root/hyper-hosting-panel && \
+git clone --depth 1 --branch main https://github.com/memes4u1337/hyper-hosting-panel.git /root/hyper-hosting-panel && \
+cd /root/hyper-hosting-panel && \
+chmod +x apply-v1.4-cloud-standalone.sh && \
+sudo ./apply-v1.4-cloud-standalone.sh /root/hyper-hosting-panel
