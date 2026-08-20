@@ -1,0 +1,803 @@
+--- /mnt/data/v102work/extracted/HYPER-HOST-CLOUD-v101-PATCH/src/public/cloud/index.php	2026-08-20 04:25:42.000000000 +0000
++++ /mnt/data/v102work/HYPER-HOST-CLOUD-v102-PATCH/src/public/cloud/index.php	2026-08-20 04:37:14.511698941 +0000
+@@ -2,7 +2,7 @@
+ declare(strict_types=1);
+ 
+ /**
+- * HYPER CLOUD v101 — upload progress + safe live HTML website preview, with the v100 editor and sharing preserved.
++ * HYPER CLOUD v102 — repaired archive editor + standalone HTML website preview, with upload progress and private sharing preserved.
+  * This page intentionally does NOT use render_page() and has its own UI shell.
+  */
+ require __DIR__ . '/../../app/bootstrap.php';
+@@ -122,6 +122,45 @@
+     };
+ }
+ 
++function hc_mime_name(string $name): string
++{
++    $ext = strtolower(pathinfo(parse_url($name, PHP_URL_PATH) ?: $name, PATHINFO_EXTENSION));
++    return match ($ext) {
++        'html','htm' => 'text/html; charset=utf-8',
++        'css' => 'text/css; charset=utf-8',
++        'js','mjs','cjs' => 'application/javascript; charset=utf-8',
++        'json','map' => 'application/json; charset=utf-8',
++        'xml' => 'application/xml; charset=utf-8',
++        'txt','md','log','csv','ini','env','conf','yml','yaml','php','phtml','py','ts','tsx','jsx','sql','sh' => 'text/plain; charset=utf-8',
++        'jpg','jpeg' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif', 'webp' => 'image/webp', 'svg' => 'image/svg+xml', 'ico' => 'image/x-icon',
++        'pdf' => 'application/pdf', 'mp4' => 'video/mp4', 'webm' => 'video/webm', 'mov' => 'video/quicktime',
++        'mp3' => 'audio/mpeg', 'ogg' => 'audio/ogg', 'wav' => 'audio/wav',
++        'woff' => 'font/woff', 'woff2' => 'font/woff2', 'ttf' => 'font/ttf', 'otf' => 'font/otf',
++        default => 'application/octet-stream',
++    };
++}
++
++function hc_detect_site_root_rel(string $rel): string
++{
++    $rel = hc_clean_rel($rel);
++    $dir = dirname($rel);
++    if ($dir === '.') $dir = '';
++    $candidate = $dir;
++    while (true) {
++        foreach (['index.html','index.htm'] as $idx) {
++            $test = trim(($candidate !== '' ? $candidate . '/' : '') . $idx, '/');
++            try {
++                [,,$path] = hc_resolve($test, false);
++                if (is_file($path) && !is_link($path)) return $candidate;
++            } catch (Throwable) {}
++        }
++        if ($candidate === '') break;
++        $next = dirname($candidate);
++        $candidate = $next === '.' ? '' : $next;
++    }
++    return $dir;
++}
++
+ function hc_is_archive(string $path): bool
+ {
+     $name = strtolower(basename($path));
+@@ -149,7 +188,7 @@
+     return in_array(strtolower(pathinfo($name, PATHINFO_EXTENSION)), ['html', 'htm'], true);
+ }
+ 
+-function hc_preview_join_rel(string $baseRel, string $url): ?string
++function hc_preview_join_rel(string $baseRel, string $url, string $siteRootRel = ''): ?string
+ {
+     $url = trim(html_entity_decode($url, ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+     if ($url === '' || str_starts_with($url, '#') || str_starts_with($url, '//')) return null;
+@@ -159,24 +198,28 @@
+     $pathOnly = parse_url($url, PHP_URL_PATH);
+     if (!is_string($pathOnly) || $pathOnly === '') return null;
+     $pathOnly = rawurldecode($pathOnly);
+-    $parts = str_starts_with($pathOnly, '/') ? [] : ($baseRel !== '' ? explode('/', hc_clean_rel($baseRel)) : []);
+-    foreach (explode('/', str_replace('\\\\', '/', $pathOnly)) as $part) {
++    $siteRootRel = hc_clean_rel($siteRootRel);
++    $parts = str_starts_with($pathOnly, '/')
++        ? ($siteRootRel !== '' ? explode('/', $siteRootRel) : [])
++        : ($baseRel !== '' ? explode('/', hc_clean_rel($baseRel)) : []);
++    foreach (explode('/', str_replace('\\', '/', $pathOnly)) as $part) {
+         if ($part === '' || $part === '.') continue;
+         if ($part === '..') {
+-            if (!$parts) return null;
++            $rootDepth = $siteRootRel !== '' ? count(explode('/', $siteRootRel)) : 0;
++            if (count($parts) <= $rootDepth) return null;
+             array_pop($parts);
+             continue;
+         }
+-        if (preg_match('/[\\x00-\\x1F\\x7F]/u', $part)) return null;
++        if (preg_match('/[\x00-\x1F\x7F]/u', $part)) return null;
+         $parts[] = $part;
+     }
+     if (!$parts) return '';
+     try { return hc_clean_rel(implode('/', $parts)); } catch (Throwable) { return null; }
+ }
+ 
+-function hc_preview_url(string $baseRel, string $url, bool $navigation = false): string
++function hc_preview_url(string $baseRel, string $url, bool $navigation = false, string $siteRootRel = ''): string
+ {
+-    $resolved = hc_preview_join_rel($baseRel, $url);
++    $resolved = hc_preview_join_rel($baseRel, $url, $siteRootRel);
+     if ($resolved === null) return $url;
+     try {
+         [,,$candidate] = hc_resolve($resolved, false);
+@@ -184,50 +227,58 @@
+             foreach (['index.html','index.htm'] as $index) {
+                 $try = rtrim($resolved, '/') . ($resolved !== '' ? '/' : '') . $index;
+                 [,,$tryPath] = hc_resolve($try, false);
+-                if (is_file($tryPath) && !is_link($tryPath)) { $resolved = $try; $candidate = $tryPath; break; }
++                if (is_file($tryPath) && !is_link($tryPath)) { $resolved = $try; break; }
+             }
+         }
+     } catch (Throwable) {}
+     $isHtml = hc_is_html_name($resolved);
+-    return hc_url(['cloud_action' => ($navigation && $isHtml) ? 'html_preview' : 'html_asset', 'path' => $resolved]);
++    $params = ['cloud_action' => ($navigation && $isHtml) ? 'html_preview' : 'html_asset', 'path' => $resolved];
++    if ($siteRootRel !== '') $params['site_root'] = $siteRootRel;
++    return hc_url($params);
+ }
+ 
+-function hc_preview_srcset(string $baseRel, string $value): string
++function hc_preview_srcset(string $baseRel, string $value, string $siteRootRel = ''): string
+ {
+     $parts = [];
+     foreach (explode(',', $value) as $item) {
+         $item = trim($item);
+         if ($item === '') continue;
+-        if (preg_match('/^(\\S+)(\\s+.+)?$/', $item, $m)) {
+-            $parts[] = hc_preview_url($baseRel, $m[1], false) . ($m[2] ?? '');
++        if (preg_match('/^(\S+)(\s+.+)?$/', $item, $m)) {
++            $parts[] = hc_preview_url($baseRel, $m[1], false, $siteRootRel) . ($m[2] ?? '');
+         } else $parts[] = $item;
+     }
+     return implode(', ', $parts);
+ }
+ 
+-function hc_preview_css_rewrite(string $css, string $baseRel): string
++function hc_preview_css_rewrite(string $css, string $baseRel, string $siteRootRel = ''): string
+ {
+-    $css = preg_replace_callback('~url\\(\\s*([\\\'\"]?)(.*?)\\1\\s*\\)~i', static function(array $m) use ($baseRel): string {
++    $css = preg_replace_callback('~url\(\s*([\'\"]?)(.*?)\1\s*\)~i', static function(array $m) use ($baseRel, $siteRootRel): string {
+         $u = trim((string)$m[2]);
+         if ($u === '' || str_starts_with($u, '#')) return $m[0];
+-        $rewritten = hc_preview_url($baseRel, $u, false);
+-        return 'url("' . str_replace(['\\\\','"'], ['\\\\\\\\','\\\\"'], $rewritten) . '")';
++        $rewritten = hc_preview_url($baseRel, $u, false, $siteRootRel);
++        return 'url("' . str_replace(['\\','"'], ['\\\\','\\"'], $rewritten) . '")';
+     }, $css) ?? $css;
+-    $css = preg_replace_callback('~@import\\s+([\\\'\"])(.*?)\\1~i', static function(array $m) use ($baseRel): string {
+-        return '@import "' . str_replace(['\\\\','"'], ['\\\\\\\\','\\\\"'], hc_preview_url($baseRel, (string)$m[2], false)) . '"';
++    $css = preg_replace_callback('~@import\s+([\'\"])(.*?)\1~i', static function(array $m) use ($baseRel, $siteRootRel): string {
++        return '@import "' . str_replace(['\\','"'], ['\\\\','\\"'], hc_preview_url($baseRel, (string)$m[2], false, $siteRootRel)) . '"';
+     }, $css) ?? $css;
+     return $css;
+ }
+ 
+-function hc_html_preview_output(string $rel, string $path): never
++function hc_preview_js_rewrite(string $js, string $baseRel, string $siteRootRel = ''): string
+ {
+-    if (!is_file($path) || is_link($path) || !hc_is_html_name($path)) throw new RuntimeException('HTML-файл недоступен');
+-    $size = (int)(filesize($path) ?: 0);
+-    if ($size > 8 * 1024 * 1024) throw new RuntimeException('HTML-файл слишком большой для предпросмотра');
+-    $html = @file_get_contents($path);
+-    if (!is_string($html)) throw new RuntimeException('Не удалось прочитать HTML-файл');
+-    $baseRel = dirname($rel) === '.' ? '' : dirname($rel);
++    // Covers common ES-module imports/exports and dynamic import(). Normal scripts remain untouched.
++    $resolver = static fn(string $u): string => hc_preview_url($baseRel, $u, false, $siteRootRel);
++    $js = preg_replace_callback('~(\b(?:import|export)\s+(?:[^\'\";]+?\s+from\s+)?)([\'\"])(\.?\.?/[^\'\"]+|/[^\'\"]+)\2~', static function(array $m) use ($resolver): string {
++        return $m[1] . $m[2] . $resolver((string)$m[3]) . $m[2];
++    }, $js) ?? $js;
++    $js = preg_replace_callback('~(\bimport\s*\(\s*)([\'\"])(\.?\.?/[^\'\"]+|/[^\'\"]+)\2(\s*\))~', static function(array $m) use ($resolver): string {
++        return $m[1] . $m[2] . $resolver((string)$m[3]) . $m[2] . $m[4];
++    }, $js) ?? $js;
++    return $js;
++}
+ 
++function hc_html_rewrite_document(string $html, callable $assetUrl, callable $navUrl, callable $srcsetRewrite, callable $cssRewrite): string
++{
+     $domRewritten = false;
+     if (class_exists('DOMDocument')) {
+         $previous = libxml_use_internal_errors(true);
+@@ -243,29 +294,30 @@
+                     foreach ($attrs as $attr) {
+                         if (!$node->hasAttribute($attr)) continue;
+                         $value = $node->getAttribute($attr);
+-                        $node->setAttribute($attr, $attr === 'srcset' ? hc_preview_srcset($baseRel, $value) : hc_preview_url($baseRel, $value, false));
++                        $node->setAttribute($attr, $attr === 'srcset' ? $srcsetRewrite($value) : $assetUrl($value));
+                     }
+                 }
+             }
+             foreach ($dom->getElementsByTagName('a') as $node) {
+-                if ($node->hasAttribute('href')) $node->setAttribute('href', hc_preview_url($baseRel, $node->getAttribute('href'), true));
+-                if (!$node->hasAttribute('target')) $node->setAttribute('target', '_self');
++                if ($node->hasAttribute('href')) $node->setAttribute('href', $navUrl($node->getAttribute('href')));
+             }
+             foreach ($dom->getElementsByTagName('iframe') as $node) {
+-                if ($node->hasAttribute('src')) $node->setAttribute('src', hc_preview_url($baseRel, $node->getAttribute('src'), true));
++                if ($node->hasAttribute('src')) $node->setAttribute('src', $navUrl($node->getAttribute('src')));
+             }
+             foreach ($dom->getElementsByTagName('form') as $node) {
+                 if ($node->hasAttribute('action')) $node->setAttribute('action', '#');
+             }
+             foreach ($dom->getElementsByTagName('*') as $node) {
+-                if ($node->hasAttribute('style')) $node->setAttribute('style', hc_preview_css_rewrite($node->getAttribute('style'), $baseRel));
+-            }
+-            foreach ($dom->getElementsByTagName('style') as $node) {
+-                $node->nodeValue = hc_preview_css_rewrite((string)$node->textContent, $baseRel);
++                if ($node->hasAttribute('style')) $node->setAttribute('style', $cssRewrite($node->getAttribute('style')));
+             }
++            foreach ($dom->getElementsByTagName('style') as $node) $node->nodeValue = $cssRewrite((string)$node->textContent);
++            // Existing <base> can break the protected virtual paths, so remove it.
++            $bases = [];
++            foreach ($dom->getElementsByTagName('base') as $base) $bases[] = $base;
++            foreach ($bases as $base) $base->parentNode?->removeChild($base);
+             $out = $dom->saveHTML();
+             if (is_string($out) && $out !== '') {
+-                $html = preg_replace('/^<\\?xml[^>]*>\\s*/i', '', $out) ?? $out;
++                $html = preg_replace('/^<\?xml[^>]*>\s*/i', '', $out) ?? $out;
+                 $domRewritten = true;
+             }
+         }
+@@ -273,30 +325,35 @@
+         libxml_use_internal_errors($previous);
+     }
+ 
+-    // Fallback for minimal PHP installations without ext-dom/php-xml.
+     if (!$domRewritten) {
+-        $html = preg_replace_callback('~(<(?:img|script|source|video|audio|track|embed|input)\b[^>]*?\s(?:src|poster)\s*=\s*)([\'\"])(.*?)\2~is', static function(array $m) use ($baseRel): string {
+-            return $m[1] . $m[2] . e(hc_preview_url($baseRel, html_entity_decode((string)$m[3], ENT_QUOTES | ENT_HTML5, 'UTF-8'), false)) . $m[2];
+-        }, $html) ?? $html;
+-        $html = preg_replace_callback('~(<link\b[^>]*?\shref\s*=\s*)([\'\"])(.*?)\2~is', static function(array $m) use ($baseRel): string {
+-            return $m[1] . $m[2] . e(hc_preview_url($baseRel, html_entity_decode((string)$m[3], ENT_QUOTES | ENT_HTML5, 'UTF-8'), false)) . $m[2];
+-        }, $html) ?? $html;
+-        $html = preg_replace_callback('~(<a\b[^>]*?\shref\s*=\s*)([\'\"])(.*?)\2~is', static function(array $m) use ($baseRel): string {
+-            return $m[1] . $m[2] . e(hc_preview_url($baseRel, html_entity_decode((string)$m[3], ENT_QUOTES | ENT_HTML5, 'UTF-8'), true)) . $m[2];
+-        }, $html) ?? $html;
+-        $html = preg_replace_callback('~(<iframe\b[^>]*?\ssrc\s*=\s*)([\'\"])(.*?)\2~is', static function(array $m) use ($baseRel): string {
+-            return $m[1] . $m[2] . e(hc_preview_url($baseRel, html_entity_decode((string)$m[3], ENT_QUOTES | ENT_HTML5, 'UTF-8'), true)) . $m[2];
+-        }, $html) ?? $html;
+-        $html = preg_replace_callback('~(\ssrcset\s*=\s*)([\'\"])(.*?)\2~is', static function(array $m) use ($baseRel): string {
+-            return $m[1] . $m[2] . e(hc_preview_srcset($baseRel, html_entity_decode((string)$m[3], ENT_QUOTES | ENT_HTML5, 'UTF-8'))) . $m[2];
+-        }, $html) ?? $html;
+-        $html = preg_replace_callback('~(<style\b[^>]*>)(.*?)(</style>)~is', static function(array $m) use ($baseRel): string {
+-            return $m[1] . hc_preview_css_rewrite((string)$m[2], $baseRel) . $m[3];
+-        }, $html) ?? $html;
+-        $html = preg_replace_callback('~(\sstyle\s*=\s*)([\'\"])(.*?)\2~is', static function(array $m) use ($baseRel): string {
+-            return $m[1] . $m[2] . e(hc_preview_css_rewrite(html_entity_decode((string)$m[3], ENT_QUOTES | ENT_HTML5, 'UTF-8'), $baseRel)) . $m[2];
+-        }, $html) ?? $html;
++        $html = preg_replace_callback('~(<(?:img|script|source|video|audio|track|embed|input)\b[^>]*?\s(?:src|poster)\s*=\s*)([\'\"])(.*?)\2~is', static fn(array $m): string => $m[1].$m[2].e($assetUrl(html_entity_decode((string)$m[3],ENT_QUOTES|ENT_HTML5,'UTF-8'))).$m[2], $html) ?? $html;
++        $html = preg_replace_callback('~(<link\b[^>]*?\shref\s*=\s*)([\'\"])(.*?)\2~is', static fn(array $m): string => $m[1].$m[2].e($assetUrl(html_entity_decode((string)$m[3],ENT_QUOTES|ENT_HTML5,'UTF-8'))).$m[2], $html) ?? $html;
++        $html = preg_replace_callback('~(<a\b[^>]*?\shref\s*=\s*)([\'\"])(.*?)\2~is', static fn(array $m): string => $m[1].$m[2].e($navUrl(html_entity_decode((string)$m[3],ENT_QUOTES|ENT_HTML5,'UTF-8'))).$m[2], $html) ?? $html;
++        $html = preg_replace_callback('~(<iframe\b[^>]*?\ssrc\s*=\s*)([\'\"])(.*?)\2~is', static fn(array $m): string => $m[1].$m[2].e($navUrl(html_entity_decode((string)$m[3],ENT_QUOTES|ENT_HTML5,'UTF-8'))).$m[2], $html) ?? $html;
++        $html = preg_replace_callback('~(\ssrcset\s*=\s*)([\'\"])(.*?)\2~is', static fn(array $m): string => $m[1].$m[2].e($srcsetRewrite(html_entity_decode((string)$m[3],ENT_QUOTES|ENT_HTML5,'UTF-8'))).$m[2], $html) ?? $html;
++        $html = preg_replace_callback('~(<style\b[^>]*>)(.*?)(</style>)~is', static fn(array $m): string => $m[1].$cssRewrite((string)$m[2]).$m[3], $html) ?? $html;
++        $html = preg_replace_callback('~(\sstyle\s*=\s*)([\'\"])(.*?)\2~is', static fn(array $m): string => $m[1].$m[2].e($cssRewrite(html_entity_decode((string)$m[3],ENT_QUOTES|ENT_HTML5,'UTF-8'))).$m[2], $html) ?? $html;
++        $html = preg_replace('~<base\b[^>]*>~i', '', $html) ?? $html;
+     }
++    return $html;
++}
++
++function hc_html_preview_output(string $rel, string $path, string $siteRootRel = ''): never
++{
++    if (!is_file($path) || is_link($path) || !hc_is_html_name($path)) throw new RuntimeException('HTML-файл недоступен');
++    $size = (int)(filesize($path) ?: 0);
++    if ($size > 8 * 1024 * 1024) throw new RuntimeException('HTML-файл слишком большой для предпросмотра');
++    $html = @file_get_contents($path);
++    if (!is_string($html)) throw new RuntimeException('Не удалось прочитать HTML-файл');
++    $siteRootRel = $siteRootRel !== '' ? hc_clean_rel($siteRootRel) : hc_detect_site_root_rel($rel);
++    $baseRel = dirname($rel) === '.' ? '' : dirname($rel);
++    $html = hc_html_rewrite_document(
++        $html,
++        static fn(string $u): string => hc_preview_url($baseRel,$u,false,$siteRootRel),
++        static fn(string $u): string => hc_preview_url($baseRel,$u,true,$siteRootRel),
++        static fn(string $v): string => hc_preview_srcset($baseRel,$v,$siteRootRel),
++        static fn(string $css): string => hc_preview_css_rewrite($css,$baseRel,$siteRootRel)
++    );
+ 
+     while (ob_get_level() > 0) @ob_end_clean();
+     header_remove('X-Frame-Options');
+@@ -309,24 +366,116 @@
+     exit;
+ }
+ 
+-function hc_html_asset_output(string $rel, string $path): never
++function hc_html_asset_output(string $rel, string $path, string $siteRootRel = ''): never
+ {
+     if (!is_file($path) || is_link($path) || !is_readable($path)) throw new RuntimeException('Ресурс недоступен');
+-    $mime = hc_mime($path);
+-    if ($mime === 'text/css' || strtolower(pathinfo($path, PATHINFO_EXTENSION)) === 'css') {
++    $siteRootRel = $siteRootRel !== '' ? hc_clean_rel($siteRootRel) : hc_detect_site_root_rel($rel);
++    $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
++    if ($ext === 'css') {
+         $css = @file_get_contents($path);
+         if (!is_string($css)) throw new RuntimeException('CSS недоступен');
+         $baseRel = dirname($rel) === '.' ? '' : dirname($rel);
+         while (ob_get_level() > 0) @ob_end_clean();
+-        header('Content-Type: text/css; charset=utf-8');
+-        header('Cache-Control: private, no-store, max-age=0');
+-        header('X-Content-Type-Options: nosniff');
+-        echo hc_preview_css_rewrite($css, $baseRel);
+-        exit;
++        header('Content-Type: text/css; charset=utf-8'); header('Cache-Control: private, no-store, max-age=0'); header('X-Content-Type-Options: nosniff');
++        echo hc_preview_css_rewrite($css,$baseRel,$siteRootRel); exit;
++    }
++    if (in_array($ext,['js','mjs','cjs'],true)) {
++        $js = @file_get_contents($path);
++        if (!is_string($js)) throw new RuntimeException('JS недоступен');
++        $baseRel = dirname($rel) === '.' ? '' : dirname($rel);
++        while (ob_get_level() > 0) @ob_end_clean();
++        header('Content-Type: application/javascript; charset=utf-8'); header('Cache-Control: private, no-store, max-age=0'); header('X-Content-Type-Options: nosniff');
++        echo hc_preview_js_rewrite($js,$baseRel,$siteRootRel); exit;
+     }
+     hc_stream_file($path, true);
+ }
+ 
++function hc_archive_preview_join(string $baseEntryDir, string $url, string $siteRoot = ''): ?string
++{
++    $url=trim(html_entity_decode($url,ENT_QUOTES|ENT_HTML5,'UTF-8'));
++    if ($url==='' || str_starts_with($url,'#') || str_starts_with($url,'//')) return null;
++    if (preg_match('~^(?:data|blob|javascript|mailto|tel|about):~i',$url) || preg_match('~^[a-z][a-z0-9+.-]*:~i',$url)) return null;
++    $pathOnly=parse_url($url,PHP_URL_PATH);
++    if (!is_string($pathOnly) || $pathOnly==='') return null;
++    $pathOnly=rawurldecode($pathOnly); $siteRoot=$siteRoot!==''?hc_archive_entry_clean($siteRoot):'';
++    $parts=str_starts_with($pathOnly,'/') ? ($siteRoot!==''?explode('/',$siteRoot):[]) : ($baseEntryDir!==''?explode('/',hc_archive_entry_clean($baseEntryDir)):[]);
++    foreach (explode('/',str_replace('\\','/',$pathOnly)) as $part) {
++        if ($part==='' || $part==='.') continue;
++        if ($part==='..') { $rootDepth=$siteRoot!==''?count(explode('/',$siteRoot)):0; if (count($parts)<=$rootDepth) return null; array_pop($parts); continue; }
++        if (preg_match('/[\x00-\x1F\x7F]/u',$part)) return null;
++        $parts[]=$part;
++    }
++    if (!$parts) return '';
++    try { return hc_archive_entry_clean(implode('/',$parts)); } catch(Throwable) { return null; }
++}
++
++function hc_archive_detect_site_root(string $archivePath, string $entry): string
++{
++    $entry=hc_archive_entry_clean($entry); $dir=dirname($entry); if ($dir==='.') $dir='';
++    $list=hc_archive_entries($archivePath,50000); $set=[];
++    if (!empty($list['ok'])) foreach ($list['entries'] as $row) { try { $n=hc_archive_entry_clean((string)($row['name']??'')); $set[$n]=true; } catch(Throwable) {} }
++    $candidate=$dir;
++    while (true) {
++        foreach (['index.html','index.htm'] as $idx) { $n=trim(($candidate!==''?$candidate.'/':'').$idx,'/'); if (isset($set[$n])) return $candidate; }
++        if ($candidate==='') break; $next=dirname($candidate); $candidate=$next==='.'?'':$next;
++    }
++    return $dir;
++}
++
++function hc_archive_preview_url(string $archiveRel, string $baseEntryDir, string $url, bool $navigation=false, string $siteRoot=''): string
++{
++    $resolved=hc_archive_preview_join($baseEntryDir,$url,$siteRoot);
++    if ($resolved===null) return $url;
++    $isHtml=hc_is_html_name($resolved);
++    $params=['cloud_action'=>($navigation && $isHtml)?'archive_html_preview':'archive_html_asset','path'=>$archiveRel,'entry'=>$resolved];
++    if ($siteRoot!=='') $params['site_root']=$siteRoot;
++    return hc_url($params);
++}
++
++function hc_archive_preview_srcset(string $archiveRel,string $baseEntryDir,string $value,string $siteRoot=''): string
++{
++    $parts=[]; foreach(explode(',',$value) as $item) { $item=trim($item); if($item==='')continue; if(preg_match('/^(\S+)(\s+.+)?$/',$item,$m)) $parts[]=hc_archive_preview_url($archiveRel,$baseEntryDir,$m[1],false,$siteRoot).($m[2]??''); else $parts[]=$item; }
++    return implode(', ',$parts);
++}
++
++function hc_archive_preview_css_rewrite(string $css,string $archiveRel,string $baseEntryDir,string $siteRoot=''): string
++{
++    $css=preg_replace_callback('~url\(\s*([\'\"]?)(.*?)\1\s*\)~i',static function(array $m)use($archiveRel,$baseEntryDir,$siteRoot):string{$u=trim((string)$m[2]);if($u===''||str_starts_with($u,'#'))return $m[0];$r=hc_archive_preview_url($archiveRel,$baseEntryDir,$u,false,$siteRoot);return 'url("'.str_replace(['\\','"'],['\\\\','\\"'],$r).'")';},$css)??$css;
++    $css=preg_replace_callback('~@import\s+([\'\"])(.*?)\1~i',static fn(array $m):string=>'@import "'.str_replace(['\\','"'],['\\\\','\\"'],hc_archive_preview_url($archiveRel,$baseEntryDir,(string)$m[2],false,$siteRoot)).'"',$css)??$css;
++    return $css;
++}
++
++function hc_archive_preview_js_rewrite(string $js,string $archiveRel,string $baseEntryDir,string $siteRoot=''): string
++{
++    $resolver=static fn(string $u):string=>hc_archive_preview_url($archiveRel,$baseEntryDir,$u,false,$siteRoot);
++    $js=preg_replace_callback('~(\b(?:import|export)\s+(?:[^\'\";]+?\s+from\s+)?)([\'\"])(\.?\.?/[^\'\"]+|/[^\'\"]+)\2~',static fn(array $m):string=>$m[1].$m[2].$resolver((string)$m[3]).$m[2],$js)??$js;
++    $js=preg_replace_callback('~(\bimport\s*\(\s*)([\'\"])(\.?\.?/[^\'\"]+|/[^\'\"]+)\2(\s*\))~',static fn(array $m):string=>$m[1].$m[2].$resolver((string)$m[3]).$m[2].$m[4],$js)??$js;
++    return $js;
++}
++
++function hc_archive_html_preview_output(string $archiveRel,string $archivePath,string $entry,string $siteRoot=''): never
++{
++    $entry=hc_archive_entry_clean($entry); if(!hc_is_html_name($entry)) throw new RuntimeException('Это не HTML-файл');
++    $data=hc_archive_entry_bytes($archivePath,$entry,8*1024*1024); $html=(string)$data['content'];
++    $siteRoot=$siteRoot!==''?hc_archive_entry_clean($siteRoot):hc_archive_detect_site_root($archivePath,$entry);
++    $base=dirname($entry); if($base==='.')$base='';
++    $html=hc_html_rewrite_document($html,
++        static fn(string $u):string=>hc_archive_preview_url($archiveRel,$base,$u,false,$siteRoot),
++        static fn(string $u):string=>hc_archive_preview_url($archiveRel,$base,$u,true,$siteRoot),
++        static fn(string $v):string=>hc_archive_preview_srcset($archiveRel,$base,$v,$siteRoot),
++        static fn(string $css):string=>hc_archive_preview_css_rewrite($css,$archiveRel,$base,$siteRoot));
++    while(ob_get_level()>0)@ob_end_clean(); header_remove('X-Frame-Options'); header('X-Frame-Options: SAMEORIGIN'); header('Content-Type: text/html; charset=utf-8'); header('Cache-Control: private, no-store, max-age=0'); header('X-Robots-Tag: noindex, nofollow, noarchive');
++    header("Content-Security-Policy: sandbox allow-scripts allow-forms allow-modals allow-popups allow-downloads; default-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https: blob:; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: blob: https:; font-src 'self' data: https:; media-src 'self' blob: data: https:; connect-src 'self' https: wss:; frame-src 'self' https:; object-src 'none'; base-uri 'none'"); echo $html; exit;
++}
++
++function hc_archive_html_asset_output(string $archiveRel,string $archivePath,string $entry,string $siteRoot=''): never
++{
++    $entry=hc_archive_entry_clean($entry); $data=hc_archive_entry_bytes($archivePath,$entry,64*1024*1024); $content=(string)$data['content']; $siteRoot=$siteRoot!==''?hc_archive_entry_clean($siteRoot):''; $base=dirname($entry); if($base==='.')$base=''; $ext=strtolower(pathinfo($entry,PATHINFO_EXTENSION));
++    if($ext==='css')$content=hc_archive_preview_css_rewrite($content,$archiveRel,$base,$siteRoot);
++    elseif(in_array($ext,['js','mjs','cjs'],true))$content=hc_archive_preview_js_rewrite($content,$archiveRel,$base,$siteRoot);
++    while(ob_get_level()>0)@ob_end_clean(); header('Content-Type: '.hc_mime_name($entry)); header('Content-Length: '.strlen($content)); header('Cache-Control: private, no-store, max-age=0'); header('X-Content-Type-Options: nosniff'); echo $content; exit;
++}
++
+ function hc_archive_entries(string $path, int $limit = 1000): array
+ {
+     $entries = [];
+@@ -364,8 +513,8 @@
+     }
+ 
+     $commands = [];
+-    if (is_executable('/usr/bin/7z')) $commands[] = ['/usr/bin/7z','l','-slt','--',$path];
+-    if (is_executable('/usr/bin/7zz')) $commands[] = ['/usr/bin/7zz','l','-slt','--',$path];
++    if (is_executable('/usr/bin/7z')) $commands[] = ['/usr/bin/7z','l','-slt',$path];
++    if (is_executable('/usr/bin/7zz')) $commands[] = ['/usr/bin/7zz','l','-slt',$path];
+     if (is_executable('/usr/bin/bsdtar')) $commands[] = ['/usr/bin/bsdtar','-tf',$path];
+ 
+     foreach ($commands as $cmd) {
+@@ -389,6 +538,10 @@
+                 }
+                 if (preg_match('/^([^=]+) = (.*)$/', $raw, $m)) $current[trim($m[1])] = $m[2];
+             }
++            if (count($entries) < $limit && !empty($current['Path'])) {
++                $n=(string)$current['Path'];
++                if ($n!==$path && $n!==basename($path)) $entries[]=['name'=>$n,'size'=>(int)($current['Size']??0),'packed'=>(int)($current['Packed Size']??0),'modified'=>(string)($current['Modified']??'—')];
++            }
+             if ($entries) return ['ok'=>true,'entries'=>$entries,'truncated'=>count($entries)>=$limit,'engine'=>basename($cmd[0])];
+         } else {
+             foreach ($out as $raw) {
+@@ -441,48 +594,122 @@
+     return '';
+ }
+ 
+-function hc_archive_entry_read(string $archivePath, string $entry, int $limit = 2097152): array
++function hc_archive_entry_lookup(string $archivePath, string $entry): array
+ {
+-    $entry = hc_archive_entry_clean($entry);
+-    if (!hc_is_editable_text_name($entry)) throw new RuntimeException('Этот тип файла нельзя открыть в редакторе');
+-
++    $canonical = hc_archive_entry_clean($entry);
+     if (str_ends_with(strtolower($archivePath), '.zip') && class_exists('ZipArchive')) {
+         $zip = new ZipArchive();
+         if ($zip->open($archivePath) === true) {
+-            $idx = $zip->locateName($entry, 0);
+-            if ($idx === false) { $zip->close(); throw new RuntimeException('Файл внутри архива не найден'); }
+-            $st = $zip->statIndex($idx);
+-            if (is_array($st) && (int)($st['size'] ?? 0) > $limit) { $zip->close(); throw new RuntimeException('Файл слишком большой для редактора'); }
+-            $data = $zip->getFromIndex($idx, $limit + 1);
++            for ($i=0; $i<$zip->numFiles; $i++) {
++                $st = $zip->statIndex($i);
++                if (!is_array($st)) continue;
++                $raw = (string)($st['name'] ?? '');
++                if ($raw === '' || str_ends_with($raw,'/')) continue;
++                try { $clean = hc_archive_entry_clean($raw); } catch (Throwable) { continue; }
++                if ($clean === $canonical) {
++                    $result=['canonical'=>$canonical,'actual'=>$raw,'size'=>(int)($st['size']??0),'index'=>$i];
++                    $zip->close(); return $result;
++                }
++            }
+             $zip->close();
+-            if (!is_string($data)) throw new RuntimeException('Не удалось прочитать файл из архива');
+-            if (strlen($data) > $limit) throw new RuntimeException('Файл слишком большой для редактора');
+-            if (str_contains($data, "\0")) throw new RuntimeException('Бинарный файл нельзя открыть в редакторе');
+-            return ['content'=>$data,'writable'=>hc_archive_writer($archivePath)!=='','entry'=>$entry];
+         }
+     }
++    $list = hc_archive_entries($archivePath, 50000);
++    if (!empty($list['ok'])) {
++        foreach ($list['entries'] as $row) {
++            $raw=(string)($row['name']??'');
++            if ($raw==='' || str_ends_with($raw,'/')) continue;
++            try { $clean=hc_archive_entry_clean($raw); } catch (Throwable) { continue; }
++            if ($clean===$canonical) return ['canonical'=>$canonical,'actual'=>$raw,'size'=>(int)($row['size']??0),'index'=>null];
++        }
++    }
++    throw new RuntimeException('Файл внутри архива не найден');
++}
+ 
+-    if (str_ends_with(strtolower($archivePath), '.zip') && is_executable('/usr/bin/unzip')) {
+-        $names = []; $listCode = 0;
+-        exec('/usr/bin/unzip -Z -1 '.escapeshellarg($archivePath).' 2>/dev/null', $names, $listCode);
+-        if ($listCode === 0 && in_array($entry, array_map('rtrim', $names), true)) {
+-            $cmd = 'timeout 12s /usr/bin/unzip -p '.escapeshellarg($archivePath).' '.escapeshellarg($entry).' 2>/dev/null | head -c '.($limit + 1);
+-            $data = shell_exec($cmd);
+-            if ($data === null) $data = '';
+-            if (!is_string($data)) throw new RuntimeException('Не удалось прочитать файл из ZIP');
+-            if (strlen($data) > $limit) throw new RuntimeException('Файл слишком большой для редактора');
+-            if (str_contains($data, "\0")) throw new RuntimeException('Бинарный файл нельзя открыть в редакторе');
+-            return ['content'=>$data,'writable'=>hc_archive_writer($archivePath)!=='','entry'=>$entry];
++function hc_archive_capture_command(string $command, int $limit): array
++{
++    $limit=max(1,$limit);
++    if (!function_exists('proc_open')) {
++        $tmp=tempnam(sys_get_temp_dir(),'hc-cap-');
++        if ($tmp===false) return ['ok'=>false,'data'=>''];
++        exec($command.' > '.escapeshellarg($tmp).' 2>/dev/null',$ignore,$code);
++        $data=@file_get_contents($tmp,false,null,0,$limit+1); @unlink($tmp);
++        return ['ok'=>$code===0,'data'=>is_string($data)?$data:''];
++    }
++    $spec=[0=>['pipe','r'],1=>['pipe','w'],2=>['file','/dev/null','a']];
++    $proc=@proc_open($command,$spec,$pipes);
++    if (!is_resource($proc)) return ['ok'=>false,'data'=>''];
++    fclose($pipes[0]);
++    $data=stream_get_contents($pipes[1],$limit+1);
++    fclose($pipes[1]);
++    $code=proc_close($proc);
++    return ['ok'=>$code===0 || (is_string($data) && strlen($data)>$limit),'data'=>is_string($data)?$data:''];
++}
++
++function hc_archive_entry_bytes(string $archivePath, string $entry, int $limit = 67108864): array
++{
++    $found=hc_archive_entry_lookup($archivePath,$entry);
++    $canonical=(string)$found['canonical']; $actual=(string)$found['actual'];
++    $knownSize=(int)($found['size']??0);
++    if ($knownSize>$limit) throw new RuntimeException('Файл слишком большой для просмотра');
++
++    if (str_ends_with(strtolower($archivePath),'.zip') && class_exists('ZipArchive')) {
++        $zip=new ZipArchive();
++        if ($zip->open($archivePath)===true) {
++            $stream=$zip->getStream($actual);
++            if (is_resource($stream)) {
++                $data='';
++                while (!feof($stream) && strlen($data)<=$limit) {
++                    $chunk=fread($stream,min(262144,$limit+1-strlen($data)));
++                    if ($chunk===false) break;
++                    $data.=$chunk;
++                }
++                fclose($stream); $zip->close();
++                if (strlen($data)>$limit) throw new RuntimeException('Файл слишком большой для просмотра');
++                return ['content'=>$data,'entry'=>$canonical,'actual'=>$actual,'size'=>strlen($data),'writable'=>hc_archive_writer($archivePath)!==''];
++            }
++            $idx=$found['index'];
++            if (is_int($idx)) {
++                $data=$zip->getFromIndex($idx,$limit+1); $zip->close();
++                if (is_string($data)) {
++                    if (strlen($data)>$limit) throw new RuntimeException('Файл слишком большой для просмотра');
++                    return ['content'=>$data,'entry'=>$canonical,'actual'=>$actual,'size'=>strlen($data),'writable'=>hc_archive_writer($archivePath)!==''];
++                }
++            } else $zip->close();
+         }
+     }
+-    $bin = is_executable('/usr/bin/7z') ? '/usr/bin/7z' : (is_executable('/usr/bin/7zz') ? '/usr/bin/7zz' : '');
+-    if ($bin === '') throw new RuntimeException('Для чтения этого архива нужен 7-Zip или unzip');
+-    $cmd = 'timeout 12s '.escapeshellarg($bin).' x -so -bd -y -- '.escapeshellarg($archivePath).' '.escapeshellarg($entry).' 2>/dev/null | head -c '.($limit + 1);
+-    $data = shell_exec($cmd);
+-    if (!is_string($data)) throw new RuntimeException('Не удалось прочитать файл из архива');
+-    if (strlen($data) > $limit) throw new RuntimeException('Файл слишком большой для редактора');
+-    if (str_contains($data, "\0")) throw new RuntimeException('Бинарный файл нельзя открыть в редакторе');
+-    return ['content'=>$data,'writable'=>hc_archive_writer($archivePath)!=='','entry'=>$entry];
++
++    $result=['ok'=>false,'data'=>''];
++    if (str_ends_with(strtolower($archivePath),'.zip') && is_executable('/usr/bin/unzip')) {
++        $cmd='timeout 20s /usr/bin/unzip -p '.escapeshellarg($archivePath).' '.escapeshellarg($actual);
++        $result=hc_archive_capture_command($cmd,$limit);
++    }
++    if (!$result['ok'] && is_executable('/usr/bin/7z')) {
++        $cmd='timeout 20s /usr/bin/7z x -so -bd -y '.escapeshellarg($archivePath).' '.escapeshellarg($actual);
++        $result=hc_archive_capture_command($cmd,$limit);
++    }
++    if (!$result['ok'] && is_executable('/usr/bin/7zz')) {
++        $cmd='timeout 20s /usr/bin/7zz x -so -bd -y '.escapeshellarg($archivePath).' '.escapeshellarg($actual);
++        $result=hc_archive_capture_command($cmd,$limit);
++    }
++    if (!$result['ok'] && is_executable('/usr/bin/bsdtar')) {
++        $cmd='timeout 20s /usr/bin/bsdtar -xOf '.escapeshellarg($archivePath).' '.escapeshellarg($actual);
++        $result=hc_archive_capture_command($cmd,$limit);
++    }
++    if (!$result['ok']) throw new RuntimeException('Не удалось прочитать файл из архива');
++    $data=(string)$result['data'];
++    if (strlen($data)>$limit) throw new RuntimeException('Файл слишком большой для просмотра');
++    return ['content'=>$data,'entry'=>$canonical,'actual'=>$actual,'size'=>strlen($data),'writable'=>hc_archive_writer($archivePath)!==''];
++}
++
++function hc_archive_entry_read(string $archivePath, string $entry, int $limit = 2097152): array
++{
++    $entry=hc_archive_entry_clean($entry);
++    if (!hc_is_editable_text_name($entry)) throw new RuntimeException('Этот тип файла нельзя открыть в редакторе');
++    $result=hc_archive_entry_bytes($archivePath,$entry,$limit);
++    $data=(string)$result['content'];
++    if (str_contains($data,"\0")) throw new RuntimeException('Бинарный файл нельзя открыть в редакторе');
++    return $result;
+ }
+ 
+ function hc_archive_backup(string $archivePath): string
+@@ -501,59 +728,41 @@
+ 
+ function hc_archive_entry_write(string $archivePath, string $entry, string $content): void
+ {
+-    $entry = hc_archive_entry_clean($entry);
++    $entry=hc_archive_entry_clean($entry);
+     if (!hc_is_editable_text_name($entry)) throw new RuntimeException('Этот тип файла нельзя сохранять из редактора');
+-    if (strlen($content) > 2097152) throw new RuntimeException('Максимальный размер файла для редактора — 2 МБ');
+-    if (str_contains($content, "\0")) throw new RuntimeException('Бинарные данные запрещены');
+-
+-    // Ensure the entry exists before touching the archive.
+-    hc_archive_entry_read($archivePath, $entry, 2097152);
+-    $writer = hc_archive_writer($archivePath);
+-    if ($writer === '') throw new RuntimeException('Этот формат архива доступен только для чтения. ZIP и 7Z можно редактировать; RAR — если на сервере установлен rar.');
+-    $backup = hc_archive_backup($archivePath);
+-
++    if (strlen($content)>2097152) throw new RuntimeException('Максимальный размер файла для редактора — 2 МБ');
++    if (str_contains($content,"\0")) throw new RuntimeException('Бинарные данные запрещены');
++    $found=hc_archive_entry_lookup($archivePath,$entry);
++    $actual=(string)$found['actual'];
++    $writer=hc_archive_writer($archivePath);
++    if ($writer==='') throw new RuntimeException('Этот формат архива доступен только для чтения. ZIP и 7Z можно редактировать; RAR — если установлен rar.');
++    $backup=hc_archive_backup($archivePath);
+     try {
+-        if ($writer === 'ziparchive') {
+-            $zip = new ZipArchive();
+-            if ($zip->open($archivePath) !== true) throw new RuntimeException('Не удалось открыть ZIP для записи');
+-            $idx = $zip->locateName($entry, 0);
+-            if ($idx === false) { $zip->close(); throw new RuntimeException('Файл внутри ZIP не найден'); }
+-            if (!$zip->deleteIndex($idx) || !$zip->addFromString($entry, $content)) { $zip->close(); throw new RuntimeException('Не удалось обновить файл внутри ZIP'); }
++        if ($writer==='ziparchive') {
++            $zip=new ZipArchive();
++            if ($zip->open($archivePath)!==true) throw new RuntimeException('Не удалось открыть ZIP для записи');
++            $idx=$zip->locateName($actual,0);
++            if ($idx===false) { $zip->close(); throw new RuntimeException('Файл внутри ZIP не найден'); }
++            if (!$zip->deleteIndex($idx) || !$zip->addFromString($actual,$content)) { $zip->close(); throw new RuntimeException('Не удалось обновить файл внутри ZIP'); }
+             if (!$zip->close()) throw new RuntimeException('Не удалось сохранить ZIP');
+-        } elseif ($writer === 'zipcli') {
+-            $tmp = sys_get_temp_dir() . '/hc-zip-' . bin2hex(random_bytes(8));
+-            $entryPath = $tmp . '/' . $entry;
+-            if (!@mkdir(dirname($entryPath), 0700, true) && !is_dir(dirname($entryPath))) throw new RuntimeException('Не удалось подготовить временную папку');
+-            if (@file_put_contents($entryPath, $content, LOCK_EX) === false) throw new RuntimeException('Не удалось подготовить файл для архива');
+-            $cmd = 'cd '.escapeshellarg($tmp).' && /usr/bin/zip -q -u '.escapeshellarg($archivePath).' '.escapeshellarg('./'.$entry).' 2>/dev/null';
+-            exec($cmd, $out, $code);
+-            hc_rrmdir($tmp);
+-            if ($code !== 0) throw new RuntimeException('zip не смог обновить архив');
+-        } elseif ($writer === '7z' || $writer === '7zz') {
+-            $tmp = sys_get_temp_dir() . '/hc-archive-' . bin2hex(random_bytes(8));
+-            $entryPath = $tmp . '/' . $entry;
+-            if (!@mkdir(dirname($entryPath), 0700, true) && !is_dir(dirname($entryPath))) throw new RuntimeException('Не удалось подготовить временную папку');
+-            if (@file_put_contents($entryPath, $content, LOCK_EX) === false) throw new RuntimeException('Не удалось подготовить файл для архива');
+-            $bin = $writer === '7z' ? '/usr/bin/7z' : '/usr/bin/7zz';
+-            $cmd = 'cd '.escapeshellarg($tmp).' && '.escapeshellarg($bin).' u -y -bd -- '.escapeshellarg($archivePath).' '.escapeshellarg($entry).' >/dev/null 2>&1';
+-            exec($cmd, $out, $code);
+-            hc_rrmdir($tmp);
+-            if ($code !== 0) throw new RuntimeException('7-Zip не смог обновить архив');
+-        } elseif ($writer === 'rar') {
+-            $tmp = sys_get_temp_dir() . '/hc-rar-' . bin2hex(random_bytes(8));
+-            $entryPath = $tmp . '/' . $entry;
+-            if (!@mkdir(dirname($entryPath), 0700, true) && !is_dir(dirname($entryPath))) throw new RuntimeException('Не удалось подготовить временную папку');
+-            if (@file_put_contents($entryPath, $content, LOCK_EX) === false) throw new RuntimeException('Не удалось подготовить файл для архива');
+-            $cmd = 'cd '.escapeshellarg($tmp).' && /usr/bin/rar u -idq -- '.escapeshellarg($archivePath).' '.escapeshellarg($entry).' >/dev/null 2>&1';
+-            exec($cmd, $out, $code);
+-            hc_rrmdir($tmp);
+-            if ($code !== 0) throw new RuntimeException('RAR не смог обновить архив');
++        } else {
++            // Preserve the exact stored path (including a harmless leading ./), otherwise CLI tools can create a duplicate entry.
++            hc_archive_entry_clean($actual);
++            $tmp=sys_get_temp_dir().'/hc-archive-'.bin2hex(random_bytes(8));
++            $actualFs=ltrim(str_replace('\\','/',$actual),'/');
++            $entryPath=$tmp.'/'.$actualFs;
++            if (!@mkdir(dirname($entryPath),0700,true) && !is_dir(dirname($entryPath))) throw new RuntimeException('Не удалось подготовить временную папку');
++            if (@file_put_contents($entryPath,$content,LOCK_EX)===false) throw new RuntimeException('Не удалось подготовить файл для архива');
++            if ($writer==='zipcli') $cmd='cd '.escapeshellarg($tmp).' && /usr/bin/zip -q -u '.escapeshellarg($archivePath).' '.escapeshellarg($actualFs).' 2>/dev/null';
++            elseif ($writer==='7z' || $writer==='7zz') { $bin=$writer==='7z'?'/usr/bin/7z':'/usr/bin/7zz'; $cmd='cd '.escapeshellarg($tmp).' && '.escapeshellarg($bin).' u -y -bd '.escapeshellarg($archivePath).' '.escapeshellarg($actualFs).' >/dev/null 2>&1'; }
++            else $cmd='cd '.escapeshellarg($tmp).' && /usr/bin/rar u -idq '.escapeshellarg($archivePath).' '.escapeshellarg($actualFs).' >/dev/null 2>&1';
++            exec($cmd,$out,$code); hc_rrmdir($tmp);
++            if ($code!==0) throw new RuntimeException('Архиватор не смог сохранить изменения');
+         }
+     } catch (Throwable $e) {
+-        @copy($backup, $archivePath);
+-        throw $e;
++        @copy($backup,$archivePath); throw $e;
+     }
+-    @chmod($archivePath, 0660); @chown($archivePath, 'www-data'); @chgrp($archivePath, 'www-data');
++    @chmod($archivePath,0660); @chown($archivePath,'www-data'); @chgrp($archivePath,'www-data');
+ }
+ 
+ function hc_write_text_file(string $path, string $content): void
+@@ -863,7 +1072,7 @@
+     http_response_code(404);
+     hc_public_headers();
+     ?>
+-<!doctype html><html lang="ru" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ссылка недоступна — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud/cloud.css?v=101"></head><body class="hc-public-body hc-public-error-body">
++<!doctype html><html lang="ru" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ссылка недоступна — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud/cloud.css?v=102"></head><body class="hc-public-body hc-public-error-body">
+ <main class="hc-public-page"><section class="hc-public-card hc-public-error-card"><div class="hc-public-brand"><span><i class="fa-solid fa-cloud"></i></span><b>HYPER CLOUD</b></div><div class="hc-public-error-icon"><i class="fa-solid fa-link-slash"></i></div><h1>Ссылка недоступна</h1><p>Доступ закрыт или файл больше не существует.</p></section></main></body></html><?php
+     exit;
+ }
+@@ -881,7 +1090,7 @@
+     http_response_code(200);
+     hc_public_headers();
+     ?>
+-<!doctype html><html lang="ru" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($name) ?> — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud/cloud.css?v=101"></head><body class="hc-public-body">
++<!doctype html><html lang="ru" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($name) ?> — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud/cloud.css?v=102"></head><body class="hc-public-body">
+ <main class="hc-public-page"><section class="hc-public-card"><div class="hc-public-brand"><span><i class="fa-solid fa-cloud"></i></span><b>HYPER CLOUD</b></div>
+ <div class="hc-public-file"><div class="hc-public-file-icon <?= e($kind) ?>"><i class="fa-solid <?= e(hc_icon($path)) ?>"></i></div><div><h1><?= e($name) ?></h1><p><?= e(human_bytes($size)) ?> <span>•</span> <?= e(date('d.m.Y H:i', (int)(filemtime($path) ?: time()))) ?></p></div></div>
+ <?php if(str_starts_with($mime,'image/')): ?><div class="hc-public-preview image"><img src="<?= e($inline) ?>" alt=""></div>
+@@ -916,10 +1125,13 @@
+     try {
+         $relAction = hc_clean_rel((string)($_GET['path'] ?? ''));
+         [,,$actionPath] = hc_resolve($relAction, true);
++        $siteRootAction = hc_clean_rel((string)($_GET['site_root'] ?? ''));
+         if ($cloudAction === 'download') hc_stream_file($actionPath, false);
+         if ($cloudAction === 'raw') hc_stream_file($actionPath, true);
+-        if ($cloudAction === 'html_preview') hc_html_preview_output($relAction, $actionPath);
+-        if ($cloudAction === 'html_asset') hc_html_asset_output($relAction, $actionPath);
++        if ($cloudAction === 'html_preview') hc_html_preview_output($relAction, $actionPath, $siteRootAction);
++        if ($cloudAction === 'html_asset') hc_html_asset_output($relAction, $actionPath, $siteRootAction);
++        if ($cloudAction === 'archive_html_preview') hc_archive_html_preview_output($relAction, $actionPath, (string)($_GET['entry'] ?? ''), $siteRootAction);
++        if ($cloudAction === 'archive_html_asset') hc_archive_html_asset_output($relAction, $actionPath, (string)($_GET['entry'] ?? ''), $siteRootAction);
+         http_response_code(404); exit('Not found');
+     } catch (Throwable $e) {
+         http_response_code(404); exit('File unavailable');
+@@ -1139,7 +1351,7 @@
+ <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+ <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+ <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css">
+-<link rel="stylesheet" href="/cloud/cloud.css?v=101">
++<link rel="stylesheet" href="/cloud/cloud.css?v=102">
+ </head>
+ <body data-share-open="<?= e($shareOpenRel) ?>">
+ <div class="hc-app" id="hcApp">
+@@ -1189,19 +1401,19 @@
+         <div class="hc-section-head"><div><b><?= $view==='disk' ? e($rel===''?'Файлы и папки':basename($rel)) : e($viewTitle) ?></b><span id="hcItemCount"><?= count($rows) ?> элементов</span></div><?php if($view==='disk'): ?><button class="hc-link-btn" type="button" data-open-dialog="folderDialog"><i class="fa-solid fa-folder-plus"></i>Новая папка</button><?php endif; ?></div>
+ 
+         <div class="hc-grid" id="hcFilesGrid">
+-          <?php foreach($rows as $row): $kind=hc_kind($row['path']); $isDir=(bool)$row['is_dir']; $share=$isDir?null:($shareByPath[$row['rel']]??null); $shareToken=is_array($share)?(string)($share['token']??''):''; $shareUrl=$shareToken!==''?hc_public_share_url($shareToken):''; $openHref=$isDir?hc_url(['path'=>$row['rel']]):hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel']],static fn($v)=>$v!==null)); ?>
++          <?php foreach($rows as $row): $kind=hc_kind($row['path']); $isDir=(bool)$row['is_dir']; $isHtmlFile=!$isDir&&hc_is_html_name($row['name']); $isEditableFile=!$isDir&&hc_is_editable_text_name($row['name'])&&(int)$row['size']<=2*1024*1024; $share=$isDir?null:($shareByPath[$row['rel']]??null); $shareToken=is_array($share)?(string)($share['token']??''):''; $shareUrl=$shareToken!==''?hc_public_share_url($shareToken):''; $previewHref=$isDir?hc_url(['path'=>$row['rel']]):hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel']],static fn($v)=>$v!==null)); $openHref=$isHtmlFile?hc_url(['cloud_action'=>'html_preview','path'=>$row['rel']]):$previewHref; $editHref=$isEditableFile?hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel'],'edit'=>'1'],static fn($v)=>$v!==null)):''; ?>
+           <article class="hc-file-card" data-file-name="<?= e(hc_lower($row['name'])) ?>" data-kind="<?= e($kind) ?>">
+-            <a class="hc-file-open" href="<?= e($openHref) ?>">
++            <a class="hc-file-open" href="<?= e($openHref) ?>"<?= $isHtmlFile?' target="_blank" rel="noopener"':'' ?>>
+               <div class="hc-file-icon <?= e($kind) ?>"><i class="fa-solid <?= e(hc_icon($row['path'])) ?>"></i><?php if($kind==='image'): ?><img loading="lazy" src="<?= e(hc_url(['cloud_action'=>'raw','path'=>$row['rel']])) ?>" alt=""><?php endif; ?></div>
+               <div class="hc-file-info"><div class="hc-file-name-line"><b title="<?= e($row['name']) ?>"><?= e($row['name']) ?></b><?php if(!$isDir): ?><span class="hc-privacy-pill <?= $shareToken!==''?'shared':'private' ?>" title="<?= $shareToken!==''?'Доступ по ссылке включён':'Приватный файл' ?>"><i class="fa-solid <?= $shareToken!==''?'fa-link':'fa-lock' ?>"></i><?= $shareToken!==''?'По ссылке':'Приватный' ?></span><?php endif; ?></div><span><?= $isDir ? 'Папка' : e(human_bytes((float)$row['size'])) ?> · <?= e(date('d.m.Y H:i',$row['mtime']?:time())) ?></span><?php if(!$isDir && $row['dir']!==''): ?><small>/<?= e($row['dir']) ?></small><?php endif; ?></div>
+             </a>
+             <div class="hc-file-actions">
+-              <?php if(!$isDir): ?><a title="Скачать" href="<?= e(hc_url(['cloud_action'=>'download','path'=>$row['rel']])) ?>"><i class="fa-solid fa-download"></i></a><?php endif; ?>
++              <?php if(!$isDir): ?><?php if($isEditableFile): ?><a title="Редактировать код" href="<?= e($editHref) ?>"><i class="fa-solid fa-code"></i></a><?php endif; ?><a title="Скачать" href="<?= e(hc_url(['cloud_action'=>'download','path'=>$row['rel']])) ?>"><i class="fa-solid fa-download"></i></a><?php endif; ?>
+               <button type="button" class="hc-delete-quick" title="Удалить" data-delete-target="<?= e($row['rel']) ?>" data-delete-name="<?= e($row['name']) ?>"><i class="fa-regular fa-trash-can"></i></button>
+               <button type="button" title="Действия" data-menu-for="menu-<?= md5($row['rel']) ?>"><i class="fa-solid fa-ellipsis-vertical"></i></button>
+             </div>
+             <div class="hc-context-menu" id="menu-<?= md5($row['rel']) ?>">
+-              <?php if($isDir): ?><a href="<?= e(hc_url(['path'=>$row['rel']])) ?>"><i class="fa-regular fa-folder-open"></i>Открыть</a><?php else: ?><a href="<?= e($openHref) ?>"><i class="fa-regular fa-eye"></i>Открыть</a><a href="<?= e(hc_url(['cloud_action'=>'download','path'=>$row['rel']])) ?>"><i class="fa-solid fa-download"></i>Скачать</a><button type="button" class="hc-share-action <?= $shareToken!==''?'active':'' ?>" data-share-target="<?= e($row['rel']) ?>" data-share-name="<?= e($row['name']) ?>" data-share-url="<?= e($shareUrl) ?>" data-share-enabled="<?= $shareToken!==''?'1':'0' ?>"><i class="fa-solid <?= $shareToken!==''?'fa-link':'fa-lock' ?>"></i>Доступ</button><?php endif; ?>
++              <?php if($isDir): ?><a href="<?= e(hc_url(['path'=>$row['rel']])) ?>"><i class="fa-regular fa-folder-open"></i>Открыть</a><?php else: ?><?php if($isHtmlFile): ?><a target="_blank" rel="noopener" href="<?= e($openHref) ?>"><i class="fa-solid fa-globe"></i>Открыть как сайт</a><?php else: ?><a href="<?= e($openHref) ?>"><i class="fa-regular fa-eye"></i>Открыть</a><?php endif; ?><?php if($isEditableFile): ?><a href="<?= e($editHref) ?>"><i class="fa-solid fa-code"></i>Редактировать код</a><?php endif; ?><a href="<?= e(hc_url(['cloud_action'=>'download','path'=>$row['rel']])) ?>"><i class="fa-solid fa-download"></i>Скачать</a><button type="button" class="hc-share-action <?= $shareToken!==''?'active':'' ?>" data-share-target="<?= e($row['rel']) ?>" data-share-name="<?= e($row['name']) ?>" data-share-url="<?= e($shareUrl) ?>" data-share-enabled="<?= $shareToken!==''?'1':'0' ?>"><i class="fa-solid <?= $shareToken!==''?'fa-link':'fa-lock' ?>"></i>Доступ</button><?php endif; ?>
+               <button type="button" data-rename-target="<?= e($row['rel']) ?>" data-rename-name="<?= e($row['name']) ?>"><i class="fa-solid fa-pen"></i>Переименовать</button>
+               <button class="danger" type="button" data-delete-target="<?= e($row['rel']) ?>" data-delete-name="<?= e($row['name']) ?>"><i class="fa-regular fa-trash-can"></i>Удалить</button>
+             </div>
+@@ -1210,8 +1422,8 @@
+         </div>
+ 
+         <div class="hc-list" id="hcFilesList" hidden>
+-          <?php foreach($rows as $row): $kind=hc_kind($row['path']); $isDir=(bool)$row['is_dir']; $share=$isDir?null:($shareByPath[$row['rel']]??null); $shareToken=is_array($share)?(string)($share['token']??''):''; $shareUrl=$shareToken!==''?hc_public_share_url($shareToken):''; $openHref=$isDir?hc_url(['path'=>$row['rel']]):hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel']],static fn($v)=>$v!==null)); ?>
+-          <div class="hc-list-row" data-file-name="<?= e(hc_lower($row['name'])) ?>"><a href="<?= e($openHref) ?>"><span class="hc-mini-icon <?= e($kind) ?>"><i class="fa-solid <?= e(hc_icon($row['path'])) ?>"></i></span><b><?= e($row['name']) ?></b></a><span><?= $isDir?'Папка':e(human_bytes((float)$row['size'])) ?></span><span><?= e(date('d.m.Y H:i',$row['mtime']?:time())) ?></span><div class="hc-list-actions"><?php if(!$isDir): ?><button type="button" class="hc-list-share <?= $shareToken!==''?'active':'' ?>" data-share-target="<?= e($row['rel']) ?>" data-share-name="<?= e($row['name']) ?>" data-share-url="<?= e($shareUrl) ?>" data-share-enabled="<?= $shareToken!==''?'1':'0' ?>" title="Доступ"><i class="fa-solid <?= $shareToken!==''?'fa-link':'fa-lock' ?>"></i></button><a class="hc-icon-btn" href="<?= e(hc_url(['cloud_action'=>'download','path'=>$row['rel']])) ?>" title="Скачать"><i class="fa-solid fa-download"></i></a><?php endif; ?><button type="button" class="hc-icon-btn danger" data-delete-target="<?= e($row['rel']) ?>" data-delete-name="<?= e($row['name']) ?>" title="Удалить"><i class="fa-regular fa-trash-can"></i></button></div></div>
++          <?php foreach($rows as $row): $kind=hc_kind($row['path']); $isDir=(bool)$row['is_dir']; $isHtmlFile=!$isDir&&hc_is_html_name($row['name']); $isEditableFile=!$isDir&&hc_is_editable_text_name($row['name'])&&(int)$row['size']<=2*1024*1024; $share=$isDir?null:($shareByPath[$row['rel']]??null); $shareToken=is_array($share)?(string)($share['token']??''):''; $shareUrl=$shareToken!==''?hc_public_share_url($shareToken):''; $previewHref=$isDir?hc_url(['path'=>$row['rel']]):hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel']],static fn($v)=>$v!==null)); $openHref=$isHtmlFile?hc_url(['cloud_action'=>'html_preview','path'=>$row['rel']]):$previewHref; $editHref=$isEditableFile?hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel'],'edit'=>'1'],static fn($v)=>$v!==null)):''; ?>
++          <div class="hc-list-row" data-file-name="<?= e(hc_lower($row['name'])) ?>"><a href="<?= e($openHref) ?>"<?= $isHtmlFile?' target="_blank" rel="noopener"':'' ?>><span class="hc-mini-icon <?= e($kind) ?>"><i class="fa-solid <?= e(hc_icon($row['path'])) ?>"></i></span><b><?= e($row['name']) ?></b></a><span><?= $isDir?'Папка':e(human_bytes((float)$row['size'])) ?></span><span><?= e(date('d.m.Y H:i',$row['mtime']?:time())) ?></span><div class="hc-list-actions"><?php if(!$isDir): ?><?php if($isEditableFile): ?><a class="hc-icon-btn" href="<?= e($editHref) ?>" title="Редактировать код"><i class="fa-solid fa-code"></i></a><?php endif; ?><button type="button" class="hc-list-share <?= $shareToken!==''?'active':'' ?>" data-share-target="<?= e($row['rel']) ?>" data-share-name="<?= e($row['name']) ?>" data-share-url="<?= e($shareUrl) ?>" data-share-enabled="<?= $shareToken!==''?'1':'0' ?>" title="Доступ"><i class="fa-solid <?= $shareToken!==''?'fa-link':'fa-lock' ?>"></i></button><a class="hc-icon-btn" href="<?= e(hc_url(['cloud_action'=>'download','path'=>$row['rel']])) ?>" title="Скачать"><i class="fa-solid fa-download"></i></a><?php endif; ?><button type="button" class="hc-icon-btn danger" data-delete-target="<?= e($row['rel']) ?>" data-delete-name="<?= e($row['name']) ?>" title="Удалить"><i class="fa-regular fa-trash-can"></i></button></div></div>
+           <?php endforeach; ?>
+         </div>
+ 
+@@ -1287,18 +1499,36 @@
+         <?php if($archiveEntryError!==''): ?><div class="hc-preview-fallback"><i class="fa-solid fa-triangle-exclamation"></i><b>Не удалось открыть файл</b><p><?= e($archiveEntryError) ?></p><a class="hc-btn soft" href="<?= e(hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$previewRel],static fn($v)=>$v!==null))) ?>"><i class="fa-solid fa-arrow-left"></i>К архиву</a></div>
+         <?php else: $archiveWritable=(bool)($archiveEntryData['writable']??false); $archiveContent=(string)($archiveEntryData['content']??''); ?>
+           <form method="post" class="hc-editor-form" data-editor-form><input type="hidden" name="action" value="archive_save"><?= hc_csrf_field() ?><input type="hidden" name="path" value="<?= e($view==='disk'?$rel:'') ?>"><input type="hidden" name="return_view" value="<?= e($view) ?>"><input type="hidden" name="target" value="<?= e($previewRel) ?>"><input type="hidden" name="archive_entry" value="<?= e($archiveEntry) ?>">
+-            <div class="hc-editor-toolbar"><a class="hc-editor-back" href="<?= e(hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$previewRel],static fn($v)=>$v!==null))) ?>"><i class="fa-solid fa-arrow-left"></i>Архив</a><div><span class="hc-editor-lang"><?= e(strtoupper(pathinfo($archiveEntry,PATHINFO_EXTENSION) ?: 'TXT')) ?></span><span id="hcEditorLines">1 строка</span></div><?php if($archiveWritable): ?><button class="hc-btn primary" type="submit"><i class="fa-solid fa-floppy-disk"></i>Сохранить</button><?php else: ?><span class="hc-editor-readonly"><i class="fa-solid fa-lock"></i>Только чтение</span><?php endif; ?></div>
++            <div class="hc-editor-toolbar"><a class="hc-editor-back" href="<?= e(hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$previewRel],static fn($v)=>$v!==null))) ?>"><i class="fa-solid fa-arrow-left"></i>Архив</a><?php if(hc_is_html_name($archiveEntry)): ?><a class="hc-editor-site" target="_blank" rel="noopener" href="<?= e(hc_url(['cloud_action'=>'archive_html_preview','path'=>$previewRel,'entry'=>$archiveEntry])) ?>"><i class="fa-solid fa-globe"></i>Открыть сайт</a><?php endif; ?><div><span class="hc-editor-lang"><?= e(strtoupper(pathinfo($archiveEntry,PATHINFO_EXTENSION) ?: 'TXT')) ?></span><span id="hcEditorLines">1 строка</span></div><?php if($archiveWritable): ?><button class="hc-btn primary" type="submit"><i class="fa-solid fa-floppy-disk"></i>Сохранить</button><?php else: ?><span class="hc-editor-readonly"><i class="fa-solid fa-lock"></i>Только чтение</span><?php endif; ?></div>
+             <textarea class="hc-code-editor" name="content" spellcheck="false" autocomplete="off" autocapitalize="off" <?= $archiveWritable?'':'readonly' ?>><?= e($archiveContent) ?></textarea>
+           </form>
+         <?php endif; ?>
+       <?php elseif($previewIsArchive): $archive=hc_archive_entries($previewPath); $archiveWritable=hc_archive_writer($previewPath)!==''; ?>
+         <?php if(!empty($archive['ok'])): ?>
+           <div class="hc-archive-head"><span class="hc-archive-main-icon"><i class="fa-solid fa-file-zipper"></i></span><div><b><?= e(basename($previewPath)) ?></b><span><?= count($archive['entries']) ?> элементов</span></div></div>
+-          <div class="hc-archive-table"><table><thead><tr><th>Имя</th><th>Размер</th><th>Изменён</th><th></th></tr></thead><tbody><?php foreach($archive['entries'] as $entry): $entryName=(string)($entry['name']??''); $canEdit=hc_is_editable_text_name($entryName) && !str_ends_with($entryName,'/') && (int)($entry['size']??0)<=2*1024*1024; $entryHref=$canEdit?hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$previewRel,'archive_entry'=>$entryName],static fn($v)=>$v!==null)):''; ?><tr><td><?php if($canEdit): ?><a class="hc-archive-open" href="<?= e($entryHref) ?>"><?php endif; ?><span class="hc-archive-entry-icon"><i class="fa-solid <?= e(hc_archive_entry_icon($entryName)) ?>"></i></span><b><?= e($entryName) ?></b><?php if($canEdit): ?></a><?php endif; ?></td><td><?= str_ends_with($entryName,'/') ? '—' : e(human_bytes((float)($entry['size']??0))) ?></td><td><?= e((string)($entry['modified']??'—')) ?></td><td><?php if($canEdit): ?><a class="hc-archive-edit-btn" href="<?= e($entryHref) ?>" title="<?= $archiveWritable?'Редактировать':'Открыть' ?>"><i class="fa-solid <?= $archiveWritable?'fa-pen-to-square':'fa-eye' ?>"></i></a><?php endif; ?></td></tr><?php endforeach; ?></tbody></table></div>
++          <div class="hc-archive-table"><table><thead><tr><th>Имя</th><th>Размер</th><th>Изменён</th><th></th></tr></thead><tbody>
++          <?php foreach($archive['entries'] as $entry):
++            $entryName=(string)($entry['name']??''); $entryDir=str_ends_with($entryName,'/');
++            try{$entryCanonical=$entryDir?'':hc_archive_entry_clean($entryName);}catch(Throwable){$entryCanonical='';}
++            $canEdit=$entryCanonical!==''&&hc_is_editable_text_name($entryCanonical)&&(int)($entry['size']??0)<=2*1024*1024;
++            $entryIsHtml=$entryCanonical!==''&&hc_is_html_name($entryCanonical);
++            $entryEditHref=$canEdit?hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$previewRel,'archive_entry'=>$entryCanonical],static fn($v)=>$v!==null)):'';
++            $entrySiteHref=$entryIsHtml?hc_url(['cloud_action'=>'archive_html_preview','path'=>$previewRel,'entry'=>$entryCanonical]):'';
++          ?>
++          <tr><td>
++            <?php if($entryIsHtml): ?><a class="hc-archive-open" target="_blank" rel="noopener" href="<?= e($entrySiteHref) ?>">
++            <?php elseif($canEdit): ?><a class="hc-archive-open" href="<?= e($entryEditHref) ?>"><?php endif; ?>
++            <span class="hc-archive-entry-icon"><i class="fa-solid <?= e(hc_archive_entry_icon($entryName)) ?>"></i></span><b><?= e($entryName) ?></b>
++            <?php if($entryIsHtml||$canEdit): ?></a><?php endif; ?>
++          </td><td><?= $entryDir?'—':e(human_bytes((float)($entry['size']??0))) ?></td><td><?= e((string)($entry['modified']??'—')) ?></td><td><div class="hc-archive-actions">
++            <?php if($entryIsHtml): ?><a class="hc-archive-edit-btn" target="_blank" rel="noopener" href="<?= e($entrySiteHref) ?>" title="Открыть как сайт"><i class="fa-solid fa-globe"></i></a><?php endif; ?>
++            <?php if($canEdit): ?><a class="hc-archive-edit-btn" href="<?= e($entryEditHref) ?>" title="Редактировать код"><i class="fa-solid fa-code"></i></a><?php endif; ?>
++          </div></td></tr>
++          <?php endforeach; ?></tbody></table></div>
+           <?php if(!empty($archive['truncated'])): ?><div class="hc-preview-note">Показаны первые 1000 элементов.</div><?php endif; ?>
+         <?php else: ?><div class="hc-preview-fallback"><i class="fa-solid fa-file-circle-xmark"></i><b>Не удалось открыть архив</b><p><?= e((string)($archive['error']??'')) ?></p></div><?php endif; ?>
+       <?php elseif($previewIsText && $editText): $txt=@file_get_contents($previewPath,false,null,0,2*1024*1024); ?>
+-        <form method="post" class="hc-editor-form" data-editor-form><input type="hidden" name="action" value="save_text"><?= hc_csrf_field() ?><input type="hidden" name="path" value="<?= e($view==='disk'?$rel:'') ?>"><input type="hidden" name="return_view" value="<?= e($view) ?>"><input type="hidden" name="target" value="<?= e($previewRel) ?>"><div class="hc-editor-toolbar"><a class="hc-editor-back" href="<?= e(hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$previewRel],static fn($v)=>$v!==null))) ?>"><i class="fa-solid fa-arrow-left"></i>Просмотр</a><div><span class="hc-editor-lang"><?= e(strtoupper(pathinfo($previewPath,PATHINFO_EXTENSION) ?: 'TXT')) ?></span><span id="hcEditorLines">1 строка</span></div><button class="hc-btn primary" type="submit"><i class="fa-solid fa-floppy-disk"></i>Сохранить</button></div><textarea class="hc-code-editor" name="content" spellcheck="false" autocomplete="off" autocapitalize="off"><?= e(is_string($txt)?$txt:'') ?></textarea></form>
++        <form method="post" class="hc-editor-form" data-editor-form><input type="hidden" name="action" value="save_text"><?= hc_csrf_field() ?><input type="hidden" name="path" value="<?= e($view==='disk'?$rel:'') ?>"><input type="hidden" name="return_view" value="<?= e($view) ?>"><input type="hidden" name="target" value="<?= e($previewRel) ?>"><div class="hc-editor-toolbar"><a class="hc-editor-back" href="<?= e(hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$previewRel],static fn($v)=>$v!==null))) ?>"><i class="fa-solid fa-arrow-left"></i>Просмотр</a><?php if($previewIsHtml): ?><a class="hc-editor-site" target="_blank" rel="noopener" href="<?= e(hc_url(['cloud_action'=>'html_preview','path'=>$previewRel])) ?>"><i class="fa-solid fa-globe"></i>Открыть сайт</a><?php endif; ?><div><span class="hc-editor-lang"><?= e(strtoupper(pathinfo($previewPath,PATHINFO_EXTENSION) ?: 'TXT')) ?></span><span id="hcEditorLines">1 строка</span></div><button class="hc-btn primary" type="submit"><i class="fa-solid fa-floppy-disk"></i>Сохранить</button></div><textarea class="hc-code-editor" name="content" spellcheck="false" autocomplete="off" autocapitalize="off"><?= e(is_string($txt)?$txt:'') ?></textarea></form>
+       <?php elseif($previewIsHtml): ?>
+         <div class="hc-html-site-preview">
+           <div class="hc-html-browserbar"><span class="hc-html-dots"><i></i><i></i><i></i></span><div class="hc-html-address"><i class="fa-solid fa-lock"></i><span>/<?= e($previewRel) ?></span></div><button type="button" class="hc-html-refresh" data-html-refresh title="Обновить предпросмотр"><i class="fa-solid fa-rotate-right"></i></button></div>
+@@ -1316,6 +1546,6 @@
+ <?php endif; ?>
+ 
+ <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous" defer></script>
+-<script src="/cloud/cloud.js?v=101" defer></script>
++<script src="/cloud/cloud.js?v=102" defer></script>
+ </body>
+ </html>
+--- /mnt/data/v102work/extracted/HYPER-HOST-CLOUD-v101-PATCH/src/public/cloud/cloud.css	2026-08-20 04:24:56.000000000 +0000
++++ /mnt/data/v102work/HYPER-HOST-CLOUD-v102-PATCH/src/public/cloud/cloud.css	2026-08-20 04:35:22.548099159 +0000
+@@ -203,3 +203,7 @@
+ 
+ .hc-preview-panel:has(.hc-html-site-preview){width:min(1440px,calc(100vw - 44px))!important;height:min(940px,calc(100vh - 36px))!important}.hc-preview-body:has(.hc-html-site-preview){padding:0!important;overflow:hidden!important;background:#e9edf4!important}.hc-html-site-preview{height:100%;min-height:0;display:flex;flex-direction:column;background:#fff}.hc-html-browserbar{height:52px;flex:0 0 52px;display:flex;align-items:center;gap:12px;padding:0 14px;border-bottom:1px solid #dfe4ec;background:linear-gradient(180deg,#fafbfc,#f3f5f8)}.hc-html-dots{display:flex;gap:6px;flex:0 0 auto}.hc-html-dots i{width:9px;height:9px;border-radius:50%;background:#d2d7e0}.hc-html-dots i:first-child{background:#ff6b64}.hc-html-dots i:nth-child(2){background:#f5bd4f}.hc-html-dots i:nth-child(3){background:#57c76d}.hc-html-address{height:34px;min-width:0;flex:1;display:flex;align-items:center;gap:8px;padding:0 12px;border:1px solid #dde2ea;border-radius:11px;background:#fff;color:#6f7889;box-shadow:0 1px 2px rgba(26,38,64,.03)}.hc-html-address i{font-size:9px;color:#8a95a7}.hc-html-address span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font:10px/1.2 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}.hc-html-refresh{width:34px;height:34px;border:1px solid #dfe4ec;border-radius:10px;background:#fff;color:#687489;display:grid;place-items:center;cursor:pointer;transition:.16s}.hc-html-refresh:hover{color:#3457d5;border-color:#ccd6f4;background:#f8faff}.hc-html-refresh.is-spinning i{animation:hcHtmlSpin .55s ease}.hc-html-frame{display:block;flex:1 1 auto;min-height:0;width:100%;border:0;background:#fff}@keyframes hcHtmlSpin{to{transform:rotate(360deg)}}
+ @media(max-width:700px){.hc-upload-progress{padding:13px}.hc-preview-panel:has(.hc-html-site-preview){width:100%!important;height:100vh!important;border-radius:0!important}.hc-html-browserbar{padding:0 9px;gap:8px}.hc-html-dots{display:none}.hc-html-address{padding:0 9px}.hc-html-address span{font-size:9px}}
++
++/* v102 — repaired editor / website preview actions */
++.hc-editor-site{height:36px;padding:0 12px;border:1px solid #31533f;border-radius:10px;color:#8fe0aa;display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:800;background:#173126;white-space:nowrap}.hc-editor-site:hover{background:#1d3e30;color:#b9f3cb;border-color:#3d7252}.hc-archive-actions{display:flex;align-items:center;justify-content:center;gap:6px}.hc-archive-actions .hc-archive-edit-btn:has(.fa-globe){background:#edf8f1;border-color:#d7ecde;color:#278248}.hc-archive-actions .hc-archive-edit-btn:has(.fa-globe):hover{background:#ddf3e5;border-color:#bee2c9;color:#176d35}.hc-file-actions a[title="Редактировать код"]{color:#365fe5;background:#edf2ff}.hc-file-actions a[title="Редактировать код"]:hover{background:#dfe8ff;color:#244bd1}.hc-list-actions a[title="Редактировать код"]{color:#365fe5}.hc-context-menu a .fa-globe{color:#26914c}.hc-context-menu a .fa-code{color:#4168e8}
++@media(max-width:600px){.hc-editor-site{width:40px;padding:0;justify-content:center;font-size:0}.hc-editor-site i{font-size:13px}.hc-archive-actions{gap:3px}}
