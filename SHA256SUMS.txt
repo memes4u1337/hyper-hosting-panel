@@ -1,6 +1,10 @@
-d00322d4c2e63f13e66e0fe6a793b1965fc814c2fc52edb67066f124333ba37f  apply-v1.5-cloud-sharing.sh
-a0ea8eebbc17cad67ed52cda5907fc01d1d8a9065f7ede63cd401093c4b480eb  src/public/cloud/index.php
-41f57bb66372da3b48da23b6452272fcb103836c4bb6f443ebcbd3bef5c264f9  src/public/cloud/cloud.css
-48eb805f6bbfb8257cb936b0e7a8228a528d4081da83e4e7b166ee13e7cf6493  src/public/cloud/cloud.js
-ca93f05247038c8e7a8d8b5a611175c4b23eb3dd4648396a7c1a0a8e54e84d7e  PATCH-v97-PRIVATE-SHARING.md
-3992848e014029c047810aff46d4799d0278efaa3befdb76949a98c0fbed1387  README-INSTALL.txt
+ba172ad228ee253a2e530dbdba9d7019fe8ed8d4a57cbd0c00c18e937aebe4d6  ./MANIFEST.txt
+3225ac85ea6b740b9503e55b694bcf0af72889a9ee72bc6b8ad39d96a723b5af  ./PATCH-v103-CLOUD-DOMAIN-MULTIUSER.md
+f6c6bf46e69879e34069f685bfb1f9d0d08c351d02ee915a131e6c005d91597f  ./README-INSTALL.txt
+3c6db45f9a7810634fd66ed385cc0d2a27e31de7cde6be977915e67bea34c735  ./apply-v2.1-cloud-domain-multiuser.sh
+8d5ec456aa267164a6a1fe68f1ac3f14959db092b803d03fec108f800bddcac9  ./cloud-v102-to-v103-public.patch
+6bedc5592f3e2279d86bcdf34287ead7085fc4a092b90f9a5768a6f36ae6ab09  ./src/cloud/app/bootstrap.php
+d7f689faa58a60f5bfcab8146549083701dfe2a3315ba6d2ebe9fb85d259995a  ./src/cloud/public/api/upload.php
+bc5e1d4739f1f088c7326db1216d6a8697e349fc9c1508f8bb8772c51664bfa0  ./src/cloud/public/cloud.css
+91cf0c34195b0e210e328ed56c2b8cb64dc85d07ee0c3a0ceeff901a2967a0ab  ./src/cloud/public/cloud.js
+f258cddce795bfe8cabc99f673128dee128538ed8e048253a97e6f6d2e6eca80  ./src/cloud/public/index.php

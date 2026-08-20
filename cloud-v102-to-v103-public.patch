@@ -1,0 +1,1334 @@
+diff -ruN /mnt/data/cloud_v102_extract/HYPER-HOST-CLOUD-v102-PATCH/src/public/cloud/api/upload.php /mnt/data/cloud_v103_build/src/cloud/public/api/upload.php
+--- /mnt/data/cloud_v102_extract/HYPER-HOST-CLOUD-v102-PATCH/src/public/cloud/api/upload.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/cloud_v103_build/src/cloud/public/api/upload.php	2026-08-20 05:04:36.939464993 +0000
+@@ -0,0 +1,178 @@
++<?php
++declare(strict_types=1);
++
++/** HYPER CLOUD v103 chunk upload API. Always returns JSON. */
++require dirname(__DIR__, 2) . '/app/bootstrap.php';
++
++header('Content-Type: application/json; charset=utf-8');
++header('Cache-Control: no-store');
++header('X-Content-Type-Options: nosniff');
++@set_time_limit(0);
++@ini_set('max_execution_time','0');
++
++function api_json(array $data, int $status = 200): never
++{
++    http_response_code($status);
++    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
++    exit;
++}
++function api_clean_rel(string $value): string
++{
++    $value = str_replace(["\0", '\\'], ['', '/'], trim($value));
++    $parts = [];
++    foreach (explode('/', $value) as $part) {
++        if ($part === '' || $part === '.') continue;
++        if ($part === '..' || preg_match('/[\x00-\x1F\x7F]/u', $part)) throw new RuntimeException('Недопустимый путь');
++        $parts[] = $part;
++    }
++    return implode('/', $parts);
++}
++function api_valid_name(string $name): string
++{
++    $name = trim(str_replace("\0", '', basename($name)));
++    if ($name === '' || in_array($name, ['.','..'], true)) throw new RuntimeException('Некорректное имя файла');
++    if (preg_match('/[\\\/\x00-\x1F\x7F]/u', $name)) throw new RuntimeException('Недопустимое имя файла');
++    if ((function_exists('mb_strlen') ? mb_strlen($name) : strlen($name)) > 180) throw new RuntimeException('Слишком длинное имя файла');
++    return $name;
++}
++function api_space(): string { return ((string)($_POST['space'] ?? 'private') === 'shared') ? 'shared' : 'private'; }
++function api_root(array $user): string
++{
++    hc_ensure_user_root($user);
++    return hc_root_for_user($user, api_space());
++}
++function api_resolve_dir(array $user, string $rel): array
++{
++    $rel = api_clean_rel($rel);
++    $root = api_root($user);
++    $rootReal = realpath($root) ?: $root;
++    $path = $root . ($rel !== '' ? '/' . $rel : '');
++    $real = realpath($path);
++    if ($real === false || !is_dir($real) || is_link($path)) throw new RuntimeException('Папка загрузки не найдена');
++    if ($real !== $rootReal && !str_starts_with($real, $rootReal . DIRECTORY_SEPARATOR)) throw new RuntimeException('Недопустимый путь');
++    return [$rel, $real];
++}
++function api_unique_target(string $dir, string $name): string
++{
++    $target = $dir . '/' . $name;
++    if (!file_exists($target) && !is_link($target)) return $target;
++    $info = pathinfo($name); $base = (string)($info['filename'] ?? $name); $ext = !empty($info['extension']) ? '.'.$info['extension'] : '';
++    for ($i=1; $i<=99999; $i++) { $candidate=$dir.'/'.$base.' ('.$i.')'.$ext; if(!file_exists($candidate)&&!is_link($candidate)) return $candidate; }
++    throw new RuntimeException('Не удалось подобрать имя файла');
++}
++function api_upload_base(array $user): string
++{
++    $key = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string)($user['storage_key'] ?? 'user')) ?: 'user';
++    $dir = rtrim((string)app_config('cloud_meta_dir','/var/lib/hyper-host-cloud'),'/') . '/uploads/' . $key;
++    if (!is_dir($dir) && !@mkdir($dir,02770,true) && !is_dir($dir)) throw new RuntimeException('Не удалось подготовить временную папку');
++    @chmod($dir,02770); @chown($dir,'www-data'); @chgrp($dir,'www-data');
++    return $dir;
++}
++function api_session_dir(array $user, string $id, bool $create = true): string
++{
++    $id = strtolower(trim($id));
++    if (!preg_match('/^[a-f0-9]{32,64}$/',$id)) throw new RuntimeException('Некорректный идентификатор загрузки');
++    $dir = api_upload_base($user).'/'.$id;
++    if ($create && !is_dir($dir) && !@mkdir($dir,02770,true) && !is_dir($dir)) throw new RuntimeException('Не удалось создать сессию загрузки');
++    return $dir;
++}
++function api_read_meta(string $dir): array
++{
++    $raw=@file_get_contents($dir.'/meta.json'); $data=json_decode(is_string($raw)?$raw:'',true); return is_array($data)?$data:[];
++}
++function api_remove_tree(string $path): void
++{
++    if (!is_dir($path)) { @unlink($path); return; }
++    foreach (scandir($path) ?: [] as $n) { if ($n==='.'||$n==='..') continue; $p=$path.'/'.$n; is_dir($p)&&!is_link($p)?api_remove_tree($p):@unlink($p); }
++    @rmdir($path);
++}
++
++try {
++    if ($_SERVER['REQUEST_METHOD'] !== 'POST') api_json(['ok'=>false,'error'=>'Метод не поддерживается'],405);
++    $user = current_user();
++    if (!$user) api_json(['ok'=>false,'error'=>'Сессия завершена. Войдите в HYPER CLOUD заново.','auth'=>false],401);
++    check_csrf();
++    $action=(string)($_POST['action']??'');
++
++    if ($action === 'upload_chunk') {
++        $id=(string)($_POST['upload_id']??'');
++        $index=(int)($_POST['chunk_index']??-1); $total=(int)($_POST['total_chunks']??0);
++        if ($index<0 || $total<1 || $index >= $total || $total > 2000000) throw new RuntimeException('Некорректная часть файла');
++        $name=api_valid_name((string)($_POST['file_name']??'')); $size=max(0,(int)($_POST['file_size']??0));
++        [$targetRel,$targetDir]=api_resolve_dir($user,(string)($_POST['upload_target']??''));
++        if (!isset($_FILES['chunk'])) throw new RuntimeException('Часть файла не получена');
++        $err=(int)($_FILES['chunk']['error']??UPLOAD_ERR_NO_FILE);
++        if ($err!==UPLOAD_ERR_OK) throw new RuntimeException('PHP не принял часть файла (код '.$err.')');
++        $tmp=(string)($_FILES['chunk']['tmp_name']??''); if($tmp===''||!is_uploaded_file($tmp)) throw new RuntimeException('Временный файл загрузки недоступен');
++        $dir=api_session_dir($user,$id,true); $meta=api_read_meta($dir);
++        $expected=['user_id'=>(int)$user['id'],'space'=>api_space(),'file_name'=>$name,'file_size'=>$size,'total_chunks'=>$total,'upload_target'=>$targetRel];
++        if (!$meta) {
++            $meta=$expected+['created_at'=>time(),'updated_at'=>time()];
++            if (@file_put_contents($dir.'/meta.json',json_encode($meta,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),LOCK_EX)===false) throw new RuntimeException('Не удалось создать сессию загрузки');
++        } else {
++            foreach($expected as $k=>$v) if((string)($meta[$k]??'')!==(string)$v) throw new RuntimeException('Параметры загрузки не совпадают');
++        }
++        $part=$dir.'/'.sprintf('%08d.part',$index);
++        if (!@move_uploaded_file($tmp,$part)) throw new RuntimeException('Не удалось сохранить часть файла');
++        @chmod($part,0660); @touch($dir.'/meta.json');
++        api_json(['ok'=>true,'chunk'=>$index,'received'=>(int)(filesize($part)?:0)]);
++    }
++
++    if ($action === 'upload_complete') {
++        $id=(string)($_POST['upload_id']??''); $dir=api_session_dir($user,$id,false); if(!is_dir($dir)) throw new RuntimeException('Сессия загрузки не найдена');
++        $meta=api_read_meta($dir); if(!$meta)throw new RuntimeException('Сессия загрузки повреждена');
++        if((int)($meta['user_id']??0)!==(int)$user['id'] || (string)($meta['space']??'')!==api_space()) throw new RuntimeException('Загрузка принадлежит другому аккаунту');
++        [$targetRel,$targetDir]=api_resolve_dir($user,(string)($meta['upload_target']??''));
++        $total=(int)($meta['total_chunks']??0); if($total<1)throw new RuntimeException('Некорректное число частей');
++        $name=api_valid_name((string)($meta['file_name']??'')); $expected=max(0,(int)($meta['file_size']??0));
++        $final=api_unique_target($targetDir,$name); $tmpFinal=$targetDir.'/.hc-upload-'.preg_replace('/[^a-f0-9]/','',strtolower($id)).'.part';
++        $out=@fopen($tmpFinal,'wb'); if(!$out)throw new RuntimeException('Не удалось создать итоговый файл');
++        $written=0;
++        try {
++            for($i=0;$i<$total;$i++) {
++                $part=$dir.'/'.sprintf('%08d.part',$i); if(!is_file($part))throw new RuntimeException('Не получена часть '.($i+1).' из '.$total);
++                $in=@fopen($part,'rb'); if(!$in)throw new RuntimeException('Не удалось прочитать часть '.($i+1));
++                $n=stream_copy_to_stream($in,$out); fclose($in); if($n===false)throw new RuntimeException('Ошибка сборки файла'); $written+=(int)$n;
++            }
++        } finally { fclose($out); }
++        if($expected!==$written){@unlink($tmpFinal);throw new RuntimeException('Файл загружен не полностью: '.human_bytes($written).' из '.human_bytes($expected));}
++        if(!@rename($tmpFinal,$final)){@unlink($tmpFinal);throw new RuntimeException('Не удалось завершить загрузку');}
++        @chmod($final,0660);@chown($final,'www-data');@chgrp($final,'www-data');
++        $finalRel=trim($targetRel.'/'.basename($final),'/'); if(api_space()==='shared')hc_shared_mark($finalRel,(int)$user['id'],'file');
++        api_remove_tree($dir); add_event('cloud','Загружен файл: '.$finalRel);
++        $query=api_space()==='shared'?('?space=shared'.($targetRel!==''?'&path='.rawurlencode($targetRel):'')):($targetRel!==''?'?path='.rawurlencode($targetRel):'');
++        api_json(['ok'=>true,'file'=>basename($final),'path'=>$finalRel,'size'=>$written,'redirect'=>'/'.$query]);
++    }
++
++    if ($action === 'upload') {
++        [$targetRel,$targetDir]=api_resolve_dir($user,(string)($_POST['upload_target']??''));
++        if (!isset($_FILES['files'])) throw new RuntimeException('Выберите файлы');
++        $names=is_array($_FILES['files']['name']??null)?$_FILES['files']['name']:[($_FILES['files']['name']??'')];
++        $tmps=is_array($_FILES['files']['tmp_name']??null)?$_FILES['files']['tmp_name']:[($_FILES['files']['tmp_name']??'')];
++        $errors=is_array($_FILES['files']['error']??null)?$_FILES['files']['error']:[($_FILES['files']['error']??UPLOAD_ERR_NO_FILE)];
++        $count=0;
++        foreach($names as $i=>$raw){
++            $err=(int)($errors[$i]??UPLOAD_ERR_NO_FILE); if($err===UPLOAD_ERR_NO_FILE)continue;
++            if($err!==UPLOAD_ERR_OK)throw new RuntimeException('PHP не принял файл '.(string)$raw.' (код '.$err.')');
++            $tmp=(string)($tmps[$i]??'');if($tmp===''||!is_uploaded_file($tmp))throw new RuntimeException('Временный файл недоступен');
++            $name=api_valid_name((string)$raw);$final=api_unique_target($targetDir,$name);
++            if(!@move_uploaded_file($tmp,$final))throw new RuntimeException('Не удалось сохранить '.$name);
++            @chmod($final,0660);@chown($final,'www-data');@chgrp($final,'www-data');
++            $rel=trim($targetRel.'/'.basename($final),'/');if(api_space()==='shared')hc_shared_mark($rel,(int)$user['id'],'file');$count++;
++        }
++        if($count<1)throw new RuntimeException('Не удалось загрузить файлы');
++        add_event('cloud','Загружено файлов: '.$count.' в /'.$targetRel);
++        $query=api_space()==='shared'?('?space=shared'.($targetRel!==''?'&path='.rawurlencode($targetRel):'')):($targetRel!==''?'?path='.rawurlencode($targetRel):'');
++        if ((string)($_POST['ajax_upload']??'')==='1') api_json(['ok'=>true,'uploaded'=>$count,'redirect'=>'/'.$query]);
++        header('Location: /'.$query); exit;
++    }
++
++    if ($action === 'upload_cancel') {
++        $dir=api_session_dir($user,(string)($_POST['upload_id']??''),false); if(is_dir($dir))api_remove_tree($dir); api_json(['ok'=>true]);
++    }
++
++    api_json(['ok'=>false,'error'=>'Неизвестная операция'],400);
++} catch (Throwable $e) {
++    error_log('HYPER CLOUD upload: '.$e->getMessage());
++    api_json(['ok'=>false,'error'=>$e->getMessage()],400);
++}
+diff -ruN /mnt/data/cloud_v102_extract/HYPER-HOST-CLOUD-v102-PATCH/src/public/cloud/cloud.css /mnt/data/cloud_v103_build/src/cloud/public/cloud.css
+--- /mnt/data/cloud_v102_extract/HYPER-HOST-CLOUD-v102-PATCH/src/public/cloud/cloud.css	2026-08-20 04:35:22.000000000 +0000
++++ /mnt/data/cloud_v103_build/src/cloud/public/cloud.css	2026-08-20 04:58:07.500148516 +0000
+@@ -207,3 +207,28 @@
+ /* v102 — repaired editor / website preview actions */
+ .hc-editor-site{height:36px;padding:0 12px;border:1px solid #31533f;border-radius:10px;color:#8fe0aa;display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:800;background:#173126;white-space:nowrap}.hc-editor-site:hover{background:#1d3e30;color:#b9f3cb;border-color:#3d7252}.hc-archive-actions{display:flex;align-items:center;justify-content:center;gap:6px}.hc-archive-actions .hc-archive-edit-btn:has(.fa-globe){background:#edf8f1;border-color:#d7ecde;color:#278248}.hc-archive-actions .hc-archive-edit-btn:has(.fa-globe):hover{background:#ddf3e5;border-color:#bee2c9;color:#176d35}.hc-file-actions a[title="Редактировать код"]{color:#365fe5;background:#edf2ff}.hc-file-actions a[title="Редактировать код"]:hover{background:#dfe8ff;color:#244bd1}.hc-list-actions a[title="Редактировать код"]{color:#365fe5}.hc-context-menu a .fa-globe{color:#26914c}.hc-context-menu a .fa-code{color:#4168e8}
+ @media(max-width:600px){.hc-editor-site{width:40px;padding:0;justify-content:center;font-size:0}.hc-editor-site i{font-size:13px}.hc-archive-actions{gap:3px}}
++
++/* HYPER CLOUD v103 — standalone auth + multi-user polish */
++.hc-auth-body{min-height:100vh;margin:0;background:radial-gradient(circle at 15% 10%,rgba(74,108,255,.16),transparent 30%),radial-gradient(circle at 90% 80%,rgba(121,83,255,.13),transparent 34%),#f5f7fc;color:#172033;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:grid;place-items:center;padding:28px}
++.hc-auth-wrap{width:min(100%,470px)}
++.hc-auth-card{background:rgba(255,255,255,.92);backdrop-filter:blur(22px);border:1px solid rgba(219,226,242,.9);border-radius:28px;padding:32px;box-shadow:0 30px 80px rgba(32,46,86,.16)}
++.hc-auth-brand{display:flex;align-items:center;gap:13px;padding-bottom:24px;border-bottom:1px solid #edf0f6}
++.hc-auth-brand>span{width:48px;height:48px;border-radius:15px;display:grid;place-items:center;background:linear-gradient(135deg,#4d70ff,#7158ff);color:#fff;font-size:20px;box-shadow:0 12px 28px rgba(80,92,255,.28)}
++.hc-auth-brand div{display:flex;flex-direction:column;gap:2px}.hc-auth-brand b{font-size:15px;letter-spacing:.03em}.hc-auth-brand small{font-size:11px;color:#8993a8}
++.hc-auth-copy{padding:27px 0 19px}.hc-auth-copy h1{font-size:28px;line-height:1.1;margin:0;font-weight:800;letter-spacing:-.035em}
++.hc-auth-error{display:flex;align-items:flex-start;gap:10px;padding:12px 14px;margin:0 0 16px;background:#fff2f2;border:1px solid #ffd8d8;color:#b42318;border-radius:13px;font-size:13px;font-weight:650}
++.hc-auth-form{display:grid;gap:14px}.hc-auth-form label{display:grid;gap:7px}.hc-auth-form label>span{font-size:12px;font-weight:750;color:#69758c}.hc-auth-form label>span small{font-weight:500;color:#a1a9ba}
++.hc-auth-form label>div{height:50px;border:1px solid #dfe5f0;border-radius:14px;background:#fbfcff;display:flex;align-items:center;gap:10px;padding:0 14px;transition:.18s ease}.hc-auth-form label>div:focus-within{background:#fff;border-color:#6c7dff;box-shadow:0 0 0 4px rgba(82,101,255,.1)}
++.hc-auth-form label i{width:18px;text-align:center;color:#98a2b6}.hc-auth-form input{border:0;outline:0;background:transparent;min-width:0;width:100%;font:inherit;color:#172033}
++.hc-auth-form>button{height:52px;border:0;border-radius:15px;margin-top:5px;background:linear-gradient(135deg,#416cff,#635bff);color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;gap:9px;box-shadow:0 15px 30px rgba(71,89,255,.24);transition:.18s ease}.hc-auth-form>button:hover{transform:translateY(-1px);box-shadow:0 18px 35px rgba(71,89,255,.3)}
++.hc-auth-switch{text-align:center;margin-top:19px;font-size:13px;color:#8791a5}.hc-auth-switch a{font-weight:800;color:#4d63ea;text-decoration:none}.hc-auth-panel-note{margin-top:20px;padding:13px 14px;border-radius:14px;background:#f5f7fb;display:flex;gap:11px;align-items:flex-start;color:#778299;font-size:11px;line-height:1.45}.hc-auth-panel-note i{color:#6674df;margin-top:2px}
++.hc-nav a[href*="space=shared"] i{color:#6a62ec}.hc-nav a[href*="space=shared"].active{background:linear-gradient(135deg,rgba(98,91,237,.13),rgba(80,112,255,.08));color:#4b4fc8}
++.hc-file-actions a[title="Открыть сайт"],.hc-list-actions a[title="Открыть сайт"]{color:#5d63df;background:#f1f1ff}
++.hc-file-actions a[title="Открыть сайт"]:hover,.hc-list-actions a[title="Открыть сайт"]:hover{background:#e7e7ff;color:#464bc4}
++@media(max-width:560px){.hc-auth-body{padding:14px}.hc-auth-card{padding:23px;border-radius:22px}.hc-auth-copy h1{font-size:24px}}
++
++/* v103: explicit website launch action for HTML files. */
++.hc-file-actions .hc-site-quick{width:auto;min-width:76px;padding:0 12px;border-radius:12px;gap:7px;background:linear-gradient(135deg,#eef4ff,#f4f0ff);color:#4667ff;border:1px solid #dbe3ff;font-weight:800;font-size:12px;text-decoration:none}
++.hc-file-actions .hc-site-quick:hover{background:linear-gradient(135deg,#4667ff,#6b5cff);color:#fff;border-color:transparent;box-shadow:0 10px 24px rgba(70,103,255,.22)}
++.hc-file-actions .hc-site-quick span{display:inline}
++@media(max-width:700px){.hc-file-actions .hc-site-quick{min-width:40px;width:40px;padding:0}.hc-file-actions .hc-site-quick span{display:none}}
+diff -ruN /mnt/data/cloud_v102_extract/HYPER-HOST-CLOUD-v102-PATCH/src/public/cloud/cloud.js /mnt/data/cloud_v103_build/src/cloud/public/cloud.js
+--- /mnt/data/cloud_v102_extract/HYPER-HOST-CLOUD-v102-PATCH/src/public/cloud/cloud.js	2026-08-20 04:35:23.000000000 +0000
++++ /mnt/data/cloud_v103_build/src/cloud/public/cloud.js	2026-08-20 05:01:14.941256690 +0000
+@@ -153,81 +153,149 @@
+     if (!uploadDialog.open) uploadDialog.showModal();
+   });
+ 
+-  let activeUpload = null;
+-  uploadForm?.addEventListener('submit', e => {
++  let activeUpload = false;
++
++  function randomUploadId() {
++    const b = new Uint8Array(16);
++    if (window.crypto?.getRandomValues) window.crypto.getRandomValues(b);
++    else for (let i=0;i<b.length;i++) b[i]=Math.floor(Math.random()*256);
++    return Array.from(b, x => x.toString(16).padStart(2,'0')).join('');
++  }
++
++  function xhrForm(url, data, onProgress = null) {
++    return new Promise((resolve, reject) => {
++      const xhr = new XMLHttpRequest();
++      xhr.open('POST', url, true);
++      xhr.timeout = 0;
++      xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
++      xhr.setRequestHeader('Accept', 'application/json');
++      if (onProgress) xhr.upload.addEventListener('progress', onProgress);
++      xhr.addEventListener('error', () => reject(new Error('Ошибка соединения')));
++      xhr.addEventListener('abort', () => reject(new Error('Загрузка прервана')));
++      xhr.addEventListener('load', () => {
++        let payload = null;
++        try { payload = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
++        if (xhr.status < 200 || xhr.status >= 300) {
++          if (xhr.status === 401 && payload?.auth === false) {
++            window.location.href = '/?auth=login';
++            reject(new Error(payload?.error || 'Сессия завершена'));
++            return;
++          }
++          reject(new Error(payload?.error || `Ошибка сервера (${xhr.status || 0})`));
++          return;
++        }
++        if (!payload || payload.ok !== true) {
++          reject(new Error(payload?.error || `Некорректный ответ сервера (${xhr.status || 0})`));
++          return;
++        }
++        resolve(payload);
++      });
++      xhr.send(data);
++    });
++  }
++
++  uploadForm?.addEventListener('submit', async e => {
+     if (!filesInput?.files?.length || activeUpload) return;
+-    if (!window.XMLHttpRequest || !window.FormData) return;
+     e.preventDefault();
+-
++    activeUpload = true;
+     const files = Array.from(filesInput.files);
+-    const fileBytes = files.reduce((sum, f) => sum + Number(f.size || 0), 0);
+-    const data = new FormData(uploadForm);
+-    data.set('ajax_upload', '1');
+-    const xhr = new XMLHttpRequest();
+-    activeUpload = xhr;
++    const csrf = $('input[name="_csrf"]', uploadForm)?.value || '';
++    const currentPath = $('input[name="path"]', uploadForm)?.value || '';
++    const uploadTarget = $('#hcUploadTarget')?.value || '';
++    const endpoint = uploadForm.action || '/api/upload.php';
++    const uploadSpace = $('input[name="space"]', uploadForm)?.value || 'private';
++    const totalBytes = files.reduce((sum,f)=>sum+Number(f.size||0),0);
++    const chunkSize = 4 * 1024 * 1024;
++    let completedBytes = 0;
++    let lastBytes = 0;
+     let lastAt = performance.now();
+-    let lastLogical = 0;
++    let finalRedirect = window.location.href;
+ 
+     uploadSubmit.disabled = true;
+     uploadSubmit.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>Загрузка…';
+     if (uploadProgress) uploadProgress.hidden = false;
+-    if (uploadStatus) uploadStatus.textContent = files.length === 1 ? files[0].name : `Загрузка ${files.length} файлов`;
+-    if (uploadPercent) uploadPercent.textContent = '0%';
+-    if (uploadProgressBar) uploadProgressBar.style.width = '0%';
+-    if (uploadTransferred) uploadTransferred.textContent = `0 B / ${humanBytes(fileBytes)}`;
+-    if (uploadSpeed) uploadSpeed.textContent = 'Подготовка…';
++    if (uploadProgressBar) { uploadProgressBar.classList.remove('is-error','is-done'); uploadProgressBar.style.width='0%'; }
++    if (uploadPercent) uploadPercent.textContent='0%';
++    if (uploadTransferred) uploadTransferred.textContent=`0 B / ${humanBytes(totalBytes)}`;
++    if (uploadSpeed) uploadSpeed.textContent='Подготовка…';
+     uploadForm.classList.add('is-uploading');
+ 
+-    xhr.open('POST', uploadForm.action || window.location.href, true);
+-    xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+-    xhr.timeout = 0;
+-
+-    xhr.upload.addEventListener('progress', ev => {
+-      if (!ev.lengthComputable) return;
+-      const ratio = Math.max(0, Math.min(1, ev.loaded / Math.max(1, ev.total)));
+-      const logical = Math.min(fileBytes, Math.round(fileBytes * ratio));
+-      const percent = Math.min(99, Math.floor(ratio * 100));
++    const paint = (logicalBytes, status) => {
++      const safe = Math.max(0, Math.min(totalBytes, logicalBytes));
++      const pct = totalBytes > 0 ? Math.min(99, Math.floor((safe / totalBytes) * 100)) : 0;
+       const now = performance.now();
+-      const seconds = Math.max(.001, (now - lastAt) / 1000);
+-      const speed = Math.max(0, (logical - lastLogical) / seconds);
+-      lastAt = now;
+-      lastLogical = logical;
+-      if (uploadPercent) uploadPercent.textContent = `${percent}%`;
+-      if (uploadProgressBar) uploadProgressBar.style.width = `${percent}%`;
+-      if (uploadTransferred) uploadTransferred.textContent = `${humanBytes(logical)} / ${humanBytes(fileBytes)}`;
+-      if (uploadSpeed) uploadSpeed.textContent = speed > 0 ? `${humanBytes(speed)}/с` : 'Загрузка…';
+-    });
+-
+-    const fail = message => {
+-      activeUpload = null;
+-      uploadForm.classList.remove('is-uploading');
+-      uploadSubmit.disabled = false;
+-      uploadSubmit.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i>Повторить загрузку';
+-      if (uploadStatus) uploadStatus.textContent = message || 'Не удалось загрузить';
+-      if (uploadPercent) uploadPercent.textContent = 'Ошибка';
+-      if (uploadProgressBar) uploadProgressBar.classList.add('is-error');
+-      if (uploadSpeed) uploadSpeed.textContent = 'Проверьте соединение и повторите';
++      const dt = Math.max(.05,(now-lastAt)/1000);
++      const speed = Math.max(0,(safe-lastBytes)/dt);
++      if (now-lastAt > 250) { lastAt=now; lastBytes=safe; }
++      if(uploadPercent) uploadPercent.textContent=`${pct}%`;
++      if(uploadProgressBar) uploadProgressBar.style.width=`${pct}%`;
++      if(uploadTransferred) uploadTransferred.textContent=`${humanBytes(safe)} / ${humanBytes(totalBytes)}`;
++      if(uploadSpeed) uploadSpeed.textContent=speed>0?`${humanBytes(speed)}/с`:'Загрузка…';
++      if(uploadStatus&&status) uploadStatus.textContent=status;
+     };
+ 
+-    xhr.addEventListener('error', () => fail('Ошибка соединения'));
+-    xhr.addEventListener('abort', () => fail('Загрузка прервана'));
+-    xhr.addEventListener('load', () => {
+-      let payload = null;
+-      try { payload = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
+-      if (xhr.status < 200 || xhr.status >= 300 || !payload?.ok) {
+-        fail(payload?.error || `Ошибка загрузки (${xhr.status || 0})`);
+-        return;
++    try {
++      for (let fileIndex=0; fileIndex<files.length; fileIndex++) {
++        const file = files[fileIndex];
++        const uploadId = randomUploadId();
++        const chunks = Math.max(1, Math.ceil(file.size / chunkSize));
++        let fileDone = 0;
++        for (let ci=0; ci<chunks; ci++) {
++          const start = ci * chunkSize;
++          const end = Math.min(file.size, start + chunkSize);
++          const blob = file.slice(start,end);
++          const fd = new FormData();
++          fd.set('_csrf',csrf); fd.set('action','upload_chunk'); fd.set('ajax_upload','1'); fd.set('space',uploadSpace);
++          fd.set('path',currentPath); fd.set('upload_target',uploadTarget); fd.set('upload_id',uploadId);
++          fd.set('file_name',file.name); fd.set('file_size',String(file.size)); fd.set('chunk_index',String(ci)); fd.set('total_chunks',String(chunks));
++          fd.set('chunk',blob,file.name+'.part');
++          let lastError = null;
++          for (let attempt=1; attempt<=3; attempt++) {
++            try {
++              await xhrForm(endpoint,fd,ev=>{
++                if(!ev.lengthComputable)return;
++                const currentChunk=Math.min(blob.size,ev.loaded);
++                paint(completedBytes + fileDone + currentChunk, `${file.name} · часть ${ci+1}/${chunks}`);
++              });
++              lastError = null;
++              break;
++            } catch (err) {
++              lastError = err;
++              if (attempt < 3) {
++                if(uploadStatus)uploadStatus.textContent=`${file.name} · повтор части ${ci+1}/${chunks} (${attempt+1}/3)`;
++                await new Promise(r=>setTimeout(r, 500 * attempt));
++              }
++            }
++          }
++          if (lastError) throw lastError;
++          fileDone += blob.size;
++          paint(completedBytes + fileDone, `${file.name} · ${ci+1}/${chunks}`);
++        }
++        const done = new FormData();
++        done.set('_csrf',csrf); done.set('action','upload_complete'); done.set('ajax_upload','1'); done.set('space',uploadSpace); done.set('path',currentPath); done.set('upload_id',uploadId);
++        const payload = await xhrForm(endpoint,done);
++        finalRedirect = payload.redirect || finalRedirect;
++        completedBytes += file.size;
++        paint(completedBytes, files.length===1?'Файл загружен':`Готово ${fileIndex+1} из ${files.length}`);
+       }
+-      if (uploadPercent) uploadPercent.textContent = '100%';
+-      if (uploadProgressBar) { uploadProgressBar.classList.remove('is-error'); uploadProgressBar.style.width = '100%'; uploadProgressBar.classList.add('is-done'); }
+-      if (uploadTransferred) uploadTransferred.textContent = `${humanBytes(fileBytes)} / ${humanBytes(fileBytes)}`;
+-      if (uploadSpeed) uploadSpeed.textContent = 'Готово';
+-      if (uploadStatus) uploadStatus.textContent = payload.uploaded === 1 ? 'Файл загружен' : `Загружено файлов: ${payload.uploaded || files.length}`;
+-      uploadSubmit.innerHTML = '<i class="fa-solid fa-check"></i>Готово';
+-      setTimeout(() => { window.location.href = payload.redirect || window.location.href; }, 550);
+-    });
+-
+-    xhr.send(data);
++      if(uploadPercent)uploadPercent.textContent='100%';
++      if(uploadProgressBar){uploadProgressBar.style.width='100%';uploadProgressBar.classList.add('is-done');}
++      if(uploadTransferred)uploadTransferred.textContent=`${humanBytes(totalBytes)} / ${humanBytes(totalBytes)}`;
++      if(uploadSpeed)uploadSpeed.textContent='Готово';
++      if(uploadStatus)uploadStatus.textContent=files.length===1?'Файл загружен':`Загружено файлов: ${files.length}`;
++      uploadSubmit.innerHTML='<i class="fa-solid fa-check"></i>Готово';
++      setTimeout(()=>{ window.location.href=finalRedirect; },450);
++    } catch (err) {
++      activeUpload=false;
++      uploadForm.classList.remove('is-uploading');
++      uploadSubmit.disabled=false;
++      uploadSubmit.innerHTML='<i class="fa-solid fa-cloud-arrow-up"></i>Повторить';
++      if(uploadStatus)uploadStatus.textContent=err?.message||'Не удалось загрузить';
++      if(uploadPercent)uploadPercent.textContent='Ошибка';
++      if(uploadProgressBar)uploadProgressBar.classList.add('is-error');
++      if(uploadSpeed)uploadSpeed.textContent='Можно повторить загрузку';
++      return;
++    }
+   });
+ 
+   $$('[data-menu-for]').forEach(btn => {
+diff -ruN /mnt/data/cloud_v102_extract/HYPER-HOST-CLOUD-v102-PATCH/src/public/cloud/index.php /mnt/data/cloud_v103_build/src/cloud/public/index.php
+--- /mnt/data/cloud_v102_extract/HYPER-HOST-CLOUD-v102-PATCH/src/public/cloud/index.php	2026-08-20 04:37:14.000000000 +0000
++++ /mnt/data/cloud_v103_build/src/cloud/public/index.php	2026-08-20 05:04:29.609415498 +0000
+@@ -2,10 +2,12 @@
+ declare(strict_types=1);
+ 
+ /**
+- * HYPER CLOUD v102 — repaired archive editor + standalone HTML website preview, with upload progress and private sharing preserved.
+- * This page intentionally does NOT use render_page() and has its own UI shell.
++ * HYPER CLOUD v103 — standalone multi-user cloud on cloud.hyper-host.pw.
++ * Panel administrators can sign in with panel credentials; cloud registrations stay cloud-only.
+  */
+-require __DIR__ . '/../../app/bootstrap.php';
++require __DIR__ . '/../app/bootstrap.php';
++
++$GLOBALS['HC_SPACE'] = ((string)($_GET['space'] ?? $_POST['space'] ?? 'private') === 'shared') ? 'shared' : 'private';
+ 
+ header('X-Content-Type-Options: nosniff');
+ header('Referrer-Policy: no-referrer');
+@@ -17,8 +19,12 @@
+ 
+ function hc_root(): string
+ {
+-    $root = rtrim((string)app_config('cloud_dir', '/var/www/hyper-host-cloud'), '/');
+-    return $root !== '' ? $root : '/var/www/hyper-host-cloud';
++    $user = current_user();
++    if (!$user) throw new RuntimeException('Требуется авторизация');
++    hc_ensure_user_root($user);
++    $root = hc_root_for_user($user, hc_space());
++    if (!is_dir($root)) @mkdir($root, 02770, true);
++    return $root;
+ }
+ 
+ function hc_clean_rel(string $value): string
+@@ -104,7 +110,9 @@
+ 
+ function hc_url(array $params = []): string
+ {
+-    return '/cloud/' . ($params ? '?' . http_build_query($params, '', '&', PHP_QUERY_RFC3986) : '');
++    if (hc_space() === 'shared' && !array_key_exists('space', $params)) $params['space'] = 'shared';
++    if (array_key_exists('space', $params) && $params['space'] === 'private') unset($params['space']);
++    return '/' . ($params ? '?' . http_build_query($params, '', '&', PHP_QUERY_RFC3986) : '');
+ }
+ 
+ function hc_mime(string $path): string
+@@ -274,6 +282,9 @@
+     $js = preg_replace_callback('~(\bimport\s*\(\s*)([\'\"])(\.?\.?/[^\'\"]+|/[^\'\"]+)\2(\s*\))~', static function(array $m) use ($resolver): string {
+         return $m[1] . $m[2] . $resolver((string)$m[3]) . $m[2] . $m[4];
+     }, $js) ?? $js;
++    $js = preg_replace_callback('~(\bfetch\s*\(\s*)([\'"])(\.?\.?/[^\'"]+|/[^\'"]+)\2~', static function(array $m) use ($resolver): string {
++        return $m[1] . $m[2] . $resolver((string)$m[3]) . $m[2];
++    }, $js) ?? $js;
+     return $js;
+ }
+ 
+@@ -341,8 +352,6 @@
+ function hc_html_preview_output(string $rel, string $path, string $siteRootRel = ''): never
+ {
+     if (!is_file($path) || is_link($path) || !hc_is_html_name($path)) throw new RuntimeException('HTML-файл недоступен');
+-    $size = (int)(filesize($path) ?: 0);
+-    if ($size > 8 * 1024 * 1024) throw new RuntimeException('HTML-файл слишком большой для предпросмотра');
+     $html = @file_get_contents($path);
+     if (!is_string($html)) throw new RuntimeException('Не удалось прочитать HTML-файл');
+     $siteRootRel = $siteRootRel !== '' ? hc_clean_rel($siteRootRel) : hc_detect_site_root_rel($rel);
+@@ -412,7 +421,7 @@
+ function hc_archive_detect_site_root(string $archivePath, string $entry): string
+ {
+     $entry=hc_archive_entry_clean($entry); $dir=dirname($entry); if ($dir==='.') $dir='';
+-    $list=hc_archive_entries($archivePath,50000); $set=[];
++    $list=hc_archive_entries($archivePath,0); $set=[];
+     if (!empty($list['ok'])) foreach ($list['entries'] as $row) { try { $n=hc_archive_entry_clean((string)($row['name']??'')); $set[$n]=true; } catch(Throwable) {} }
+     $candidate=$dir;
+     while (true) {
+@@ -450,13 +459,14 @@
+     $resolver=static fn(string $u):string=>hc_archive_preview_url($archiveRel,$baseEntryDir,$u,false,$siteRoot);
+     $js=preg_replace_callback('~(\b(?:import|export)\s+(?:[^\'\";]+?\s+from\s+)?)([\'\"])(\.?\.?/[^\'\"]+|/[^\'\"]+)\2~',static fn(array $m):string=>$m[1].$m[2].$resolver((string)$m[3]).$m[2],$js)??$js;
+     $js=preg_replace_callback('~(\bimport\s*\(\s*)([\'\"])(\.?\.?/[^\'\"]+|/[^\'\"]+)\2(\s*\))~',static fn(array $m):string=>$m[1].$m[2].$resolver((string)$m[3]).$m[2].$m[4],$js)??$js;
++    $js=preg_replace_callback('~(\bfetch\s*\(\s*)([\'"])(\.?\.?/[^\'"]+|/[^\'"]+)\2~',static fn(array $m):string=>$m[1].$m[2].$resolver((string)$m[3]).$m[2],$js)??$js;
+     return $js;
+ }
+ 
+ function hc_archive_html_preview_output(string $archiveRel,string $archivePath,string $entry,string $siteRoot=''): never
+ {
+     $entry=hc_archive_entry_clean($entry); if(!hc_is_html_name($entry)) throw new RuntimeException('Это не HTML-файл');
+-    $data=hc_archive_entry_bytes($archivePath,$entry,8*1024*1024); $html=(string)$data['content'];
++    $data=hc_archive_entry_bytes($archivePath,$entry,0); $html=(string)$data['content'];
+     $siteRoot=$siteRoot!==''?hc_archive_entry_clean($siteRoot):hc_archive_detect_site_root($archivePath,$entry);
+     $base=dirname($entry); if($base==='.')$base='';
+     $html=hc_html_rewrite_document($html,
+@@ -470,7 +480,7 @@
+ 
+ function hc_archive_html_asset_output(string $archiveRel,string $archivePath,string $entry,string $siteRoot=''): never
+ {
+-    $entry=hc_archive_entry_clean($entry); $data=hc_archive_entry_bytes($archivePath,$entry,64*1024*1024); $content=(string)$data['content']; $siteRoot=$siteRoot!==''?hc_archive_entry_clean($siteRoot):''; $base=dirname($entry); if($base==='.')$base=''; $ext=strtolower(pathinfo($entry,PATHINFO_EXTENSION));
++    $entry=hc_archive_entry_clean($entry); $data=hc_archive_entry_bytes($archivePath,$entry,0); $content=(string)$data['content']; $siteRoot=$siteRoot!==''?hc_archive_entry_clean($siteRoot):''; $base=dirname($entry); if($base==='.')$base=''; $ext=strtolower(pathinfo($entry,PATHINFO_EXTENSION));
+     if($ext==='css')$content=hc_archive_preview_css_rewrite($content,$archiveRel,$base,$siteRoot);
+     elseif(in_array($ext,['js','mjs','cjs'],true))$content=hc_archive_preview_js_rewrite($content,$archiveRel,$base,$siteRoot);
+     while(ob_get_level()>0)@ob_end_clean(); header('Content-Type: '.hc_mime_name($entry)); header('Content-Length: '.strlen($content)); header('Cache-Control: private, no-store, max-age=0'); header('X-Content-Type-Options: nosniff'); echo $content; exit;
+@@ -482,7 +492,7 @@
+     if (str_ends_with(strtolower($path), '.zip') && class_exists('ZipArchive')) {
+         $zip = new ZipArchive();
+         if ($zip->open($path) === true) {
+-            $count = min($zip->numFiles, $limit);
++            $count = $limit > 0 ? min($zip->numFiles, $limit) : $zip->numFiles;
+             for ($i = 0; $i < $count; $i++) {
+                 $st = $zip->statIndex($i);
+                 if (!is_array($st)) continue;
+@@ -493,7 +503,7 @@
+                     'modified' => !empty($st['mtime']) ? date('d.m.Y H:i', (int)$st['mtime']) : '—',
+                 ];
+             }
+-            $truncated = $zip->numFiles > $limit;
++            $truncated = $limit > 0 && $zip->numFiles > $limit;
+             $zip->close();
+             return ['ok'=>true,'entries'=>$entries,'truncated'=>$truncated,'engine'=>'ZipArchive'];
+         }
+@@ -504,11 +514,11 @@
+         exec('/usr/bin/unzip -Z -1 '.escapeshellarg($path).' 2>/dev/null', $out, $code);
+         if ($code === 0) {
+             foreach ($out as $raw) {
+-                if (count($entries) >= $limit) break;
++                if ($limit > 0 && count($entries) >= $limit) break;
+                 $raw = rtrim((string)$raw);
+                 if ($raw !== '') $entries[] = ['name'=>$raw,'size'=>0,'packed'=>0,'modified'=>'—'];
+             }
+-            if ($entries) return ['ok'=>true,'entries'=>$entries,'truncated'=>count($out)>$limit,'engine'=>'unzip'];
++            if ($entries) return ['ok'=>true,'entries'=>$entries,'truncated'=>$limit > 0 && count($out)>$limit,'engine'=>'unzip'];
+         }
+     }
+ 
+@@ -530,7 +540,7 @@
+                         $n = (string)$current['Path'];
+                         if ($n !== $path && $n !== basename($path)) {
+                             $entries[] = ['name'=>$n,'size'=>(int)($current['Size']??0),'packed'=>(int)($current['Packed Size']??0),'modified'=>(string)($current['Modified']??'—')];
+-                            if (count($entries) >= $limit) break;
++                            if ($limit > 0 && count($entries) >= $limit) break;
+                         }
+                     }
+                     $current = [];
+@@ -538,18 +548,18 @@
+                 }
+                 if (preg_match('/^([^=]+) = (.*)$/', $raw, $m)) $current[trim($m[1])] = $m[2];
+             }
+-            if (count($entries) < $limit && !empty($current['Path'])) {
++            if (($limit <= 0 || count($entries) < $limit) && !empty($current['Path'])) {
+                 $n=(string)$current['Path'];
+                 if ($n!==$path && $n!==basename($path)) $entries[]=['name'=>$n,'size'=>(int)($current['Size']??0),'packed'=>(int)($current['Packed Size']??0),'modified'=>(string)($current['Modified']??'—')];
+             }
+-            if ($entries) return ['ok'=>true,'entries'=>$entries,'truncated'=>count($entries)>=$limit,'engine'=>basename($cmd[0])];
++            if ($entries) return ['ok'=>true,'entries'=>$entries,'truncated'=>$limit > 0 && count($entries)>=$limit,'engine'=>basename($cmd[0])];
+         } else {
+             foreach ($out as $raw) {
+-                if (count($entries) >= $limit) break;
++                if ($limit > 0 && count($entries) >= $limit) break;
+                 $raw = trim((string)$raw);
+                 if ($raw !== '') $entries[] = ['name'=>$raw,'size'=>0,'packed'=>0,'modified'=>'—'];
+             }
+-            if ($entries) return ['ok'=>true,'entries'=>$entries,'truncated'=>count($entries)>=$limit,'engine'=>'bsdtar'];
++            if ($entries) return ['ok'=>true,'entries'=>$entries,'truncated'=>$limit > 0 && count($entries)>=$limit,'engine'=>'bsdtar'];
+         }
+     }
+     return ['ok'=>false,'entries'=>[],'truncated'=>false,'engine'=>'','error'=>'Не удалось прочитать архив. Установите p7zip-full/libarchive-tools.'];
+@@ -614,7 +624,7 @@
+             $zip->close();
+         }
+     }
+-    $list = hc_archive_entries($archivePath, 50000);
++    $list = hc_archive_entries($archivePath, 0);
+     if (!empty($list['ok'])) {
+         foreach ($list['entries'] as $row) {
+             $raw=(string)($row['name']??'');
+@@ -626,53 +636,40 @@
+     throw new RuntimeException('Файл внутри архива не найден');
+ }
+ 
+-function hc_archive_capture_command(string $command, int $limit): array
++function hc_archive_capture_command(string $command, int $limit = 0): array
+ {
+-    $limit=max(1,$limit);
+     if (!function_exists('proc_open')) {
+-        $tmp=tempnam(sys_get_temp_dir(),'hc-cap-');
+-        if ($tmp===false) return ['ok'=>false,'data'=>''];
++        $tmp=tempnam(sys_get_temp_dir(),'hc-cap-'); if($tmp===false)return ['ok'=>false,'data'=>''];
+         exec($command.' > '.escapeshellarg($tmp).' 2>/dev/null',$ignore,$code);
+-        $data=@file_get_contents($tmp,false,null,0,$limit+1); @unlink($tmp);
+-        return ['ok'=>$code===0,'data'=>is_string($data)?$data:''];
++        $data=@file_get_contents($tmp); @unlink($tmp); return ['ok'=>$code===0,'data'=>is_string($data)?$data:''];
+     }
+-    $spec=[0=>['pipe','r'],1=>['pipe','w'],2=>['file','/dev/null','a']];
+-    $proc=@proc_open($command,$spec,$pipes);
+-    if (!is_resource($proc)) return ['ok'=>false,'data'=>''];
+-    fclose($pipes[0]);
+-    $data=stream_get_contents($pipes[1],$limit+1);
+-    fclose($pipes[1]);
+-    $code=proc_close($proc);
+-    return ['ok'=>$code===0 || (is_string($data) && strlen($data)>$limit),'data'=>is_string($data)?$data:''];
++    $spec=[0=>['pipe','r'],1=>['pipe','w'],2=>['file','/dev/null','a']];$proc=@proc_open($command,$spec,$pipes);if(!is_resource($proc))return ['ok'=>false,'data'=>''];
++    fclose($pipes[0]);$data=$limit>0?stream_get_contents($pipes[1],$limit+1):stream_get_contents($pipes[1]);fclose($pipes[1]);$code=proc_close($proc);
++    return ['ok'=>$code===0,'data'=>is_string($data)?$data:''];
+ }
+ 
+-function hc_archive_entry_bytes(string $archivePath, string $entry, int $limit = 67108864): array
++function hc_archive_entry_bytes(string $archivePath, string $entry, int $limit = 0): array
+ {
+     $found=hc_archive_entry_lookup($archivePath,$entry);
+     $canonical=(string)$found['canonical']; $actual=(string)$found['actual'];
+     $knownSize=(int)($found['size']??0);
+-    if ($knownSize>$limit) throw new RuntimeException('Файл слишком большой для просмотра');
+ 
+     if (str_ends_with(strtolower($archivePath),'.zip') && class_exists('ZipArchive')) {
+         $zip=new ZipArchive();
+         if ($zip->open($archivePath)===true) {
+             $stream=$zip->getStream($actual);
+             if (is_resource($stream)) {
+-                $data='';
+-                while (!feof($stream) && strlen($data)<=$limit) {
+-                    $chunk=fread($stream,min(262144,$limit+1-strlen($data)));
+-                    if ($chunk===false) break;
+-                    $data.=$chunk;
+-                }
++                $data = $limit > 0 ? stream_get_contents($stream, $limit + 1) : stream_get_contents($stream);
+                 fclose($stream); $zip->close();
+-                if (strlen($data)>$limit) throw new RuntimeException('Файл слишком большой для просмотра');
++                if (!is_string($data)) $data='';
++                if ($limit > 0 && strlen($data)>$limit) throw new RuntimeException('Не удалось полностью прочитать файл');
+                 return ['content'=>$data,'entry'=>$canonical,'actual'=>$actual,'size'=>strlen($data),'writable'=>hc_archive_writer($archivePath)!==''];
+             }
+             $idx=$found['index'];
+             if (is_int($idx)) {
+-                $data=$zip->getFromIndex($idx,$limit+1); $zip->close();
++                $data=$limit>0?$zip->getFromIndex($idx,$limit+1):$zip->getFromIndex($idx); $zip->close();
+                 if (is_string($data)) {
+-                    if (strlen($data)>$limit) throw new RuntimeException('Файл слишком большой для просмотра');
++                    if ($limit>0 && strlen($data)>$limit) throw new RuntimeException('Не удалось полностью прочитать файл');
+                     return ['content'=>$data,'entry'=>$canonical,'actual'=>$actual,'size'=>strlen($data),'writable'=>hc_archive_writer($archivePath)!==''];
+                 }
+             } else $zip->close();
+@@ -681,28 +678,28 @@
+ 
+     $result=['ok'=>false,'data'=>''];
+     if (str_ends_with(strtolower($archivePath),'.zip') && is_executable('/usr/bin/unzip')) {
+-        $cmd='timeout 20s /usr/bin/unzip -p '.escapeshellarg($archivePath).' '.escapeshellarg($actual);
++        $cmd='/usr/bin/unzip -p '.escapeshellarg($archivePath).' '.escapeshellarg($actual);
+         $result=hc_archive_capture_command($cmd,$limit);
+     }
+     if (!$result['ok'] && is_executable('/usr/bin/7z')) {
+-        $cmd='timeout 20s /usr/bin/7z x -so -bd -y '.escapeshellarg($archivePath).' '.escapeshellarg($actual);
++        $cmd='/usr/bin/7z x -so -bd -y '.escapeshellarg($archivePath).' '.escapeshellarg($actual);
+         $result=hc_archive_capture_command($cmd,$limit);
+     }
+     if (!$result['ok'] && is_executable('/usr/bin/7zz')) {
+-        $cmd='timeout 20s /usr/bin/7zz x -so -bd -y '.escapeshellarg($archivePath).' '.escapeshellarg($actual);
++        $cmd='/usr/bin/7zz x -so -bd -y '.escapeshellarg($archivePath).' '.escapeshellarg($actual);
+         $result=hc_archive_capture_command($cmd,$limit);
+     }
+     if (!$result['ok'] && is_executable('/usr/bin/bsdtar')) {
+-        $cmd='timeout 20s /usr/bin/bsdtar -xOf '.escapeshellarg($archivePath).' '.escapeshellarg($actual);
++        $cmd='/usr/bin/bsdtar -xOf '.escapeshellarg($archivePath).' '.escapeshellarg($actual);
+         $result=hc_archive_capture_command($cmd,$limit);
+     }
+     if (!$result['ok']) throw new RuntimeException('Не удалось прочитать файл из архива');
+     $data=(string)$result['data'];
+-    if (strlen($data)>$limit) throw new RuntimeException('Файл слишком большой для просмотра');
++    if ($limit>0 && strlen($data)>$limit) throw new RuntimeException('Не удалось полностью прочитать файл');
+     return ['content'=>$data,'entry'=>$canonical,'actual'=>$actual,'size'=>strlen($data),'writable'=>hc_archive_writer($archivePath)!==''];
+ }
+ 
+-function hc_archive_entry_read(string $archivePath, string $entry, int $limit = 2097152): array
++function hc_archive_entry_read(string $archivePath, string $entry, int $limit = 0): array
+ {
+     $entry=hc_archive_entry_clean($entry);
+     if (!hc_is_editable_text_name($entry)) throw new RuntimeException('Этот тип файла нельзя открыть в редакторе');
+@@ -715,14 +712,26 @@
+ function hc_archive_backup(string $archivePath): string
+ {
+     $dir = hc_meta_dir() . '/archive-backups';
+-    if (!is_dir($dir) && !@mkdir($dir, 02770, true) && !is_dir($dir)) throw new RuntimeException('Не удалось создать папку резервных копий');
++    if (!is_dir($dir) && !@mkdir($dir, 02770, true) && !is_dir($dir)) return '';
+     @chown($dir, 'www-data'); @chgrp($dir, 'www-data'); @chmod($dir, 02770);
+     $backup = $dir . '/' . date('Ymd-His') . '-' . substr(hash('sha256', $archivePath . microtime(true)), 0, 10) . '-' . basename($archivePath);
+-    if (!@copy($archivePath, $backup)) throw new RuntimeException('Не удалось создать резервную копию архива');
++
++    $ok = false;
++    // On filesystems with reflink support this is instant even for very large archives.
++    if (is_executable('/usr/bin/cp')) {
++        $cmd='/usr/bin/cp --reflink=always --preserve=mode,timestamps '.escapeshellarg($archivePath).' '.escapeshellarg($backup).' 2>/dev/null';
++        exec($cmd,$out,$code); $ok=$code===0 && is_file($backup);
++    }
++    if (!$ok) {
++        $size=(float)(@filesize($archivePath)?:0); $free=(float)(@disk_free_space($dir)?:0);
++        // A backup must never make a huge archive impossible to edit. If there is not enough free disk, save without backup.
++        if ($size <= 0 || $free > $size + 128*1024*1024) $ok=@copy($archivePath,$backup);
++    }
++    if (!$ok) { @unlink($backup); return ''; }
+     @chmod($backup, 0660); @chown($backup, 'www-data'); @chgrp($backup, 'www-data');
+     $files = glob($dir . '/*') ?: [];
+     usort($files, static fn($a,$b)=>(@filemtime($b)?:0)<=> (@filemtime($a)?:0));
+-    foreach (array_slice($files, 40) as $old) @unlink($old);
++    foreach (array_slice($files, 10) as $old) @unlink($old);
+     return $backup;
+ }
+ 
+@@ -730,8 +739,7 @@
+ {
+     $entry=hc_archive_entry_clean($entry);
+     if (!hc_is_editable_text_name($entry)) throw new RuntimeException('Этот тип файла нельзя сохранять из редактора');
+-    if (strlen($content)>2097152) throw new RuntimeException('Максимальный размер файла для редактора — 2 МБ');
+-    if (str_contains($content,"\0")) throw new RuntimeException('Бинарные данные запрещены');
++        if (str_contains($content,"\0")) throw new RuntimeException('Бинарные данные запрещены');
+     $found=hc_archive_entry_lookup($archivePath,$entry);
+     $actual=(string)$found['actual'];
+     $writer=hc_archive_writer($archivePath);
+@@ -743,8 +751,11 @@
+             if ($zip->open($archivePath)!==true) throw new RuntimeException('Не удалось открыть ZIP для записи');
+             $idx=$zip->locateName($actual,0);
+             if ($idx===false) { $zip->close(); throw new RuntimeException('Файл внутри ZIP не найден'); }
+-            if (!$zip->deleteIndex($idx) || !$zip->addFromString($actual,$content)) { $zip->close(); throw new RuntimeException('Не удалось обновить файл внутри ZIP'); }
+-            if (!$zip->close()) throw new RuntimeException('Не удалось сохранить ZIP');
++            $tmpFile=tempnam(sys_get_temp_dir(),'hc-zip-edit-');
++            if ($tmpFile===false || @file_put_contents($tmpFile,$content,LOCK_EX)===false) { if(is_string($tmpFile))@unlink($tmpFile); $zip->close(); throw new RuntimeException('Не удалось подготовить изменения'); }
++            if (!$zip->deleteIndex($idx) || !$zip->addFile($tmpFile,$actual)) { @unlink($tmpFile); $zip->close(); throw new RuntimeException('Не удалось обновить файл внутри ZIP'); }
++            if (!$zip->close()) { @unlink($tmpFile); throw new RuntimeException('Не удалось сохранить ZIP'); }
++            @unlink($tmpFile);
+         } else {
+             // Preserve the exact stored path (including a harmless leading ./), otherwise CLI tools can create a duplicate entry.
+             hc_archive_entry_clean($actual);
+@@ -760,7 +771,7 @@
+             if ($code!==0) throw new RuntimeException('Архиватор не смог сохранить изменения');
+         }
+     } catch (Throwable $e) {
+-        @copy($backup,$archivePath); throw $e;
++        if ($backup !== '' && is_file($backup)) @copy($backup,$archivePath); throw $e;
+     }
+     @chmod($archivePath,0660); @chown($archivePath,'www-data'); @chgrp($archivePath,'www-data');
+ }
+@@ -769,8 +780,7 @@
+ {
+     if (!is_file($path) || is_link($path)) throw new RuntimeException('Файл недоступен');
+     if (!hc_is_text($path) || !hc_is_editable_text_name(basename($path))) throw new RuntimeException('Этот файл нельзя редактировать');
+-    if (strlen($content) > 2097152) throw new RuntimeException('Максимальный размер файла для редактора — 2 МБ');
+-    if (str_contains($content, "\0")) throw new RuntimeException('Бинарные данные запрещены');
++        if (str_contains($content, "\0")) throw new RuntimeException('Бинарные данные запрещены');
+     $tmp = dirname($path) . '/.hc-edit-' . bin2hex(random_bytes(8));
+     if (@file_put_contents($tmp, $content, LOCK_EX) === false) throw new RuntimeException('Не удалось записать изменения');
+     $mode = @fileperms($path); if (is_int($mode)) @chmod($tmp, $mode & 0777); else @chmod($tmp, 0660);
+@@ -913,7 +923,7 @@
+ 
+ function hc_breadcrumb(string $rel): string
+ {
+-    $parts = ['<a href="/cloud/">Мой диск</a>'];
++    $parts = ['<a href="'.e(hc_url([])).'">'.(hc_space()==='shared'?'Общая папка':'Мой диск').'</a>'];
+     $walk = '';
+     foreach (array_filter(explode('/',$rel), static fn($v)=>$v!=='') as $part) {
+         $walk = trim($walk.'/'.$part,'/');
+@@ -928,136 +938,73 @@
+     return $dir !== '' ? $dir : '/var/lib/hyper-host-cloud';
+ }
+ 
+-function hc_share_store_path(): string
+-{
+-    $dir = hc_meta_dir();
+-    if (!is_dir($dir)) {
+-        @mkdir($dir, 02770, true);
+-        @chown($dir, 'www-data'); @chgrp($dir, 'www-data'); @chmod($dir, 02770);
+-    }
+-    return $dir . '/shares.json';
+-}
+-
+ function hc_share_store_load(): array
+ {
+-    $file = hc_share_store_path();
+-    if (!is_file($file)) return [];
+-    $fh = @fopen($file, 'rb');
+-    if ($fh === false) return [];
+-    @flock($fh, LOCK_SH);
+-    $raw = stream_get_contents($fh);
+-    @flock($fh, LOCK_UN); fclose($fh);
+-    $data = json_decode(is_string($raw) ? $raw : '', true);
+-    return is_array($data) ? $data : [];
+-}
+-
+-function hc_share_store_mutate(callable $callback): mixed
+-{
+-    $file = hc_share_store_path();
+-    $fh = @fopen($file, 'c+');
+-    if ($fh === false) throw new RuntimeException('Не удалось открыть реестр общего доступа');
+-    if (!@flock($fh, LOCK_EX)) { fclose($fh); throw new RuntimeException('Не удалось заблокировать реестр общего доступа'); }
+-    rewind($fh);
+-    $raw = stream_get_contents($fh);
+-    $shares = json_decode(is_string($raw) ? $raw : '', true);
+-    if (!is_array($shares)) $shares = [];
+-    $result = $callback($shares);
+-    $json = json_encode($shares, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+-    if (!is_string($json)) { @flock($fh, LOCK_UN); fclose($fh); throw new RuntimeException('Не удалось сохранить реестр общего доступа'); }
+-    rewind($fh); ftruncate($fh, 0);
+-    if (fwrite($fh, $json . "\n") === false) { @flock($fh, LOCK_UN); fclose($fh); throw new RuntimeException('Не удалось записать реестр общего доступа'); }
+-    fflush($fh); @flock($fh, LOCK_UN); fclose($fh);
+-    @chmod($file, 0660); @chown($file, 'www-data'); @chgrp($file, 'www-data');
+-    return $result;
++    $user = current_user(); if (!$user) return [];
++    $space = hc_space();
++    if ($space === 'shared') {
++        $st = hc_db()->prepare('SELECT token,owner_user_id,space,rel_path AS path,created_at FROM public_shares WHERE space=? ORDER BY created_at DESC');
++        $st->execute([$space]);
++    } else {
++        $st = hc_db()->prepare('SELECT token,owner_user_id,space,rel_path AS path,created_at FROM public_shares WHERE owner_user_id=? AND space=? ORDER BY created_at DESC');
++        $st->execute([(int)$user['id'],$space]);
++    }
++    $out=[]; foreach($st->fetchAll() as $r) $out[(string)$r['token']]=$r; return $out;
+ }
+ 
+ function hc_share_index_by_path(?array $shares = null): array
+ {
+-    $shares ??= hc_share_store_load();
+-    $out = [];
+-    foreach ($shares as $token => $entry) {
+-        if (!is_string($token) || !is_array($entry)) continue;
+-        $rel = (string)($entry['path'] ?? '');
+-        if ($rel === '') continue;
+-        $entry['token'] = $token;
+-        $out[$rel] = $entry;
+-    }
++    $shares ??= hc_share_store_load(); $out=[];
++    foreach($shares as $token=>$entry){if(!is_array($entry))continue;$rel=(string)($entry['path']??'');if($rel==='')continue;$entry['token']=(string)$token;$out[$rel]=$entry;}
+     return $out;
+ }
+ 
+ function hc_share_enable(string $rel, int $userId): string
+ {
+-    $rel = hc_clean_rel($rel);
+-    if ($rel === '') throw new RuntimeException('Корень нельзя публиковать');
+-    [,,$path] = hc_resolve($rel, true);
+-    if (!is_file($path) || is_link($path)) throw new RuntimeException('Доступ по ссылке можно открыть только для файла');
+-    return (string)hc_share_store_mutate(function(array &$shares) use ($rel,$userId): string {
+-        foreach ($shares as $token => $entry) {
+-            if (is_array($entry) && (string)($entry['path'] ?? '') === $rel && preg_match('/^[a-f0-9]{48}$/', (string)$token)) return (string)$token;
+-        }
+-        do { $token = bin2hex(random_bytes(24)); } while (isset($shares[$token]));
+-        $shares[$token] = ['path'=>$rel,'created_at'=>date(DATE_ATOM),'created_by'=>$userId];
+-        return $token;
+-    });
++    $rel=hc_clean_rel($rel); if($rel==='')throw new RuntimeException('Корень нельзя публиковать');
++    hc_assert_can_modify($rel); [,,$path]=hc_resolve($rel,true); if(!is_file($path)||is_link($path))throw new RuntimeException('Ссылку можно создать только на файл');
++    $space=hc_space();
++    if($space==='private'){$st=hc_db()->prepare('SELECT token FROM public_shares WHERE owner_user_id=? AND space=? AND rel_path=? LIMIT 1');$st->execute([$userId,$space,$rel]);}
++    else{$st=hc_db()->prepare('SELECT token FROM public_shares WHERE space=? AND rel_path=? LIMIT 1');$st->execute([$space,$rel]);}
++    $existing=$st->fetchColumn();if(is_string($existing)&&$existing!=='')return $existing;
++    do{$token=bin2hex(random_bytes(24));$q=hc_db()->prepare('SELECT 1 FROM public_shares WHERE token=?');$q->execute([$token]);}while($q->fetchColumn());
++    hc_db()->prepare("INSERT INTO public_shares(token,owner_user_id,space,rel_path,created_at) VALUES(?,?,?,?,datetime('now','localtime'))")->execute([$token,$userId,$space,$rel]); return $token;
+ }
+-
+ function hc_share_disable(string $rel): void
+ {
+-    $rel = hc_clean_rel($rel);
+-    hc_share_store_mutate(function(array &$shares) use ($rel): void {
+-        foreach (array_keys($shares) as $token) {
+-            $entry = $shares[$token] ?? null;
+-            if (is_array($entry) && (string)($entry['path'] ?? '') === $rel) unset($shares[$token]);
+-        }
+-    });
++    $rel=hc_clean_rel($rel); hc_assert_can_modify($rel); $u=current_user();if(!$u)return;
++    if(hc_space()==='private')hc_db()->prepare('DELETE FROM public_shares WHERE owner_user_id=? AND space=? AND rel_path=?')->execute([(int)$u['id'],'private',$rel]);
++    else hc_db()->prepare('DELETE FROM public_shares WHERE space=? AND rel_path=?')->execute(['shared',$rel]);
++}
++function hc_share_repath_tree(string $oldRel,string $newRel): void
++{
++    $oldRel=hc_clean_rel($oldRel);$newRel=hc_clean_rel($newRel);if($oldRel===''||$newRel==='')return;$u=current_user();if(!$u)return;
++    if(hc_space()==='private'){$st=hc_db()->prepare('SELECT token,rel_path FROM public_shares WHERE owner_user_id=? AND space=? AND (rel_path=? OR rel_path LIKE ?)');$st->execute([(int)$u['id'],'private',$oldRel,$oldRel.'/%']);}
++    else{$st=hc_db()->prepare('SELECT token,rel_path FROM public_shares WHERE space=? AND (rel_path=? OR rel_path LIKE ?)');$st->execute(['shared',$oldRel,$oldRel.'/%']);}
++    $upd=hc_db()->prepare('UPDATE public_shares SET rel_path=? WHERE token=?');
++    foreach($st->fetchAll() as $r){$path=(string)$r['rel_path'];$next=$path===$oldRel?$newRel:$newRel.substr($path,strlen($oldRel));$upd->execute([$next,(string)$r['token']]);}
+ }
+-
+-function hc_share_repath_tree(string $oldRel, string $newRel): void
+-{
+-    $oldRel = hc_clean_rel($oldRel); $newRel = hc_clean_rel($newRel);
+-    if ($oldRel === '' || $newRel === '') return;
+-    hc_share_store_mutate(function(array &$shares) use ($oldRel,$newRel): void {
+-        foreach ($shares as &$entry) {
+-            if (!is_array($entry)) continue;
+-            $path = (string)($entry['path'] ?? '');
+-            if ($path === $oldRel) $entry['path'] = $newRel;
+-            elseif (str_starts_with($path, $oldRel . '/')) $entry['path'] = $newRel . substr($path, strlen($oldRel));
+-        }
+-        unset($entry);
+-    });
+-}
+-
+ function hc_share_revoke_tree(string $rel): void
+ {
+-    $rel = hc_clean_rel($rel);
+-    if ($rel === '') return;
+-    hc_share_store_mutate(function(array &$shares) use ($rel): void {
+-        foreach (array_keys($shares) as $token) {
+-            $entry = $shares[$token] ?? null;
+-            $path = is_array($entry) ? (string)($entry['path'] ?? '') : '';
+-            if ($path === $rel || str_starts_with($path, $rel . '/')) unset($shares[$token]);
+-        }
+-    });
++    $rel=hc_clean_rel($rel);if($rel==='')return;$u=current_user();if(!$u)return;
++    if(hc_space()==='private')hc_db()->prepare('DELETE FROM public_shares WHERE owner_user_id=? AND space=? AND (rel_path=? OR rel_path LIKE ?)')->execute([(int)$u['id'],'private',$rel,$rel.'/%']);
++    else hc_db()->prepare('DELETE FROM public_shares WHERE space=? AND (rel_path=? OR rel_path LIKE ?)')->execute(['shared',$rel,$rel.'/%']);
+ }
+-
+ function hc_share_lookup(string $token): ?array
+ {
+-    if (!preg_match('/^[a-f0-9]{48}$/', $token)) return null;
+-    $shares = hc_share_store_load();
+-    $entry = $shares[$token] ?? null;
+-    if (!is_array($entry)) return null;
+-    try {
+-        $rel = hc_clean_rel((string)($entry['path'] ?? ''));
+-        [,,$path] = hc_resolve($rel, true);
+-        if (!is_file($path) || is_link($path)) return null;
+-        $entry['token'] = $token; $entry['path'] = $rel; $entry['file'] = $path;
+-        return $entry;
+-    } catch (Throwable) { return null; }
++    if(!preg_match('/^[a-f0-9]{48}$/',$token))return null;
++    $st=hc_db()->prepare('SELECT * FROM public_shares WHERE token=? LIMIT 1');$st->execute([$token]);$entry=$st->fetch();if(!is_array($entry))return null;
++    $owner=hc_cloud_user_by_id((int)$entry['owner_user_id']);if(!$owner)return null;
++    try{
++        $rel=hc_clean_rel((string)$entry['rel_path']);$root=hc_root_for_user($owner,(string)$entry['space']);$rootReal=realpath($root)?:$root;$path=$root.($rel!==''?'/'.$rel:'');$real=realpath($path);
++        if($real===false||!is_file($real)||is_link($path)||($real!==$rootReal&&!str_starts_with($real,$rootReal.DIRECTORY_SEPARATOR)))return null;
++        return ['token'=>$token,'path'=>$rel,'file'=>$real,'space'=>(string)$entry['space'],'owner_user_id'=>(int)$entry['owner_user_id'],'created_at'=>(string)$entry['created_at']];
++    }catch(Throwable){return null;}
+ }
+ 
+ function hc_public_share_url(string $token): string
+ {
+-    return '/cloud/?s=' . rawurlencode($token);
++    return '/?s=' . rawurlencode($token);
+ }
+ 
+ function hc_public_headers(): void
+@@ -1072,7 +1019,7 @@
+     http_response_code(404);
+     hc_public_headers();
+     ?>
+-<!doctype html><html lang="ru" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ссылка недоступна — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud/cloud.css?v=102"></head><body class="hc-public-body hc-public-error-body">
++<!doctype html><html lang="ru" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ссылка недоступна — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud.css?v=103"></head><body class="hc-public-body hc-public-error-body">
+ <main class="hc-public-page"><section class="hc-public-card hc-public-error-card"><div class="hc-public-brand"><span><i class="fa-solid fa-cloud"></i></span><b>HYPER CLOUD</b></div><div class="hc-public-error-icon"><i class="fa-solid fa-link-slash"></i></div><h1>Ссылка недоступна</h1><p>Доступ закрыт или файл больше не существует.</p></section></main></body></html><?php
+     exit;
+ }
+@@ -1090,7 +1037,7 @@
+     http_response_code(200);
+     hc_public_headers();
+     ?>
+-<!doctype html><html lang="ru" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($name) ?> — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud/cloud.css?v=102"></head><body class="hc-public-body">
++<!doctype html><html lang="ru" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($name) ?> — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud.css?v=103"></head><body class="hc-public-body">
+ <main class="hc-public-page"><section class="hc-public-card"><div class="hc-public-brand"><span><i class="fa-solid fa-cloud"></i></span><b>HYPER CLOUD</b></div>
+ <div class="hc-public-file"><div class="hc-public-file-icon <?= e($kind) ?>"><i class="fa-solid <?= e(hc_icon($path)) ?>"></i></div><div><h1><?= e($name) ?></h1><p><?= e(human_bytes($size)) ?> <span>•</span> <?= e(date('d.m.Y H:i', (int)(filemtime($path) ?: time()))) ?></p></div></div>
+ <?php if(str_starts_with($mime,'image/')): ?><div class="hc-public-preview image"><img src="<?= e($inline) ?>" alt=""></div>
+@@ -1101,7 +1048,7 @@
+     exit;
+ }
+ 
+-// Public token route is intentionally processed BEFORE panel authentication.
++// Public token route is intentionally processed BEFORE Cloud authentication.
+ $publicToken = strtolower(trim((string)($_GET['s'] ?? '')));
+ if ($publicToken !== '') {
+     $publicShare = hc_share_lookup($publicToken);
+@@ -1111,11 +1058,36 @@
+     hc_public_share_page($publicShare);
+ }
+ 
+-if (!current_user()) {
+-    $_SESSION['after_login'] = '/cloud/';
+-    redirect('/?page=login');
++function hc_render_auth_page(string $mode='login', string $error=''): never
++{
++    $register=$mode==='register';$twofa=hc_panel_2fa_required();$flash=flash();if($error===''&&$flash)$error=(string)($flash['message']??'');
++    http_response_code(200);header('X-Frame-Options: DENY');header('Cache-Control: no-store');
++    ?>
++<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= $register?'Регистрация':'Вход' ?> — HYPER CLOUD</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud.css?v=103"></head><body class="hc-auth-body">
++<div class="hc-auth-wrap"><section class="hc-auth-card"><div class="hc-auth-brand"><span><i class="fa-solid fa-cloud"></i></span><div><b>HYPER CLOUD</b><small>cloud.hyper-host.pw</small></div></div><div class="hc-auth-copy"><h1><?= $register?'Создать аккаунт':'Вход в облако' ?></h1></div>
++<?php if($error!==''): ?><div class="hc-auth-error"><i class="fa-solid fa-circle-exclamation"></i><?= e($error) ?></div><?php endif; ?>
++<form method="post" action="/?auth=<?= $register?'register':'login' ?>" class="hc-auth-form"><?= '<input type="hidden" name="_csrf" value="'.e(csrf_token()).'">' ?>
++<label><span>Логин</span><div><i class="fa-regular fa-user"></i><input name="username" autocomplete="username" required autofocus></div></label>
++<?php if($register): ?><label><span>E-mail</span><div><i class="fa-regular fa-envelope"></i><input type="email" name="email" autocomplete="email"></div></label><?php endif; ?>
++<label><span>Пароль</span><div><i class="fa-solid fa-lock"></i><input type="password" name="password" autocomplete="<?= $register?'new-password':'current-password' ?>" required></div></label>
++<?php if($register): ?><label><span>Повторите пароль</span><div><i class="fa-solid fa-lock"></i><input type="password" name="password2" autocomplete="new-password" required></div></label><?php elseif($twofa): ?><label><span>2FA панели <small>только для аккаунта HYPER-HOST</small></span><div><i class="fa-solid fa-shield-halved"></i><input name="totp" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></div></label><?php endif; ?>
++<button type="submit"><i class="fa-solid <?= $register?'fa-user-plus':'fa-arrow-right-to-bracket' ?>"></i><?= $register?'Создать аккаунт':'Войти' ?></button></form>
++<div class="hc-auth-switch"><?php if($register): ?>Уже есть аккаунт? <a href="/?auth=login">Войти</a><?php else: ?>Нет аккаунта? <a href="/?auth=register">Регистрация</a><?php endif; ?></div>
++<div class="hc-auth-panel-note"><i class="fa-solid fa-server"></i><span>Логин и пароль администратора HYPER-HOST подходят для входа в облако.</span></div></section></div></body></html><?php exit;
++}
++
++$authAction=(string)($_GET['auth']??'');
++if($authAction==='logout') hc_logout();
++if($authAction==='login'||$authAction==='register'){
++    if(current_user())redirect('/');
++    if($_SERVER['REQUEST_METHOD']==='POST'){
++        try{check_csrf();if($authAction==='login')hc_login((string)($_POST['username']??''),(string)($_POST['password']??''),(string)($_POST['totp']??''));else hc_register((string)($_POST['username']??''),(string)($_POST['email']??''),(string)($_POST['password']??''),(string)($_POST['password2']??''));redirect('/');}
++        catch(Throwable $e){hc_render_auth_page($authAction,$e->getMessage());}
++    }
++    hc_render_auth_page($authAction);
+ }
+-$user = require_auth();
++if(!current_user()) hc_render_auth_page('login');
++$user=require_auth();hc_ensure_user_root($user);
+ header('X-Frame-Options: DENY');
+ header('Referrer-Policy: same-origin');
+ 
+@@ -1138,22 +1110,57 @@
+     }
+ }
+ 
++function hc_json(array $payload, int $status=200): never
++{
++    while(ob_get_level()>0)@ob_end_clean();http_response_code($status);header('Content-Type: application/json; charset=utf-8');header('Cache-Control: no-store');echo json_encode($payload,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
++}
++function hc_upload_session_dir(string $uploadId): string
++{
++    if(!preg_match('/^[a-f0-9]{32}$/',$uploadId))throw new RuntimeException('Некорректный ID загрузки');$user=require_auth();$key=preg_replace('/[^A-Za-z0-9_.-]/','_', (string)$user['storage_key']);
++    $base=hc_meta_dir().'/uploads/'.$key;if(!is_dir($base))@mkdir($base,02770,true);$dir=$base.'/'.$uploadId;if(!is_dir($dir))@mkdir($dir,02770,true);@chmod($dir,02770);return $dir;
++}
++function hc_upload_cleanup_dir(string $dir): void
++{
++    if(!is_dir($dir))return;foreach(scandir($dir)?:[] as $n){if($n==='.'||$n==='..')continue;$p=$dir.'/'.$n;if(is_file($p))@unlink($p);} @rmdir($dir);
++}
++function hc_upload_meta(string $dir): array
++{
++    $raw=@file_get_contents($dir.'/meta.json');$data=json_decode(is_string($raw)?$raw:'',true);return is_array($data)?$data:[];
++}
++
+ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+     check_csrf();
+     $action = (string)($_POST['action'] ?? '');
+-    $isAjaxUpload = $action === 'upload' && (string)($_POST['ajax_upload'] ?? '') === '1';
++    $isAjaxUpload = in_array($action,['upload','upload_chunk','upload_complete'],true) && ((string)($_POST['ajax_upload'] ?? '') === '1' || str_starts_with($action,'upload_'));
+     $current = '';
+     try {
+         $current = hc_clean_rel((string)($_POST['path'] ?? ''));
+         [,,$dir] = hc_resolve($current, true);
+         if (!is_dir($dir)) throw new RuntimeException('Текущая папка не найдена');
+ 
+-        if ($action === 'mkdir') {
++        if ($action === 'upload_chunk') {
++            $uploadId=strtolower(trim((string)($_POST['upload_id']??'')));$chunkIndex=(int)($_POST['chunk_index']??-1);$totalChunks=(int)($_POST['total_chunks']??0);$fileName=hc_valid_name(basename((string)($_POST['file_name']??'')));$fileSize=max(0,(int)($_POST['file_size']??0));$uploadTarget=hc_clean_rel((string)($_POST['upload_target']??$current));
++            if($chunkIndex<0||$totalChunks<1||$chunkIndex>=$totalChunks)throw new RuntimeException('Некорректный номер части файла');[,,$uploadDir]=hc_resolve($uploadTarget,true);if(!is_dir($uploadDir)||is_link($uploadDir))throw new RuntimeException('Папка загрузки не найдена');
++            if(!isset($_FILES['chunk'])||(int)($_FILES['chunk']['error']??UPLOAD_ERR_NO_FILE)!==UPLOAD_ERR_OK)throw new RuntimeException('Часть файла не получена');$tmp=(string)($_FILES['chunk']['tmp_name']??'');if($tmp===''||!is_uploaded_file($tmp))throw new RuntimeException('Временный файл загрузки недоступен');
++            $session=hc_upload_session_dir($uploadId);$meta=hc_upload_meta($session);$expected=['file_name'=>$fileName,'file_size'=>$fileSize,'total_chunks'=>$totalChunks,'upload_target'=>$uploadTarget,'space'=>hc_space(),'user_id'=>(int)$user['id']];
++            if(!$meta){if(@file_put_contents($session.'/meta.json',json_encode($expected,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),LOCK_EX)===false)throw new RuntimeException('Не удалось подготовить загрузку');}
++            else foreach($expected as $k=>$v)if((string)($meta[$k]??'')!==(string)$v)throw new RuntimeException('Параметры загрузки изменились');
++            $part=$session.'/'.sprintf('%08d.part',$chunkIndex);if(!move_uploaded_file($tmp,$part))throw new RuntimeException('Не удалось сохранить часть файла');@chmod($part,0660);
++            hc_json(['ok'=>true,'chunk'=>$chunkIndex,'received'=>(int)(filesize($part)?:0)]);
++        } elseif ($action === 'upload_complete') {
++            $uploadId=strtolower(trim((string)($_POST['upload_id']??'')));$session=hc_upload_session_dir($uploadId);$meta=hc_upload_meta($session);if(!$meta)throw new RuntimeException('Сессия загрузки не найдена');
++            if((int)($meta['user_id']??0)!==(int)$user['id']||(string)($meta['space']??'')!==hc_space())throw new RuntimeException('Загрузка принадлежит другому сеансу');$uploadTarget=hc_clean_rel((string)($meta['upload_target']??''));[,,$uploadDir]=hc_resolve($uploadTarget,true);if(!is_dir($uploadDir))throw new RuntimeException('Папка загрузки не найдена');
++            $total=(int)($meta['total_chunks']??0);$name=hc_valid_name((string)($meta['file_name']??''));$target=hc_unique_target($uploadDir,$name);$temp=$uploadDir.'/.hc-upload-'.$uploadId.'.part';$out=@fopen($temp,'wb');if(!$out)throw new RuntimeException('Не удалось создать файл назначения');$written=0;
++            try{for($i=0;$i<$total;$i++){$part=$session.'/'.sprintf('%08d.part',$i);if(!is_file($part))throw new RuntimeException('Не получена часть '.($i+1).' из '.$total);$in=@fopen($part,'rb');if(!$in)throw new RuntimeException('Не удалось прочитать часть файла');$n=stream_copy_to_stream($in,$out);fclose($in);if($n===false)throw new RuntimeException('Ошибка сборки файла');$written+=(int)$n;}}finally{fclose($out);}
++            $expected=max(0,(int)($meta['file_size']??0));if($expected>0&&$written!==$expected){@unlink($temp);throw new RuntimeException('Размер загруженного файла не совпал');}if(!@rename($temp,$target)){@unlink($temp);throw new RuntimeException('Не удалось завершить загрузку');}@chmod($target,0660);@chown($target,'www-data');@chgrp($target,'www-data');
++            $finalRel=trim($uploadTarget.'/'.basename($target),'/');if(hc_space()==='shared')hc_shared_mark($finalRel,(int)$user['id'],'file');hc_upload_cleanup_dir($session);add_event('cloud','Загружен файл: '.$finalRel);hc_json(['ok'=>true,'file'=>basename($target),'path'=>$finalRel,'size'=>$written,'redirect'=>hc_url($current!==''?['path'=>$current]:[])]);
++        } elseif ($action === 'mkdir') {
+             $name = hc_valid_name((string)($_POST['name'] ?? ''));
+             $target = $dir.'/'.$name;
+             if (file_exists($target) || is_link($target)) throw new RuntimeException('Такое имя уже занято');
+             if (!mkdir($target, 02770, false)) throw new RuntimeException('Не удалось создать папку');
+             @chown($target,'www-data'); @chgrp($target,'www-data'); @chmod($target,02770);
++            if(hc_space()==='shared') hc_shared_mark(trim($current.'/'.$name,'/'),(int)$user['id'],'dir');
+             add_event('cloud','Создана папка: '.trim($current.'/'.$name,'/'));
+             flash('Папка создана','success');
+         } elseif ($action === 'upload') {
+@@ -1184,6 +1191,7 @@
+                 $target = hc_unique_target($uploadDir,$name);
+                 if (!move_uploaded_file($tmp,$target)) throw new RuntimeException('Не удалось сохранить '.$name);
+                 @chmod($target,0660); @chown($target,'www-data'); @chgrp($target,'www-data');
++                if(hc_space()==='shared') hc_shared_mark(trim($uploadTarget.'/'.basename($target),'/'),(int)$user['id'],'file');
+                 $uploaded++;
+             }
+             if ($uploaded < 1) throw new RuntimeException('Не удалось загрузить ни одного файла');
+@@ -1197,6 +1205,7 @@
+         } elseif ($action === 'save_text') {
+             $targetRel = hc_clean_rel((string)($_POST['target'] ?? ''));
+             [,,$target] = hc_resolve($targetRel, true);
++            hc_assert_can_modify($targetRel);
+             $content = (string)($_POST['content'] ?? '');
+             hc_write_text_file($target, $content);
+             add_event('cloud','Изменён файл: '.$targetRel);
+@@ -1209,6 +1218,7 @@
+         } elseif ($action === 'archive_save') {
+             $targetRel = hc_clean_rel((string)($_POST['target'] ?? ''));
+             [,,$target] = hc_resolve($targetRel, true);
++            hc_assert_can_modify($targetRel);
+             if (!is_file($target) || !hc_is_archive($target)) throw new RuntimeException('Архив не найден');
+             $entry = hc_archive_entry_clean((string)($_POST['archive_entry'] ?? ''));
+             $content = (string)($_POST['content'] ?? '');
+@@ -1224,20 +1234,24 @@
+             $targetRel = hc_clean_rel((string)($_POST['target'] ?? ''));
+             if ($targetRel === '') throw new RuntimeException('Корень переименовать нельзя');
+             [,,$target] = hc_resolve($targetRel,true);
++            hc_assert_can_modify($targetRel);
+             $name = hc_valid_name((string)($_POST['new_name'] ?? ''));
+             $newPath = dirname($target).'/'.$name;
+             if (file_exists($newPath) || is_link($newPath)) throw new RuntimeException('Такое имя уже занято');
+             if (!@rename($target,$newPath)) throw new RuntimeException('Не удалось переименовать');
+             $newRel = trim((dirname($targetRel)==='.'?'':dirname($targetRel)).'/'.$name,'/');
+             hc_share_repath_tree($targetRel, $newRel);
++            if(hc_space()==='shared') hc_shared_repath_tree($targetRel,$newRel);
+             add_event('cloud','Переименовано: '.$targetRel.' → '.$name);
+             flash('Переименовано','success');
+         } elseif ($action === 'delete') {
+             $targetRel = hc_clean_rel((string)($_POST['target'] ?? ''));
+             if ($targetRel === '') throw new RuntimeException('Корень удалить нельзя');
+             [,,$target] = hc_resolve($targetRel,true);
++            hc_assert_can_modify($targetRel);
+             hc_share_revoke_tree($targetRel);
+             hc_rrmdir($target);
++            if(hc_space()==='shared') hc_shared_remove_tree($targetRel);
+             add_event('cloud','Удалено: '.$targetRel);
+             flash('Удалено','success');
+             $returnView = (string)($_POST['return_view'] ?? 'disk');
+@@ -1269,7 +1283,7 @@
+             throw new RuntimeException('Неизвестное действие');
+         }
+     } catch (Throwable $e) {
+-        if (($isAjaxUpload ?? false) && ($action ?? '') === 'upload') {
++        if (($isAjaxUpload ?? false) && in_array(($action ?? ''),['upload','upload_chunk','upload_complete'],true)) {
+             http_response_code(400);
+             header('Content-Type: application/json; charset=utf-8');
+             echo json_encode(['ok'=>false,'error'=>$e->getMessage()], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+@@ -1321,13 +1335,15 @@
+     try { [,,$previewPath]=hc_resolve($previewRel,true); if(!is_file($previewPath)) $previewPath=null; } catch(Throwable) { $previewPath=null; }
+ }
+ $editText = ((string)($_GET['edit'] ?? '')) === '1';
++if($editText && $previewRel!=='' && !hc_can_modify($previewRel)) $editText=false;
+ $archiveEntry = '';
+ $archiveEntryData = null;
+ $archiveEntryError = '';
+ if ($previewPath && hc_is_archive($previewPath) && isset($_GET['archive_entry'])) {
+     try {
++        hc_assert_can_modify($previewRel);
+         $archiveEntry = hc_archive_entry_clean((string)$_GET['archive_entry']);
+-        $archiveEntryData = hc_archive_entry_read($previewPath, $archiveEntry, 2097152);
++        $archiveEntryData = hc_archive_entry_read($previewPath, $archiveEntry, 0);
+     } catch (Throwable $e) {
+         $archiveEntryError = $e->getMessage();
+     }
+@@ -1338,7 +1354,7 @@
+ $diskUsed = max(0.0,$diskTotal-$diskFree);
+ $diskPct = $diskTotal > 0 ? min(100,($diskUsed/$diskTotal)*100) : 0;
+ $flash = flash();
+-$viewTitle = ['disk'=>'Мой диск','recent'=>'Последние','archives'=>'Архивы','images'=>'Изображения','shared'=>'Доступ по ссылке'][$view];
++$viewTitle = $view==='disk' && hc_space()==='shared' ? 'Общая папка' : ['disk'=>'Мой диск','recent'=>'Последние','archives'=>'Архивы','images'=>'Изображения','shared'=>'Доступ по ссылке'][$view];
+ ?>
+ <!doctype html>
+ <html lang="ru" data-bs-theme="light">
+@@ -1351,7 +1367,7 @@
+ <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+ <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+ <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css">
+-<link rel="stylesheet" href="/cloud/cloud.css?v=102">
++<link rel="stylesheet" href="/cloud.css?v=103">
+ </head>
+ <body data-share-open="<?= e($shareOpenRel) ?>">
+ <div class="hc-app" id="hcApp">
+@@ -1359,7 +1375,8 @@
+     <div class="hc-brand"><div class="hc-brand-mark"><i class="fa-solid fa-cloud"></i></div><div><b>HYPER CLOUD</b></div></div>
+     <button class="hc-create" type="button" data-open-dialog="createDialog"><i class="fa-solid fa-plus"></i><span>Создать</span></button>
+     <nav class="hc-nav">
+-      <a class="<?= $view==='disk'?'active':'' ?>" href="/cloud/"><i class="fa-regular fa-hard-drive"></i><span>Мой диск</span></a>
++      <a class="<?= $view==='disk'&&hc_space()==='private'?'active':'' ?>" href="/?space=private"><i class="fa-regular fa-hard-drive"></i><span>Мой диск</span></a>
++      <a class="<?= $view==='disk'&&hc_space()==='shared'?'active':'' ?>" href="/?space=shared"><i class="fa-solid fa-users"></i><span>Общая папка</span></a>
+       <a class="<?= $view==='recent'?'active':'' ?>" href="<?= e(hc_url(['view'=>'recent'])) ?>"><i class="fa-regular fa-clock"></i><span>Последние</span></a>
+       <a class="<?= $view==='archives'?'active':'' ?>" href="<?= e(hc_url(['view'=>'archives'])) ?>"><i class="fa-regular fa-file-zipper"></i><span>Архивы</span></a>
+       <a class="<?= $view==='images'?'active':'' ?>" href="<?= e(hc_url(['view'=>'images'])) ?>"><i class="fa-regular fa-image"></i><span>Изображения</span></a>
+@@ -1371,14 +1388,14 @@
+       <div class="hc-storage-bar"><i style="width:<?= e((string)round($diskPct,1)) ?>%"></i></div>
+       <small>Свободно <?= e(human_bytes($diskFree)) ?> из <?= e(human_bytes($diskTotal)) ?></small>
+     </div>
+-    <a class="hc-back-panel" href="/"><i class="fa-solid fa-arrow-left"></i><span>Вернуться в HYPER-HOST</span></a>
++    <a class="hc-back-panel" href="<?= e(hc_panel_url()) ?>"><i class="fa-solid fa-arrow-up-right-from-square"></i><span>Открыть HYPER-HOST</span></a>
+   </aside>
+ 
+   <section class="hc-shell">
+     <header class="hc-header">
+       <button class="hc-mobile-menu" type="button" id="hcMenuButton"><i class="fa-solid fa-bars"></i></button>
+       <div class="hc-search"><i class="fa-solid fa-magnifying-glass"></i><input id="hcSearch" type="search" placeholder="Поиск в текущем списке" autocomplete="off"></div>
+-      <div class="hc-user"><div class="hc-avatar"><?= e(hc_initial((string)($user['username'] ?? 'A'))) ?></div><div class="hc-user-copy"><b><?= e((string)($user['username'] ?? 'admin')) ?></b><span>HYPER-HOST</span></div><a class="hc-icon-btn" title="Выйти" href="/?page=logout"><i class="fa-solid fa-arrow-right-from-bracket"></i></a></div>
++      <div class="hc-user"><div class="hc-avatar"><?= e(hc_initial((string)($user['username'] ?? 'A'))) ?></div><div class="hc-user-copy"><b><?= e((string)($user['username'] ?? 'admin')) ?></b><span><?= hc_is_panel_admin($user)?'HYPER-HOST ADMIN':'CLOUD ACCOUNT' ?></span></div><a class="hc-icon-btn" title="Выйти" href="/?auth=logout"><i class="fa-solid fa-arrow-right-from-bracket"></i></a></div>
+     </header>
+ 
+     <main class="hc-main" id="hcMain">
+@@ -1386,7 +1403,7 @@
+ 
+       <div class="hc-title-row">
+         <div>
+-          <div class="hc-eyebrow">HYPER CLOUD</div>
++          <div class="hc-eyebrow"><?= hc_space()==='shared'?'ОБЩЕЕ ПРОСТРАНСТВО':'HYPER CLOUD' ?></div>
+           <h1><?= e($viewTitle) ?></h1>
+           <?php if($view==='disk'): ?><div class="hc-breadcrumb"><?= hc_breadcrumb($rel) ?></div><?php endif; ?>
+         </div>
+@@ -1401,29 +1418,29 @@
+         <div class="hc-section-head"><div><b><?= $view==='disk' ? e($rel===''?'Файлы и папки':basename($rel)) : e($viewTitle) ?></b><span id="hcItemCount"><?= count($rows) ?> элементов</span></div><?php if($view==='disk'): ?><button class="hc-link-btn" type="button" data-open-dialog="folderDialog"><i class="fa-solid fa-folder-plus"></i>Новая папка</button><?php endif; ?></div>
+ 
+         <div class="hc-grid" id="hcFilesGrid">
+-          <?php foreach($rows as $row): $kind=hc_kind($row['path']); $isDir=(bool)$row['is_dir']; $isHtmlFile=!$isDir&&hc_is_html_name($row['name']); $isEditableFile=!$isDir&&hc_is_editable_text_name($row['name'])&&(int)$row['size']<=2*1024*1024; $share=$isDir?null:($shareByPath[$row['rel']]??null); $shareToken=is_array($share)?(string)($share['token']??''):''; $shareUrl=$shareToken!==''?hc_public_share_url($shareToken):''; $previewHref=$isDir?hc_url(['path'=>$row['rel']]):hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel']],static fn($v)=>$v!==null)); $openHref=$isHtmlFile?hc_url(['cloud_action'=>'html_preview','path'=>$row['rel']]):$previewHref; $editHref=$isEditableFile?hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel'],'edit'=>'1'],static fn($v)=>$v!==null)):''; ?>
++          <?php foreach($rows as $row): $kind=hc_kind($row['path']); $isDir=(bool)$row['is_dir']; $isHtmlFile=!$isDir&&hc_is_html_name($row['name']); $canModify=hc_can_modify($row['rel']); $isEditableFile=!$isDir&&$canModify&&hc_is_editable_text_name($row['name']); $share=$isDir?null:($shareByPath[$row['rel']]??null); $shareToken=is_array($share)?(string)($share['token']??''):''; $shareUrl=$shareToken!==''?hc_public_share_url($shareToken):''; $previewHref=$isDir?hc_url(['path'=>$row['rel']]):hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel']],static fn($v)=>$v!==null)); $openHref=$isHtmlFile?hc_url(['cloud_action'=>'html_preview','path'=>$row['rel']]):$previewHref; $editHref=$isEditableFile?hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel'],'edit'=>'1'],static fn($v)=>$v!==null)):''; ?>
+           <article class="hc-file-card" data-file-name="<?= e(hc_lower($row['name'])) ?>" data-kind="<?= e($kind) ?>">
+             <a class="hc-file-open" href="<?= e($openHref) ?>"<?= $isHtmlFile?' target="_blank" rel="noopener"':'' ?>>
+               <div class="hc-file-icon <?= e($kind) ?>"><i class="fa-solid <?= e(hc_icon($row['path'])) ?>"></i><?php if($kind==='image'): ?><img loading="lazy" src="<?= e(hc_url(['cloud_action'=>'raw','path'=>$row['rel']])) ?>" alt=""><?php endif; ?></div>
+               <div class="hc-file-info"><div class="hc-file-name-line"><b title="<?= e($row['name']) ?>"><?= e($row['name']) ?></b><?php if(!$isDir): ?><span class="hc-privacy-pill <?= $shareToken!==''?'shared':'private' ?>" title="<?= $shareToken!==''?'Доступ по ссылке включён':'Приватный файл' ?>"><i class="fa-solid <?= $shareToken!==''?'fa-link':'fa-lock' ?>"></i><?= $shareToken!==''?'По ссылке':'Приватный' ?></span><?php endif; ?></div><span><?= $isDir ? 'Папка' : e(human_bytes((float)$row['size'])) ?> · <?= e(date('d.m.Y H:i',$row['mtime']?:time())) ?></span><?php if(!$isDir && $row['dir']!==''): ?><small>/<?= e($row['dir']) ?></small><?php endif; ?></div>
+             </a>
+             <div class="hc-file-actions">
+-              <?php if(!$isDir): ?><?php if($isEditableFile): ?><a title="Редактировать код" href="<?= e($editHref) ?>"><i class="fa-solid fa-code"></i></a><?php endif; ?><a title="Скачать" href="<?= e(hc_url(['cloud_action'=>'download','path'=>$row['rel']])) ?>"><i class="fa-solid fa-download"></i></a><?php endif; ?>
+-              <button type="button" class="hc-delete-quick" title="Удалить" data-delete-target="<?= e($row['rel']) ?>" data-delete-name="<?= e($row['name']) ?>"><i class="fa-regular fa-trash-can"></i></button>
++              <?php if(!$isDir): ?><?php if($isHtmlFile): ?><a class="hc-site-quick" title="Открыть сайт" target="_blank" rel="noopener" href="<?= e($openHref) ?>"><i class="fa-solid fa-globe"></i><span>Сайт</span></a><?php endif; ?><?php if($isEditableFile): ?><a title="Редактировать код" href="<?= e($editHref) ?>"><i class="fa-solid fa-code"></i></a><?php endif; ?><a title="Скачать" href="<?= e(hc_url(['cloud_action'=>'download','path'=>$row['rel']])) ?>"><i class="fa-solid fa-download"></i></a><?php endif; ?>
++              <?php if($canModify): ?><button type="button" class="hc-delete-quick" title="Удалить" data-delete-target="<?= e($row['rel']) ?>" data-delete-name="<?= e($row['name']) ?>"><i class="fa-regular fa-trash-can"></i></button><?php endif; ?>
+               <button type="button" title="Действия" data-menu-for="menu-<?= md5($row['rel']) ?>"><i class="fa-solid fa-ellipsis-vertical"></i></button>
+             </div>
+             <div class="hc-context-menu" id="menu-<?= md5($row['rel']) ?>">
+-              <?php if($isDir): ?><a href="<?= e(hc_url(['path'=>$row['rel']])) ?>"><i class="fa-regular fa-folder-open"></i>Открыть</a><?php else: ?><?php if($isHtmlFile): ?><a target="_blank" rel="noopener" href="<?= e($openHref) ?>"><i class="fa-solid fa-globe"></i>Открыть как сайт</a><?php else: ?><a href="<?= e($openHref) ?>"><i class="fa-regular fa-eye"></i>Открыть</a><?php endif; ?><?php if($isEditableFile): ?><a href="<?= e($editHref) ?>"><i class="fa-solid fa-code"></i>Редактировать код</a><?php endif; ?><a href="<?= e(hc_url(['cloud_action'=>'download','path'=>$row['rel']])) ?>"><i class="fa-solid fa-download"></i>Скачать</a><button type="button" class="hc-share-action <?= $shareToken!==''?'active':'' ?>" data-share-target="<?= e($row['rel']) ?>" data-share-name="<?= e($row['name']) ?>" data-share-url="<?= e($shareUrl) ?>" data-share-enabled="<?= $shareToken!==''?'1':'0' ?>"><i class="fa-solid <?= $shareToken!==''?'fa-link':'fa-lock' ?>"></i>Доступ</button><?php endif; ?>
+-              <button type="button" data-rename-target="<?= e($row['rel']) ?>" data-rename-name="<?= e($row['name']) ?>"><i class="fa-solid fa-pen"></i>Переименовать</button>
+-              <button class="danger" type="button" data-delete-target="<?= e($row['rel']) ?>" data-delete-name="<?= e($row['name']) ?>"><i class="fa-regular fa-trash-can"></i>Удалить</button>
++              <?php if($isDir): ?><a href="<?= e(hc_url(['path'=>$row['rel']])) ?>"><i class="fa-regular fa-folder-open"></i>Открыть</a><?php else: ?><?php if($isHtmlFile): ?><a target="_blank" rel="noopener" href="<?= e($openHref) ?>"><i class="fa-solid fa-globe"></i>Открыть как сайт</a><?php else: ?><a href="<?= e($openHref) ?>"><i class="fa-regular fa-eye"></i>Открыть</a><?php endif; ?><?php if($isEditableFile): ?><a href="<?= e($editHref) ?>"><i class="fa-solid fa-code"></i>Редактировать код</a><?php endif; ?><a href="<?= e(hc_url(['cloud_action'=>'download','path'=>$row['rel']])) ?>"><i class="fa-solid fa-download"></i>Скачать</a><?php if($canModify): ?><button type="button" class="hc-share-action <?= $shareToken!==''?'active':'' ?>" data-share-target="<?= e($row['rel']) ?>" data-share-name="<?= e($row['name']) ?>" data-share-url="<?= e($shareUrl) ?>" data-share-enabled="<?= $shareToken!==''?'1':'0' ?>"><i class="fa-solid <?= $shareToken!==''?'fa-link':'fa-lock' ?>"></i>Доступ</button><?php endif; ?><?php endif; ?>
++              <?php if($canModify): ?><button type="button" data-rename-target="<?= e($row['rel']) ?>" data-rename-name="<?= e($row['name']) ?>"><i class="fa-solid fa-pen"></i>Переименовать</button>
++              <button class="danger" type="button" data-delete-target="<?= e($row['rel']) ?>" data-delete-name="<?= e($row['name']) ?>"><i class="fa-regular fa-trash-can"></i>Удалить</button><?php endif; ?>
+             </div>
+           </article>
+           <?php endforeach; ?>
+         </div>
+ 
+         <div class="hc-list" id="hcFilesList" hidden>
+-          <?php foreach($rows as $row): $kind=hc_kind($row['path']); $isDir=(bool)$row['is_dir']; $isHtmlFile=!$isDir&&hc_is_html_name($row['name']); $isEditableFile=!$isDir&&hc_is_editable_text_name($row['name'])&&(int)$row['size']<=2*1024*1024; $share=$isDir?null:($shareByPath[$row['rel']]??null); $shareToken=is_array($share)?(string)($share['token']??''):''; $shareUrl=$shareToken!==''?hc_public_share_url($shareToken):''; $previewHref=$isDir?hc_url(['path'=>$row['rel']]):hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel']],static fn($v)=>$v!==null)); $openHref=$isHtmlFile?hc_url(['cloud_action'=>'html_preview','path'=>$row['rel']]):$previewHref; $editHref=$isEditableFile?hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel'],'edit'=>'1'],static fn($v)=>$v!==null)):''; ?>
+-          <div class="hc-list-row" data-file-name="<?= e(hc_lower($row['name'])) ?>"><a href="<?= e($openHref) ?>"<?= $isHtmlFile?' target="_blank" rel="noopener"':'' ?>><span class="hc-mini-icon <?= e($kind) ?>"><i class="fa-solid <?= e(hc_icon($row['path'])) ?>"></i></span><b><?= e($row['name']) ?></b></a><span><?= $isDir?'Папка':e(human_bytes((float)$row['size'])) ?></span><span><?= e(date('d.m.Y H:i',$row['mtime']?:time())) ?></span><div class="hc-list-actions"><?php if(!$isDir): ?><?php if($isEditableFile): ?><a class="hc-icon-btn" href="<?= e($editHref) ?>" title="Редактировать код"><i class="fa-solid fa-code"></i></a><?php endif; ?><button type="button" class="hc-list-share <?= $shareToken!==''?'active':'' ?>" data-share-target="<?= e($row['rel']) ?>" data-share-name="<?= e($row['name']) ?>" data-share-url="<?= e($shareUrl) ?>" data-share-enabled="<?= $shareToken!==''?'1':'0' ?>" title="Доступ"><i class="fa-solid <?= $shareToken!==''?'fa-link':'fa-lock' ?>"></i></button><a class="hc-icon-btn" href="<?= e(hc_url(['cloud_action'=>'download','path'=>$row['rel']])) ?>" title="Скачать"><i class="fa-solid fa-download"></i></a><?php endif; ?><button type="button" class="hc-icon-btn danger" data-delete-target="<?= e($row['rel']) ?>" data-delete-name="<?= e($row['name']) ?>" title="Удалить"><i class="fa-regular fa-trash-can"></i></button></div></div>
++          <?php foreach($rows as $row): $kind=hc_kind($row['path']); $isDir=(bool)$row['is_dir']; $isHtmlFile=!$isDir&&hc_is_html_name($row['name']); $canModify=hc_can_modify($row['rel']); $isEditableFile=!$isDir&&$canModify&&hc_is_editable_text_name($row['name']); $share=$isDir?null:($shareByPath[$row['rel']]??null); $shareToken=is_array($share)?(string)($share['token']??''):''; $shareUrl=$shareToken!==''?hc_public_share_url($shareToken):''; $previewHref=$isDir?hc_url(['path'=>$row['rel']]):hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel']],static fn($v)=>$v!==null)); $openHref=$isHtmlFile?hc_url(['cloud_action'=>'html_preview','path'=>$row['rel']]):$previewHref; $editHref=$isEditableFile?hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel'],'edit'=>'1'],static fn($v)=>$v!==null)):''; ?>
++          <div class="hc-list-row" data-file-name="<?= e(hc_lower($row['name'])) ?>"><a href="<?= e($openHref) ?>"<?= $isHtmlFile?' target="_blank" rel="noopener"':'' ?>><span class="hc-mini-icon <?= e($kind) ?>"><i class="fa-solid <?= e(hc_icon($row['path'])) ?>"></i></span><b><?= e($row['name']) ?></b></a><span><?= $isDir?'Папка':e(human_bytes((float)$row['size'])) ?></span><span><?= e(date('d.m.Y H:i',$row['mtime']?:time())) ?></span><div class="hc-list-actions"><?php if(!$isDir): ?><?php if($isHtmlFile): ?><a class="hc-icon-btn" target="_blank" rel="noopener" href="<?= e($openHref) ?>" title="Открыть сайт"><i class="fa-solid fa-globe"></i></a><?php endif; ?><?php if($isEditableFile): ?><a class="hc-icon-btn" href="<?= e($editHref) ?>" title="Редактировать код"><i class="fa-solid fa-code"></i></a><?php endif; ?><?php if($canModify): ?><button type="button" class="hc-list-share <?= $shareToken!==''?'active':'' ?>" data-share-target="<?= e($row['rel']) ?>" data-share-name="<?= e($row['name']) ?>" data-share-url="<?= e($shareUrl) ?>" data-share-enabled="<?= $shareToken!==''?'1':'0' ?>" title="Доступ"><i class="fa-solid <?= $shareToken!==''?'fa-link':'fa-lock' ?>"></i></button><?php endif; ?><a class="hc-icon-btn" href="<?= e(hc_url(['cloud_action'=>'download','path'=>$row['rel']])) ?>" title="Скачать"><i class="fa-solid fa-download"></i></a><?php endif; ?><?php if($canModify): ?><button type="button" class="hc-icon-btn danger" data-delete-target="<?= e($row['rel']) ?>" data-delete-name="<?= e($row['name']) ?>" title="Удалить"><i class="fa-regular fa-trash-can"></i></button><?php endif; ?></div></div>
+           <?php endforeach; ?>
+         </div>
+ 
+@@ -1448,11 +1465,11 @@
+ </dialog>
+ 
+ <dialog data-modal-lock="true" class="hc-dialog" id="uploadDialog">
+-  <form method="post" enctype="multipart/form-data" id="hcUploadForm">
+-    <input type="hidden" name="action" value="upload"><?= hc_csrf_field() ?><input type="hidden" name="path" value="<?= e($rel) ?>">
++  <form method="post" enctype="multipart/form-data" id="hcUploadForm" action="/api/upload.php">
++    <input type="hidden" name="action" value="upload"><input type="hidden" name="space" value="<?= e(hc_space()) ?>"><?= hc_csrf_field() ?><input type="hidden" name="path" value="<?= e($rel) ?>">
+     <div class="hc-dialog-head"><div><span>Загрузка</span><b>Добавить файлы в облако</b></div><button type="button" class="hc-modal-close" data-close-dialog aria-label="Закрыть" title="Закрыть"><i class="fa-solid fa-xmark"></i></button></div>
+     <div class="hc-dialog-body">
+-      <label class="hc-field"><span>Куда загрузить</span><select name="upload_target" id="hcUploadTarget"><option value=""<?= $rel===''?' selected':'' ?>>☁ Корень облака</option><?php foreach($folderTree as $folder): $fpath=(string)$folder['path']; ?><option value="<?= e($fpath) ?>"<?= $fpath===$rel?' selected':'' ?>><?= e(str_repeat('— ',min((int)$folder['depth']+1,10)).$folder['name'].($fpath===$rel?' · текущая':'')) ?></option><?php endforeach; ?></select></label>
++      <label class="hc-field"><span>Куда загрузить</span><select name="upload_target" id="hcUploadTarget"><option value=""<?= $rel===''?' selected':'' ?>><?= hc_space()==='shared'?'👥 Общая папка':'☁ Корень облака' ?></option><?php foreach($folderTree as $folder): $fpath=(string)$folder['path']; ?><option value="<?= e($fpath) ?>"<?= $fpath===$rel?' selected':'' ?>><?= e(str_repeat('— ',min((int)$folder['depth']+1,10)).$folder['name'].($fpath===$rel?' · текущая':'')) ?></option><?php endforeach; ?></select></label>
+       <label class="hc-upload-zone" id="hcUploadZone"><input type="file" id="hcFilesInput" name="files[]" multiple hidden><span><i class="fa-solid fa-cloud-arrow-up"></i></span><b>Перетащите файлы сюда</b><p>или нажмите, чтобы выбрать с компьютера</p></label>
+       <div class="hc-upload-queue" id="hcUploadQueue" hidden><div class="hc-upload-queue-head"><b id="hcQueueCount"></b><span id="hcQueueSize"></span></div><div id="hcQueueFiles"></div></div>
+       <div class="hc-upload-progress" id="hcUploadProgress" hidden>
+@@ -1490,27 +1507,27 @@
+   </div>
+ </dialog>
+ 
+-<?php if($previewPath): $mime=hc_mime($previewPath); $previewIsArchive=hc_is_archive($previewPath); $previewIsHtml=!$previewIsArchive && hc_is_html_name($previewPath); $previewIsText=!$previewIsArchive && hc_is_text($previewPath) && hc_is_editable_text_name(basename($previewPath)) && (filesize($previewPath)?:0)<=2*1024*1024; ?>
++<?php if($previewPath): $previewCanModify=hc_can_modify($previewRel); $mime=hc_mime($previewPath); $previewIsArchive=hc_is_archive($previewPath); $previewIsHtml=!$previewIsArchive && hc_is_html_name($previewPath); $previewIsText=!$previewIsArchive && hc_is_text($previewPath) && hc_is_editable_text_name(basename($previewPath)) ; ?>
+ <div class="hc-preview-backdrop" id="hcPreview" data-preview-open>
+   <section class="hc-preview-panel<?= $previewIsArchive?' is-archive':'' ?><?= ($editText || $archiveEntry!=='')?' is-editor':'' ?>">
+-    <header><div><span><?= ($editText || $archiveEntry!=='')?'Редактор':'Просмотр' ?></span><b><?= e($archiveEntry!==''?basename($archiveEntry):basename($previewPath)) ?></b><small><?= $archiveEntry!=='' ? e(basename($previewPath)) : e(human_bytes((float)(filesize($previewPath)?:0))) ?></small></div><div><?php $previewShare=$shareByPath[$previewRel]??null; $previewShareToken=is_array($previewShare)?(string)($previewShare['token']??''):''; ?><?php if($previewIsHtml && !$editText): ?><a class="hc-btn soft" target="_blank" rel="noopener" href="<?= e(hc_url(['cloud_action'=>'html_preview','path'=>$previewRel])) ?>"><i class="fa-solid fa-arrow-up-right-from-square"></i>Открыть</a><?php endif; ?><?php if($previewIsText && !$editText): ?><a class="hc-btn soft" href="<?= e(hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$previewRel,'edit'=>'1'],static fn($v)=>$v!==null))) ?>"><i class="fa-solid fa-code"></i>Редактировать</a><?php endif; ?><?php if($archiveEntry===''): ?><button type="button" class="hc-btn <?= $previewShareToken!==''?'share-on':'soft' ?>" data-share-target="<?= e($previewRel) ?>" data-share-name="<?= e(basename($previewPath)) ?>" data-share-url="<?= e($previewShareToken!==''?hc_public_share_url($previewShareToken):'') ?>" data-share-enabled="<?= $previewShareToken!==''?'1':'0' ?>"><i class="fa-solid <?= $previewShareToken!==''?'fa-link':'fa-lock' ?>"></i>Доступ</button><a class="hc-btn soft" href="<?= e(hc_url(['cloud_action'=>'download','path'=>$previewRel])) ?>"><i class="fa-solid fa-download"></i>Скачать</a><button type="button" class="hc-btn danger-soft hc-preview-delete" data-delete-target="<?= e($previewRel) ?>" data-delete-name="<?= e(basename($previewPath)) ?>"><i class="fa-regular fa-trash-can"></i>Удалить</button><?php endif; ?><a class="hc-preview-close" href="<?= e(hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$archiveEntry!==''?$previewRel:null],static fn($v)=>$v!==null))) ?>"><i class="fa-solid fa-xmark"></i></a></div></header>
++    <header><div><span><?= ($editText || $archiveEntry!=='')?'Редактор':'Просмотр' ?></span><b><?= e($archiveEntry!==''?basename($archiveEntry):basename($previewPath)) ?></b><small><?= $archiveEntry!=='' ? e(basename($previewPath)) : e(human_bytes((float)(filesize($previewPath)?:0))) ?></small></div><div><?php $previewShare=$shareByPath[$previewRel]??null; $previewShareToken=is_array($previewShare)?(string)($previewShare['token']??''):''; ?><?php if($previewIsHtml && !$editText): ?><a class="hc-btn soft" target="_blank" rel="noopener" href="<?= e(hc_url(['cloud_action'=>'html_preview','path'=>$previewRel])) ?>"><i class="fa-solid fa-arrow-up-right-from-square"></i>Открыть</a><?php endif; ?><?php if($previewIsText && !$editText && $previewCanModify): ?><a class="hc-btn soft" href="<?= e(hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$previewRel,'edit'=>'1'],static fn($v)=>$v!==null))) ?>"><i class="fa-solid fa-code"></i>Редактировать</a><?php endif; ?><?php if($archiveEntry==='' && $previewCanModify): ?><button type="button" class="hc-btn <?= $previewShareToken!==''?'share-on':'soft' ?>" data-share-target="<?= e($previewRel) ?>" data-share-name="<?= e(basename($previewPath)) ?>" data-share-url="<?= e($previewShareToken!==''?hc_public_share_url($previewShareToken):'') ?>" data-share-enabled="<?= $previewShareToken!==''?'1':'0' ?>"><i class="fa-solid <?= $previewShareToken!==''?'fa-link':'fa-lock' ?>"></i>Доступ</button><a class="hc-btn soft" href="<?= e(hc_url(['cloud_action'=>'download','path'=>$previewRel])) ?>"><i class="fa-solid fa-download"></i>Скачать</a><button type="button" class="hc-btn danger-soft hc-preview-delete" data-delete-target="<?= e($previewRel) ?>" data-delete-name="<?= e(basename($previewPath)) ?>"><i class="fa-regular fa-trash-can"></i>Удалить</button><?php endif; ?><?php if($archiveEntry==='' && !$previewCanModify): ?><a class="hc-btn soft" href="<?= e(hc_url(['cloud_action'=>'download','path'=>$previewRel])) ?>"><i class="fa-solid fa-download"></i>Скачать</a><?php endif; ?><a class="hc-preview-close" href="<?= e(hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$archiveEntry!==''?$previewRel:null],static fn($v)=>$v!==null))) ?>"><i class="fa-solid fa-xmark"></i></a></div></header>
+     <div class="hc-preview-body<?= $previewIsArchive?' is-archive':'' ?><?= ($editText || $archiveEntry!=='')?' is-editor':'' ?>">
+       <?php if($previewIsArchive && $archiveEntry!==''): ?>
+         <?php if($archiveEntryError!==''): ?><div class="hc-preview-fallback"><i class="fa-solid fa-triangle-exclamation"></i><b>Не удалось открыть файл</b><p><?= e($archiveEntryError) ?></p><a class="hc-btn soft" href="<?= e(hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$previewRel],static fn($v)=>$v!==null))) ?>"><i class="fa-solid fa-arrow-left"></i>К архиву</a></div>
+-        <?php else: $archiveWritable=(bool)($archiveEntryData['writable']??false); $archiveContent=(string)($archiveEntryData['content']??''); ?>
++        <?php else: $archiveWritable=$previewCanModify&&(bool)($archiveEntryData['writable']??false); $archiveContent=(string)($archiveEntryData['content']??''); ?>
+           <form method="post" class="hc-editor-form" data-editor-form><input type="hidden" name="action" value="archive_save"><?= hc_csrf_field() ?><input type="hidden" name="path" value="<?= e($view==='disk'?$rel:'') ?>"><input type="hidden" name="return_view" value="<?= e($view) ?>"><input type="hidden" name="target" value="<?= e($previewRel) ?>"><input type="hidden" name="archive_entry" value="<?= e($archiveEntry) ?>">
+             <div class="hc-editor-toolbar"><a class="hc-editor-back" href="<?= e(hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$previewRel],static fn($v)=>$v!==null))) ?>"><i class="fa-solid fa-arrow-left"></i>Архив</a><?php if(hc_is_html_name($archiveEntry)): ?><a class="hc-editor-site" target="_blank" rel="noopener" href="<?= e(hc_url(['cloud_action'=>'archive_html_preview','path'=>$previewRel,'entry'=>$archiveEntry])) ?>"><i class="fa-solid fa-globe"></i>Открыть сайт</a><?php endif; ?><div><span class="hc-editor-lang"><?= e(strtoupper(pathinfo($archiveEntry,PATHINFO_EXTENSION) ?: 'TXT')) ?></span><span id="hcEditorLines">1 строка</span></div><?php if($archiveWritable): ?><button class="hc-btn primary" type="submit"><i class="fa-solid fa-floppy-disk"></i>Сохранить</button><?php else: ?><span class="hc-editor-readonly"><i class="fa-solid fa-lock"></i>Только чтение</span><?php endif; ?></div>
+             <textarea class="hc-code-editor" name="content" spellcheck="false" autocomplete="off" autocapitalize="off" <?= $archiveWritable?'':'readonly' ?>><?= e($archiveContent) ?></textarea>
+           </form>
+         <?php endif; ?>
+-      <?php elseif($previewIsArchive): $archive=hc_archive_entries($previewPath); $archiveWritable=hc_archive_writer($previewPath)!==''; ?>
++      <?php elseif($previewIsArchive): $archive=hc_archive_entries($previewPath,0); $archiveWritable=$previewCanModify&&hc_archive_writer($previewPath)!==''; ?>
+         <?php if(!empty($archive['ok'])): ?>
+           <div class="hc-archive-head"><span class="hc-archive-main-icon"><i class="fa-solid fa-file-zipper"></i></span><div><b><?= e(basename($previewPath)) ?></b><span><?= count($archive['entries']) ?> элементов</span></div></div>
+           <div class="hc-archive-table"><table><thead><tr><th>Имя</th><th>Размер</th><th>Изменён</th><th></th></tr></thead><tbody>
+           <?php foreach($archive['entries'] as $entry):
+             $entryName=(string)($entry['name']??''); $entryDir=str_ends_with($entryName,'/');
+             try{$entryCanonical=$entryDir?'':hc_archive_entry_clean($entryName);}catch(Throwable){$entryCanonical='';}
+-            $canEdit=$entryCanonical!==''&&hc_is_editable_text_name($entryCanonical)&&(int)($entry['size']??0)<=2*1024*1024;
++            $canEdit=$previewCanModify&&$entryCanonical!==''&&hc_is_editable_text_name($entryCanonical);
+             $entryIsHtml=$entryCanonical!==''&&hc_is_html_name($entryCanonical);
+             $entryEditHref=$canEdit?hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$previewRel,'archive_entry'=>$entryCanonical],static fn($v)=>$v!==null)):'';
+             $entrySiteHref=$entryIsHtml?hc_url(['cloud_action'=>'archive_html_preview','path'=>$previewRel,'entry'=>$entryCanonical]):'';
+@@ -1525,9 +1542,9 @@
+             <?php if($canEdit): ?><a class="hc-archive-edit-btn" href="<?= e($entryEditHref) ?>" title="Редактировать код"><i class="fa-solid fa-code"></i></a><?php endif; ?>
+           </div></td></tr>
+           <?php endforeach; ?></tbody></table></div>
+-          <?php if(!empty($archive['truncated'])): ?><div class="hc-preview-note">Показаны первые 1000 элементов.</div><?php endif; ?>
++          <?php if(!empty($archive['truncated'])): ?><div class="hc-preview-note">Архив очень большой — показана первая часть списка.</div><?php endif; ?>
+         <?php else: ?><div class="hc-preview-fallback"><i class="fa-solid fa-file-circle-xmark"></i><b>Не удалось открыть архив</b><p><?= e((string)($archive['error']??'')) ?></p></div><?php endif; ?>
+-      <?php elseif($previewIsText && $editText): $txt=@file_get_contents($previewPath,false,null,0,2*1024*1024); ?>
++      <?php elseif($previewIsText && $editText && $previewCanModify): $txt=@file_get_contents($previewPath); ?>
+         <form method="post" class="hc-editor-form" data-editor-form><input type="hidden" name="action" value="save_text"><?= hc_csrf_field() ?><input type="hidden" name="path" value="<?= e($view==='disk'?$rel:'') ?>"><input type="hidden" name="return_view" value="<?= e($view) ?>"><input type="hidden" name="target" value="<?= e($previewRel) ?>"><div class="hc-editor-toolbar"><a class="hc-editor-back" href="<?= e(hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$previewRel],static fn($v)=>$v!==null))) ?>"><i class="fa-solid fa-arrow-left"></i>Просмотр</a><?php if($previewIsHtml): ?><a class="hc-editor-site" target="_blank" rel="noopener" href="<?= e(hc_url(['cloud_action'=>'html_preview','path'=>$previewRel])) ?>"><i class="fa-solid fa-globe"></i>Открыть сайт</a><?php endif; ?><div><span class="hc-editor-lang"><?= e(strtoupper(pathinfo($previewPath,PATHINFO_EXTENSION) ?: 'TXT')) ?></span><span id="hcEditorLines">1 строка</span></div><button class="hc-btn primary" type="submit"><i class="fa-solid fa-floppy-disk"></i>Сохранить</button></div><textarea class="hc-code-editor" name="content" spellcheck="false" autocomplete="off" autocapitalize="off"><?= e(is_string($txt)?$txt:'') ?></textarea></form>
+       <?php elseif($previewIsHtml): ?>
+         <div class="hc-html-site-preview">
+@@ -1538,7 +1555,7 @@
+       <?php elseif($mime==='application/pdf'): ?><iframe class="hc-preview-frame" src="<?= e(hc_url(['cloud_action'=>'raw','path'=>$previewRel])) ?>"></iframe>
+       <?php elseif(str_starts_with($mime,'video/')): ?><video class="hc-preview-media" controls preload="metadata" src="<?= e(hc_url(['cloud_action'=>'raw','path'=>$previewRel])) ?>"></video>
+       <?php elseif(str_starts_with($mime,'audio/')): ?><div class="hc-audio-wrap"><audio controls preload="metadata" src="<?= e(hc_url(['cloud_action'=>'raw','path'=>$previewRel])) ?>"></audio></div>
+-      <?php elseif($previewIsText): $txt=@file_get_contents($previewPath,false,null,0,2*1024*1024); ?><pre class="hc-code-preview"><?= e(is_string($txt)?$txt:'') ?></pre>
++      <?php elseif($previewIsText): $txt=@file_get_contents($previewPath); ?><pre class="hc-code-preview"><?= e(is_string($txt)?$txt:'') ?></pre>
+       <?php else: ?><div class="hc-preview-fallback"><i class="fa-solid fa-file-arrow-down"></i><b>Предпросмотр недоступен</b><a class="hc-btn primary" href="<?= e(hc_url(['cloud_action'=>'download','path'=>$previewRel])) ?>">Скачать файл</a></div><?php endif; ?>
+     </div>
+   </section>
+@@ -1546,6 +1563,6 @@
+ <?php endif; ?>
+ 
+ <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous" defer></script>
+-<script src="/cloud/cloud.js?v=102" defer></script>
++<script src="/cloud.js?v=103" defer></script>
+ </body>
+ </html>

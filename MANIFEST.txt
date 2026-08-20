@@ -1,9 +1,9 @@
-HYPER-HOST-CLOUD-v101-PATCH
-apply-v1.9-cloud-upload-preview.sh
-src/public/cloud/index.php
-src/public/cloud/cloud.css
-src/public/cloud/cloud.js
-PATCH-v101-UPLOAD-HTML-PREVIEW.md
-README-INSTALL.txt
-cloud-v100-to-v101.patch
-SHA256SUMS.txt
+HYPER CLOUD v103 files
+- apply-v2.1-cloud-domain-multiuser.sh
+- src/cloud/app/bootstrap.php
+- src/cloud/public/index.php
+- src/cloud/public/api/upload.php
+- src/cloud/public/cloud.css
+- src/cloud/public/cloud.js
+- README-INSTALL.txt
+- PATCH-v103-CLOUD-DOMAIN-MULTIUSER.md
