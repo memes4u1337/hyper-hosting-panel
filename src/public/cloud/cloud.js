@@ -23,6 +23,13 @@
   const itemCount = $('#hcItemCount');
   const searchEmpty = $('#hcSearchEmpty');
 
+  // Bootstrap is used for polished tooltips while Cloud keeps its own visual language.
+  if (window.bootstrap?.Tooltip) {
+    $$('[title]').forEach(el => {
+      try { new window.bootstrap.Tooltip(el, {container: 'body', delay: {show: 350, hide: 50}}); } catch (_) {}
+    });
+  }
+
   function closeDialogs(except = null) {
     $$('dialog[open]').forEach(d => {
       if (d !== except) d.close();
@@ -44,11 +51,21 @@
     btn.addEventListener('click', () => btn.closest('dialog')?.close());
   });
 
-  $$('dialog').forEach(dlg => {
+  // Locked modals: backdrop clicks and ESC must never dismiss them.
+  // Only an explicit [data-close-dialog] control (the X button) may close a dialog.
+  $$('dialog[data-modal-lock="true"]').forEach(dlg => {
+    dlg.addEventListener('cancel', e => {
+      e.preventDefault();
+      e.stopPropagation();
+    });
     dlg.addEventListener('click', e => {
-      const rect = dlg.getBoundingClientRect();
-      const inside = e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
-      if (!inside) dlg.close();
+      if (e.target === dlg) {
+        e.preventDefault();
+        e.stopPropagation();
+        dlg.classList.remove('hc-modal-pulse');
+        void dlg.offsetWidth;
+        dlg.classList.add('hc-modal-pulse');
+      }
     });
   });
 
@@ -264,8 +281,18 @@
     if (trigger) setTimeout(() => openShareDialog(trigger), 80);
   }
 
-  // ESC closes context menus first; native dialogs handle themselves.
+  // ESC is intentionally disabled for open Cloud modals.
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') $$('.hc-context-menu.open').forEach(m => m.classList.remove('open'));
-  });
+    if (e.key !== 'Escape') return;
+    const locked = $('dialog[data-modal-lock="true"][open]');
+    if (locked) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      locked.classList.remove('hc-modal-pulse');
+      void locked.offsetWidth;
+      locked.classList.add('hc-modal-pulse');
+      return;
+    }
+    $$('.hc-context-menu.open').forEach(m => m.classList.remove('open'));
+  }, true);
 })();

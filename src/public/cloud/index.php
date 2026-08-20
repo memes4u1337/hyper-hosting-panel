@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 /**
- * HYPER CLOUD v97 — standalone private cloud with per-file public links.
+ * HYPER CLOUD v98 — premium standalone private cloud with locked dialogs and per-file public links.
  * This page intentionally does NOT use render_page() and has its own UI shell.
  */
 require __DIR__ . '/../../app/bootstrap.php';
@@ -486,9 +486,9 @@ function hc_public_share_page(array $share): never
     http_response_code(200);
     header('X-Frame-Options: DENY');
     header('X-Robots-Tag: noindex, nofollow, noarchive');
-    header("Content-Security-Policy: default-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; font-src https://cdnjs.cloudflare.com data:; img-src 'self' data:; script-src 'none'; frame-src 'self'; media-src 'self'; base-uri 'none'; form-action 'self'");
+    header("Content-Security-Policy: default-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; font-src https://cdnjs.cloudflare.com data:; img-src 'self' data:; script-src 'none'; frame-src 'self'; media-src 'self'; base-uri 'none'; form-action 'self'");
     ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($name) ?> — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"><link rel="stylesheet" href="/cloud/cloud.css?v=97"></head><body class="hc-public-body">
+<!doctype html><html lang="ru" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($name) ?> — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud/cloud.css?v=98"></head><body class="hc-public-body">
 <main class="hc-public-page"><section class="hc-public-card"><div class="hc-public-brand"><span><i class="fa-solid fa-cloud"></i></span><div><b>HYPER CLOUD</b><small>Безопасный общий доступ</small></div></div><div class="hc-public-file"><div class="hc-public-file-icon <?= e($kind) ?>"><i class="fa-solid <?= e(hc_icon($path)) ?>"></i></div><div><span>Вам открыт доступ к одному файлу</span><h1><?= e($name) ?></h1><p><?= e(human_bytes($size)) ?> · <?= e(date('d.m.Y H:i', (int)(filemtime($path) ?: time()))) ?></p></div></div>
 <?php if(str_starts_with($mime,'image/')): ?><div class="hc-public-preview"><img src="<?= e($inline) ?>" alt=""></div><?php endif; ?>
 <div class="hc-public-security"><i class="fa-solid fa-shield-halved"></i><div><b>Ссылка ведёт только на этот файл</b><span>Другие файлы и папки облака недоступны.</span></div></div><a class="hc-public-download" href="<?= e($download) ?>"><i class="fa-solid fa-download"></i><span><b>Скачать файл</b><small><?= e(human_bytes($size)) ?></small></span></a><footer>HYPER CLOUD · private storage</footer></section></main></body></html><?php
@@ -677,14 +677,17 @@ $flash = flash();
 $viewTitle = ['disk'=>'Мой диск','recent'=>'Последние','archives'=>'Архивы','images'=>'Изображения','shared'=>'Доступ по ссылке'][$view];
 ?>
 <!doctype html>
-<html lang="ru">
+<html lang="ru" data-bs-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#f7f9ff">
 <title><?= e($viewTitle) ?> — HYPER CLOUD</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
-<link rel="stylesheet" href="/cloud/cloud.css?v=97">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css">
+<link rel="stylesheet" href="/cloud/cloud.css?v=98">
 </head>
 <body data-share-open="<?= e($shareOpenRel) ?>">
 <div class="hc-app" id="hcApp">
@@ -737,6 +740,12 @@ $viewTitle = ['disk'=>'Мой диск','recent'=>'Последние','archives
       </section>
       <?php endif; ?>
 
+      <section class="hc-overview" aria-label="Состояние облака">
+        <div class="hc-overview-card privacy"><span><i class="fa-solid fa-shield-halved"></i></span><div><small>Безопасность</small><b>Приватно по умолчанию</b><em>Публикуются только выбранные файлы</em></div></div>
+        <div class="hc-overview-card links"><span><i class="fa-solid fa-link"></i></span><div><small>Публичные ссылки</small><b><?= count($shareByPath) ?></b><em>Можно отозвать в любой момент</em></div></div>
+        <div class="hc-overview-card storage"><span><i class="fa-solid fa-server"></i></span><div><small>Свободно на сервере</small><b><?= e(human_bytes($diskFree)) ?></b><em>из <?= e(human_bytes($diskTotal)) ?></em></div></div>
+      </section>
+
       <section class="hc-files-section">
         <div class="hc-section-head"><div><b><?= $view==='disk' ? e($rel===''?'Файлы и папки':basename($rel)) : e($viewTitle) ?></b><span id="hcItemCount"><?= count($rows) ?> элементов</span></div><?php if($view==='disk'): ?><button class="hc-link-btn" type="button" data-open-dialog="folderDialog"><i class="fa-solid fa-folder-plus"></i>Новая папка</button><?php endif; ?></div>
 
@@ -776,8 +785,8 @@ $viewTitle = ['disk'=>'Мой диск','recent'=>'Последние','archives
 <div class="hc-drop-overlay" id="hcDropOverlay"><div><span><i class="fa-solid fa-cloud-arrow-up"></i></span><b>Отпустите файлы</b><p>Они будут добавлены в облако</p></div></div>
 <div class="hc-mobile-backdrop" id="hcMobileBackdrop"></div>
 
-<dialog class="hc-dialog hc-small-dialog" id="createDialog">
-  <div class="hc-dialog-head"><div><span>Создать</span><b>Что добавить в облако?</b></div><button type="button" data-close-dialog><i class="fa-solid fa-xmark"></i></button></div>
+<dialog data-modal-lock="true" class="hc-dialog hc-small-dialog" id="createDialog">
+  <div class="hc-dialog-head"><div><span>Создать</span><b>Что добавить в облако?</b></div><button type="button" class="hc-modal-close" data-close-dialog aria-label="Закрыть" title="Закрыть"><i class="fa-solid fa-xmark"></i></button></div>
   <div class="hc-dialog-body">
     <div class="hc-create-grid">
       <button type="button" data-open-dialog="uploadDialog"><span><i class="fa-solid fa-cloud-arrow-up"></i></span><b>Загрузить файлы</b><small>С компьютера или Drag & Drop</small></button>
@@ -786,29 +795,29 @@ $viewTitle = ['disk'=>'Мой диск','recent'=>'Последние','archives
   </div>
 </dialog>
 
-<dialog class="hc-dialog" id="uploadDialog">
+<dialog data-modal-lock="true" class="hc-dialog" id="uploadDialog">
   <form method="post" enctype="multipart/form-data" id="hcUploadForm">
     <input type="hidden" name="action" value="upload"><?= hc_csrf_field() ?><input type="hidden" name="path" value="<?= e($rel) ?>">
-    <div class="hc-dialog-head"><div><span>Загрузка</span><b>Добавить файлы в облако</b></div><button type="button" data-close-dialog><i class="fa-solid fa-xmark"></i></button></div>
+    <div class="hc-dialog-head"><div><span>Загрузка</span><b>Добавить файлы в облако</b></div><button type="button" class="hc-modal-close" data-close-dialog aria-label="Закрыть" title="Закрыть"><i class="fa-solid fa-xmark"></i></button></div>
     <div class="hc-dialog-body">
       <label class="hc-field"><span>Куда загрузить</span><select name="upload_target" id="hcUploadTarget"><option value=""<?= $rel===''?' selected':'' ?>>☁ Корень облака</option><?php foreach($folderTree as $folder): $fpath=(string)$folder['path']; ?><option value="<?= e($fpath) ?>"<?= $fpath===$rel?' selected':'' ?>><?= e(str_repeat('— ',min((int)$folder['depth']+1,10)).$folder['name'].($fpath===$rel?' · текущая':'')) ?></option><?php endforeach; ?></select></label>
       <label class="hc-upload-zone" id="hcUploadZone"><input type="file" id="hcFilesInput" name="files[]" multiple hidden><span><i class="fa-solid fa-cloud-arrow-up"></i></span><b>Перетащите файлы сюда</b><p>или нажмите, чтобы выбрать с компьютера</p></label>
       <div class="hc-upload-queue" id="hcUploadQueue" hidden><div class="hc-upload-queue-head"><b id="hcQueueCount"></b><span id="hcQueueSize"></span></div><div id="hcQueueFiles"></div></div>
     </div>
-    <div class="hc-dialog-foot"><button type="button" class="hc-btn ghost" data-close-dialog>Отмена</button><button type="submit" class="hc-btn primary" id="hcUploadSubmit" disabled><i class="fa-solid fa-cloud-arrow-up"></i>Загрузить</button></div>
+    <div class="hc-dialog-foot"><span class="hc-modal-hint"><i class="fa-solid fa-lock"></i> Закрытие только по крестику</span><button type="submit" class="hc-btn primary" id="hcUploadSubmit" disabled><i class="fa-solid fa-cloud-arrow-up"></i>Загрузить</button></div>
   </form>
 </dialog>
 
-<dialog class="hc-dialog hc-small-dialog" id="folderDialog">
-  <form method="post"><input type="hidden" name="action" value="mkdir"><?= hc_csrf_field() ?><input type="hidden" name="path" value="<?= e($rel) ?>"><div class="hc-dialog-head"><div><span>Новая папка</span><b>Создать в <?= e($rel!==''?'/'.$rel:'корне облака') ?></b></div><button type="button" data-close-dialog><i class="fa-solid fa-xmark"></i></button></div><div class="hc-dialog-body"><label class="hc-field"><span>Название</span><input name="name" maxlength="180" placeholder="Например: Документы" autofocus required></label></div><div class="hc-dialog-foot"><button type="button" class="hc-btn ghost" data-close-dialog>Отмена</button><button class="hc-btn primary">Создать</button></div></form>
+<dialog data-modal-lock="true" class="hc-dialog hc-small-dialog" id="folderDialog">
+  <form method="post"><input type="hidden" name="action" value="mkdir"><?= hc_csrf_field() ?><input type="hidden" name="path" value="<?= e($rel) ?>"><div class="hc-dialog-head"><div><span>Новая папка</span><b>Создать в <?= e($rel!==''?'/'.$rel:'корне облака') ?></b></div><button type="button" class="hc-modal-close" data-close-dialog aria-label="Закрыть" title="Закрыть"><i class="fa-solid fa-xmark"></i></button></div><div class="hc-dialog-body"><label class="hc-field"><span>Название</span><input name="name" maxlength="180" placeholder="Например: Документы" autofocus required></label></div><div class="hc-dialog-foot"><span class="hc-modal-hint"><i class="fa-solid fa-lock"></i> Закрытие только по крестику</span><button class="hc-btn primary">Создать</button></div></form>
 </dialog>
 
-<dialog class="hc-dialog hc-small-dialog" id="renameDialog">
-  <form method="post"><input type="hidden" name="action" value="rename"><?= hc_csrf_field() ?><input type="hidden" name="path" value="<?= e($rel) ?>"><input type="hidden" name="target" id="hcRenameTarget"><div class="hc-dialog-head"><div><span>Переименование</span><b>Новое имя</b></div><button type="button" data-close-dialog><i class="fa-solid fa-xmark"></i></button></div><div class="hc-dialog-body"><label class="hc-field"><span>Имя</span><input name="new_name" id="hcRenameName" maxlength="180" required></label></div><div class="hc-dialog-foot"><button type="button" class="hc-btn ghost" data-close-dialog>Отмена</button><button class="hc-btn primary">Сохранить</button></div></form>
+<dialog data-modal-lock="true" class="hc-dialog hc-small-dialog" id="renameDialog">
+  <form method="post"><input type="hidden" name="action" value="rename"><?= hc_csrf_field() ?><input type="hidden" name="path" value="<?= e($rel) ?>"><input type="hidden" name="target" id="hcRenameTarget"><div class="hc-dialog-head"><div><span>Переименование</span><b>Новое имя</b></div><button type="button" class="hc-modal-close" data-close-dialog aria-label="Закрыть" title="Закрыть"><i class="fa-solid fa-xmark"></i></button></div><div class="hc-dialog-body"><label class="hc-field"><span>Имя</span><input name="new_name" id="hcRenameName" maxlength="180" required></label></div><div class="hc-dialog-foot"><span class="hc-modal-hint"><i class="fa-solid fa-lock"></i> Закрытие только по крестику</span><button class="hc-btn primary">Сохранить</button></div></form>
 </dialog>
 
-<dialog class="hc-dialog hc-share-dialog" id="shareDialog">
-  <div class="hc-dialog-head hc-share-head"><div><span>Доступ к файлу</span><b id="hcShareName">Файл</b></div><button type="button" data-close-dialog><i class="fa-solid fa-xmark"></i></button></div>
+<dialog data-modal-lock="true" class="hc-dialog hc-share-dialog" id="shareDialog">
+  <div class="hc-dialog-head hc-share-head"><div><span>Доступ к файлу</span><b id="hcShareName">Файл</b></div><button type="button" class="hc-modal-close" data-close-dialog aria-label="Закрыть" title="Закрыть"><i class="fa-solid fa-xmark"></i></button></div>
   <div class="hc-dialog-body">
     <div class="hc-share-state" id="hcSharePrivate"><span class="hc-share-state-icon private"><i class="fa-solid fa-lock"></i></span><div><b>Приватный файл</b><p>Сейчас файл доступен только после входа в HYPER-HOST. Это стандартный режим для всех новых файлов.</p></div></div>
     <div class="hc-share-state" id="hcSharePublic" hidden><span class="hc-share-state-icon public"><i class="fa-solid fa-link"></i></span><div><b>Доступ по ссылке включён</b><p>Любой человек с этой ссылкой сможет скачать только этот файл. Остальное облако останется закрытым.</p></div></div>
@@ -839,6 +848,7 @@ $viewTitle = ['disk'=>'Мой диск','recent'=>'Последние','archives
 </div>
 <?php endif; ?>
 
-<script src="/cloud/cloud.js?v=97" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous" defer></script>
+<script src="/cloud/cloud.js?v=98" defer></script>
 </body>
 </html>
