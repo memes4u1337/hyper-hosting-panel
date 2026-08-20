@@ -1,19 +1,8 @@
-HYPER-HOST-CLOUD-v97-PATCH
-
-apply-v1.5-cloud-sharing.sh
-  Installer/updater for HYPER-HOST and HYPER CLOUD v97.
-
+HYPER-HOST-CLOUD-v99-PATCH
+apply-v1.7-cloud-polish.sh
 src/public/cloud/index.php
-  Standalone Cloud UI, private storage, per-file token sharing, download/preview/archive handling.
-
 src/public/cloud/cloud.css
-  Standalone Cloud + public one-file page design.
-
 src/public/cloud/cloud.js
-  Drag & Drop, dialogs, view toggle, search, access dialog, copy public link.
-
-PATCH-v97-PRIVATE-SHARING.md
-  Technical notes and installation commands.
-
+PATCH-v99-POLISH.md
 README-INSTALL.txt
-  Short installation guide.
+SHA256SUMS.txt
