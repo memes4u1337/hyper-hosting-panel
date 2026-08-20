@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-/** HYPER CLOUD v108 hardened standalone bootstrap. */
+/** HYPER CLOUD v109 hardened standalone bootstrap. */
 ini_set('session.use_strict_mode', '1');
 ini_set('session.use_only_cookies', '1');
 session_name('HYPERCLOUDSESSID');
@@ -197,11 +197,11 @@ function require_auth(): array
 {
     $u=current_user(); if(!$u) redirect('/?auth=login'); return $u;
 }
-function hc_login(string $username,string $password,string $totp=''): array
+function hc_login(string $username,string $password): array
 {
     $username=trim($username);if($username===''||$password==='')throw new RuntimeException('Введите логин и пароль');
     hc_auth_guard($username);
-    $panel=hc_panel_auth_helper(['action'=>'login','username'=>$username,'password'=>$password,'totp'=>$totp,'ip'=>(string)($_SERVER['REMOTE_ADDR']??'')]);
+    $panel=hc_panel_auth_helper(['action'=>'login','username'=>$username,'password'=>$password,'ip'=>(string)($_SERVER['REMOTE_ADDR']??'')]);
     if(!empty($panel['ok'])){
         $panelUser=['id'=>(int)($panel['id']??0),'username'=>(string)($panel['username']??$username)];
         $u=hc_upsert_panel_cloud_user($panelUser);$_SESSION['hc_user_id']=(int)$u['id'];session_regenerate_id(true);$_SESSION['hc_started_at']=time();$_SESSION['hc_last_seen']=time();hc_ensure_user_root($u);hc_auth_record($username,true);add_event('auth','Вход администратора');return $u;

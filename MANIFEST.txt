@@ -1,16 +1,15 @@
-MANIFEST.txt
-PATCH-v108-RUNTIME-PERMISSIONS.md
+HYPER CLOUD v109
+PATCH-v109-RAR-PREVIEW-AUTH.md
 README-INSTALL.txt
-SHA256SUMS.txt
-apply-v2.6-cloud-runtime-repair.sh
+apply-v2.7-cloud-rar-preview-auth.sh
 scripts/hyper-cloud-nginx-fragment.sh
 scripts/hyper-cloud-panel-auth
 src/cloud/app/bootstrap.php
 src/cloud/app/filelib.php
+src/cloud/public/index.php
+src/cloud/public/editor.php
+src/cloud/public/site.php
+src/cloud/public/site-resource.php
 src/cloud/public/api/upload.php
 src/cloud/public/cloud.css
 src/cloud/public/cloud.js
-src/cloud/public/editor.php
-src/cloud/public/index.php
-src/cloud/public/site-resource.php
-src/cloud/public/site.php

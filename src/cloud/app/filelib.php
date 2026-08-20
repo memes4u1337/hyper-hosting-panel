@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-/** HYPER CLOUD v108 — isolated file/editor/preview helpers. */
+/** HYPER CLOUD v109 — archive/editor/site helpers. */
 
 function hcfl_space(?string $space): string { return $space === 'shared' ? 'shared' : 'private'; }
 function hcfl_clean_rel(string $value): string
@@ -70,9 +70,23 @@ function hcfl_capture(array $argv,int $limit=0,?string $cwd=null): array
     $out=$limit>0?stream_get_contents($pipes[1],$limit+1):stream_get_contents($pipes[1]);fclose($pipes[1]);$err=stream_get_contents($pipes[2]);fclose($pipes[2]);$code=proc_close($p);
     return ['ok'=>$code===0,'data'=>is_string($out)?$out:'','error'=>trim((string)$err),'code'=>$code];
 }
+function hcfl_lower(string $s): string { return function_exists('mb_strtolower') ? mb_strtolower($s,'UTF-8') : strtolower($s); }
+function hcfl_unrar_bin(): string
+{
+    foreach(['/usr/bin/unrar','/usr/bin/unrar-nonfree','/usr/bin/unrar-free'] as $bin) if(is_executable($bin)) return $bin;
+    return '';
+}
+function hcfl_rar_bin(): string { return is_executable('/usr/bin/rar') ? '/usr/bin/rar' : ''; }
 function hcfl_archive_entries(string $archive,int $limit=0): array
 {
     $rows=[];$lower=strtolower($archive);
+    if(str_ends_with($lower,'.rar')){
+        $unrar=hcfl_unrar_bin();
+        if($unrar!==''){
+            $r=hcfl_capture([$unrar,'lb','-c-','-p-',$archive]);
+            if($r['ok']){foreach(preg_split('/\R/',trim((string)$r['data']))?:[] as $name){if($name==='')continue;$rows[]=['name'=>$name,'size'=>0,'modified'=>'—'];if($limit>0&&count($rows)>=$limit)break;}if($rows)return ['ok'=>true,'entries'=>$rows,'truncated'=>$limit>0&&count($rows)>=$limit];}
+        }
+    }
     if(str_ends_with($lower,'.zip') && class_exists('ZipArchive')){
         $z=new ZipArchive();if($z->open($archive)===true){for($i=0;$i<$z->numFiles;$i++){if($limit>0&&count($rows)>=$limit)break;$s=$z->statIndex($i);if(!is_array($s))continue;$rows[]=['name'=>(string)($s['name']??''),'size'=>(int)($s['size']??0),'modified'=>isset($s['mtime'])?date('d.m.Y H:i',(int)$s['mtime']):'—'];}$z->close();return ['ok'=>true,'entries'=>$rows,'truncated'=>$limit>0&&count($rows)>=$limit];}
     }
@@ -91,23 +105,47 @@ function hcfl_archive_entries(string $archive,int $limit=0): array
 }
 function hcfl_archive_lookup(string $archive,string $entry): array
 {
-    $canonical=hcfl_entry_clean($entry);$lower=strtolower($archive);
-    if(str_ends_with($lower,'.zip')&&class_exists('ZipArchive')){$z=new ZipArchive();if($z->open($archive)===true){for($i=0;$i<$z->numFiles;$i++){$s=$z->statIndex($i);if(!is_array($s))continue;$raw=(string)($s['name']??'');if($raw===''||str_ends_with($raw,'/'))continue;try{$c=hcfl_entry_clean($raw);}catch(Throwable){continue;}if($c===$canonical){$ret=['canonical'=>$canonical,'actual'=>$raw,'size'=>(int)($s['size']??0),'index'=>$i];$z->close();return $ret;}}$z->close();}}
-    $list=hcfl_archive_entries($archive,0);foreach($list['entries']??[] as $row){$raw=(string)($row['name']??'');if($raw===''||str_ends_with($raw,'/'))continue;try{$c=hcfl_entry_clean($raw);}catch(Throwable){continue;}if($c===$canonical)return ['canonical'=>$canonical,'actual'=>$raw,'size'=>(int)($row['size']??0),'index'=>null];}
+    $canonical=hcfl_entry_clean($entry);$lower=strtolower($archive);$fallback=null;$wantLower=hcfl_lower($canonical);
+    if(str_ends_with($lower,'.zip')&&class_exists('ZipArchive')){
+        $z=new ZipArchive();if($z->open($archive)===true){
+            for($i=0;$i<$z->numFiles;$i++){$s=$z->statIndex($i);if(!is_array($s))continue;$raw=(string)($s['name']??'');if($raw===''||str_ends_with($raw,'/'))continue;try{$c=hcfl_entry_clean($raw);}catch(Throwable){continue;}
+                if($c===$canonical){$ret=['canonical'=>$canonical,'actual'=>$raw,'size'=>(int)($s['size']??0),'index'=>$i];$z->close();return $ret;}
+                if(hcfl_lower($c)===$wantLower){if($fallback!==null){$fallback=false;}elseif($fallback!==false)$fallback=['canonical'=>$c,'actual'=>$raw,'size'=>(int)($s['size']??0),'index'=>$i];}
+            }
+            $z->close();if(is_array($fallback))return $fallback;$fallback=null;
+        }
+    }
+    $list=hcfl_archive_entries($archive,0);
+    foreach($list['entries']??[] as $row){$raw=(string)($row['name']??'');if($raw===''||str_ends_with($raw,'/'))continue;try{$c=hcfl_entry_clean($raw);}catch(Throwable){continue;}
+        if($c===$canonical)return ['canonical'=>$canonical,'actual'=>$raw,'size'=>(int)($row['size']??0),'index'=>null];
+        if(hcfl_lower($c)===$wantLower){if($fallback!==null){$fallback=false;}elseif($fallback!==false)$fallback=['canonical'=>$c,'actual'=>$raw,'size'=>(int)($row['size']??0),'index'=>null];}
+    }
+    if(is_array($fallback))return $fallback;
     throw new RuntimeException('Файл внутри архива не найден');
 }
 function hcfl_archive_read_bytes(string $archive,string $entry,int $limit=0): array
 {
     $f=hcfl_archive_lookup($archive,$entry);$actual=(string)$f['actual'];$canonical=(string)$f['canonical'];$lower=strtolower($archive);
-    if(str_ends_with($lower,'.zip')&&class_exists('ZipArchive')){$z=new ZipArchive();if($z->open($archive)===true){$stream=$z->getStream($actual);if(is_resource($stream)){$data=$limit>0?stream_get_contents($stream,$limit+1):stream_get_contents($stream);fclose($stream);$z->close();if(!is_string($data))$data='';if($limit>0&&strlen($data)>$limit)throw new RuntimeException('Файл слишком большой для этой операции');return ['content'=>$data,'entry'=>$canonical,'actual'=>$actual,'size'=>strlen($data)];}$z->close();}}
-    $tries=[];if(str_ends_with($lower,'.zip')&&is_executable('/usr/bin/unzip'))$tries[]=['/usr/bin/unzip','-p',$archive,$actual];
-    if(is_executable('/usr/bin/7z'))$tries[]=['/usr/bin/7z','x','-so','-bd','-y',$archive,$actual];if(is_executable('/usr/bin/7zz'))$tries[]=['/usr/bin/7zz','x','-so','-bd','-y',$archive,$actual];if(is_executable('/usr/bin/bsdtar'))$tries[]=['/usr/bin/bsdtar','-xOf',$archive,$actual];
-    foreach($tries as $argv){$r=hcfl_capture($argv,$limit);if($r['ok']){$data=(string)$r['data'];if($limit>0&&strlen($data)>$limit)throw new RuntimeException('Файл слишком большой для этой операции');return ['content'=>$data,'entry'=>$canonical,'actual'=>$actual,'size'=>strlen($data)];}}
+    if(str_ends_with($lower,'.zip')&&class_exists('ZipArchive')){
+        $z=new ZipArchive();if($z->open($archive)===true){$stream=$z->getStream($actual);if(is_resource($stream)){$data=$limit>0?stream_get_contents($stream,$limit+1):stream_get_contents($stream);fclose($stream);$z->close();if(!is_string($data))$data='';if($limit>0&&strlen($data)>$limit)throw new RuntimeException('Файл слишком большой для этой операции');return ['content'=>$data,'entry'=>$canonical,'actual'=>$actual,'size'=>strlen($data)];}$z->close();}
+    }
+    $tries=[];
+    if(str_ends_with($lower,'.rar')){
+        $unrar=hcfl_unrar_bin();if($unrar!=='')$tries[]=[[$unrar,'p','-inul','-c-','-p-',$archive,$actual],'unrar'];
+        $rar=hcfl_rar_bin();if($rar!=='')$tries[]=[[$rar,'p','-inul','-c-','-p-',$archive,$actual],'rar'];
+    }
+    if(str_ends_with($lower,'.zip')&&is_executable('/usr/bin/unzip'))$tries[]=[[ '/usr/bin/unzip','-p',$archive,$actual],'unzip'];
+    if(is_executable('/usr/bin/7z'))$tries[]=[[ '/usr/bin/7z','x','-so','-bd','-y','-spd',$archive,$actual],'7z'];
+    if(is_executable('/usr/bin/7zz'))$tries[]=[[ '/usr/bin/7zz','x','-so','-bd','-y','-spd',$archive,$actual],'7zz'];
+    if(is_executable('/usr/bin/bsdtar'))$tries[]=[[ '/usr/bin/bsdtar','-xOf',$archive,$actual],'bsdtar'];
+    $errors=[];
+    foreach($tries as [$argv,$label]){$r=hcfl_capture($argv,$limit);if($r['ok']){$data=(string)$r['data'];if($limit>0&&strlen($data)>$limit)throw new RuntimeException('Файл слишком большой для этой операции');return ['content'=>$data,'entry'=>$canonical,'actual'=>$actual,'size'=>strlen($data),'reader'=>$label];}$errors[]=$label.':'.trim((string)$r['error']);}
+    error_log('HYPER CLOUD archive read failed for '.basename($archive).' / '.$canonical.' :: '.implode(' | ',$errors));
     throw new RuntimeException('Не удалось прочитать файл из архива');
 }
 function hcfl_archive_writer(string $archive): string
 {
-    $n=strtolower($archive);if(str_ends_with($n,'.zip')&&class_exists('ZipArchive'))return 'zip';if((str_ends_with($n,'.zip')||str_ends_with($n,'.7z'))&&is_executable('/usr/bin/7z'))return '7z';if((str_ends_with($n,'.zip')||str_ends_with($n,'.7z'))&&is_executable('/usr/bin/7zz'))return '7zz';if(str_ends_with($n,'.rar')&&is_executable('/usr/bin/rar'))return 'rar';return '';
+    $n=strtolower($archive);if(str_ends_with($n,'.zip')&&class_exists('ZipArchive'))return 'zip';if((str_ends_with($n,'.zip')||str_ends_with($n,'.7z'))&&is_executable('/usr/bin/7z'))return '7z';if((str_ends_with($n,'.zip')||str_ends_with($n,'.7z'))&&is_executable('/usr/bin/7zz'))return '7zz';if(str_ends_with($n,'.rar')&&hcfl_rar_bin()!=='')return 'rar';return '';
 }
 function hcfl_rrmdir(string $dir): void { if(!is_dir($dir)){@unlink($dir);return;}foreach(scandir($dir)?:[] as $n){if($n==='.'||$n==='..')continue;$p=$dir.'/'.$n;is_dir($p)&&!is_link($p)?hcfl_rrmdir($p):@unlink($p);}@rmdir($dir); }
 function hcfl_archive_backup(string $archive): string
@@ -123,7 +161,7 @@ function hcfl_archive_write(string $archive,string $entry,string $content): void
     $entry=hcfl_entry_clean($entry);if(!hcfl_editable_name($entry)||str_contains($content,"\0"))throw new RuntimeException('Этот файл нельзя сохранить');$found=hcfl_archive_lookup($archive,$entry);$actual=(string)$found['actual'];$writer=hcfl_archive_writer($archive);if($writer==='')throw new RuntimeException('На сервере нет архиватора для записи этого формата');$backup=hcfl_archive_backup($archive);
     try{
         if($writer==='zip'){$z=new ZipArchive();if($z->open($archive)!==true)throw new RuntimeException('Не удалось открыть ZIP');$idx=$z->locateName($actual,0);if($idx===false){$z->close();throw new RuntimeException('Файл внутри ZIP не найден');}$tmp=tempnam((string)app_config('cloud_meta_dir','/var/lib/hyper-host-cloud'),'hc-edit-');if($tmp===false||file_put_contents($tmp,$content,LOCK_EX)===false){if($tmp)@unlink($tmp);$z->close();throw new RuntimeException('Не удалось подготовить изменения');}if(!$z->deleteIndex($idx)||!$z->addFile($tmp,$actual)){@unlink($tmp);$z->close();throw new RuntimeException('Не удалось обновить ZIP');}if(!$z->close()){@unlink($tmp);throw new RuntimeException('Не удалось сохранить ZIP');}@unlink($tmp);
-        } else {$tmp=rtrim((string)app_config('cloud_meta_dir','/var/lib/hyper-host-cloud'),'/').'/tmp-edit-'.bin2hex(random_bytes(8));$fs=ltrim(str_replace('\\','/',$actual),'/');$target=$tmp.'/'.$fs;if(!@mkdir(dirname($target),0700,true)&&!is_dir(dirname($target)))throw new RuntimeException('Не удалось подготовить редактор');if(file_put_contents($target,$content,LOCK_EX)===false)throw new RuntimeException('Не удалось подготовить изменения');if($writer==='7z'||$writer==='7zz'){$bin=$writer==='7z'?'/usr/bin/7z':'/usr/bin/7zz';$r=hcfl_capture([$bin,'u','-y','-bd',$archive,$fs],0,$tmp);}else{$r=hcfl_capture(['/usr/bin/rar','u','-idq',$archive,$fs],0,$tmp);}hcfl_rrmdir($tmp);if(!$r['ok'])throw new RuntimeException('Архиватор не смог сохранить изменения');}
+        } else {$tmp=rtrim((string)app_config('cloud_meta_dir','/var/lib/hyper-host-cloud'),'/').'/tmp-edit-'.bin2hex(random_bytes(8));$fs=ltrim(str_replace('\\','/',$actual),'/');$target=$tmp.'/'.$fs;if(!@mkdir(dirname($target),0700,true)&&!is_dir(dirname($target)))throw new RuntimeException('Не удалось подготовить редактор');if(file_put_contents($target,$content,LOCK_EX)===false)throw new RuntimeException('Не удалось подготовить изменения');if($writer==='7z'||$writer==='7zz'){$bin=$writer==='7z'?'/usr/bin/7z':'/usr/bin/7zz';$r=hcfl_capture([$bin,'u','-y','-bd',$archive,$fs],0,$tmp);}else{$r=hcfl_capture([hcfl_rar_bin(),'u','-idq','-p-',$archive,$fs],0,$tmp);}hcfl_rrmdir($tmp);if(!$r['ok'])throw new RuntimeException('Архиватор не смог сохранить изменения');}
     }catch(Throwable $e){if($backup!==''&&is_file($backup))@copy($backup,$archive);throw $e;}
     @chmod($archive,0660);
 }
@@ -135,6 +173,17 @@ function hcfl_read_text(string $path,int $max=67108864): string
 function hcfl_write_text(string $path,string $content): void
 {
     if(!is_file($path)||is_link($path)||!hcfl_editable_name(basename($path))||str_contains($content,"\0"))throw new RuntimeException('Файл нельзя сохранить');$tmp=dirname($path).'/.hc-edit-'.bin2hex(random_bytes(8));if(file_put_contents($tmp,$content,LOCK_EX)===false)throw new RuntimeException('Не удалось записать изменения');$mode=@fileperms($path);@chmod($tmp,is_int($mode)?($mode&0777):0660);if(!@rename($tmp,$path)){@unlink($tmp);throw new RuntimeException('Не удалось заменить файл');}
+}
+function hcfl_resolve_casefold(array $user,string $space,string $rel): array
+{
+    try{return hcfl_resolve($user,$space,$rel,true);}catch(Throwable $first){}
+    $root=hcfl_root($user,$space);$rootReal=realpath($root)?:$root;$clean=hcfl_clean_rel($rel);$cur=$root;$resolved=[];
+    foreach($clean===''?[]:explode('/',$clean) as $part){
+        if(!is_dir($cur))throw new RuntimeException('Ресурс не найден');$match=null;$want=hcfl_lower($part);
+        foreach(scandir($cur)?:[] as $name){if($name==='.'||$name==='..')continue;if(hcfl_lower($name)===$want){if($match!==null&&$match!==$name)throw new RuntimeException('Неоднозначное имя ресурса');$match=$name;}}
+        if($match===null)throw new RuntimeException('Ресурс не найден');$cur.='/'.$match;$resolved[]=$match;if(is_link($cur))throw new RuntimeException('Символические ссылки запрещены');
+    }
+    $real=realpath($cur);if($real===false||($real!==$rootReal&&!str_starts_with($real,$rootReal.DIRECTORY_SEPARATOR)))throw new RuntimeException('Недопустимый путь');return [$root,implode('/',$resolved),$real];
 }
 function hcfl_mime_name(string $name): string
 {
@@ -168,7 +217,7 @@ function hcfl_preview_resolve_url(string $baseRel,string $url,string $siteRoot='
     $path=parse_url($url,PHP_URL_PATH);if(!is_string($path)||$path==='')return null;$path=rawurldecode($path);$root=hcfl_clean_rel($siteRoot);$base=hcfl_clean_rel($baseRel);
     $parts=str_starts_with($path,'/')?($root!==''?explode('/',$root):[]):($base!==''?explode('/',$base):[]);$min=$root!==''?count(explode('/',$root)):0;
     foreach(explode('/',str_replace('\\','/',$path)) as $p){if($p===''||$p==='.')continue;if($p==='..'){if(count($parts)>$min)array_pop($parts);else return null;continue;}if(preg_match('/[\x00-\x1F\x7F]/u',$p))return null;$parts[]=$p;}
-    $full=implode('/',$parts);if($root!==''&&$full!==$root&&!str_starts_with($full,$root.'/'))return null;return $root!==''?(string)substr($full,strlen($root)+($full===$root?0:1)):$full;
+    $full=implode('/',$parts);if($root!==''&&$full!==$root&&!str_starts_with($full,$root.'/'))return null;if($full===$root)return 'index.html';return $root!==''?(string)substr($full,strlen($root)+1):($full!==''?$full:'index.html');
 }
 function hcfl_preview_url(string $token,string $resource): string { return '/site-resource.php?t='.rawurlencode($token).'&r='.rawurlencode($resource); }
 function hcfl_rewrite_css(string $css,string $currentRel,string $siteRoot,string $token): string

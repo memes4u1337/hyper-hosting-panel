@@ -1,36 +1,20 @@
-HYPER CLOUD v108
-================
+HYPER CLOUD v109
 
-Исправление для прерванной установки v107:
-Permission denied на /var/www/hyper-host-cloud-app/app/bootstrap.php.
+Установка из корня репозитория:
 
-v108 очищает старые ACL только внутри Cloud-приложения, задаёт точные права
-для runtime-пользователя hypercloud и отдельно проверяет доступ к bootstrap.php
-и /etc/hyper-host/cloud.php ДО инициализации Cloud DB.
+  chmod +x apply-v2.7-cloud-rar-preview-auth.sh
+  sudo ./apply-v2.7-cloud-rar-preview-auth.sh /root/hyper-hosting-panel
 
-1. Добавьте содержимое GitHub Overlay в корень main-ветки HYPER-HOST.
+Патч НЕ удаляет:
+- /var/lib/hyper-host-cloud/cloud.sqlite
+- /var/www/hyper-host-cloud/users/
+- /var/www/hyper-host-cloud/shared/
+- публичные ссылки
 
-2. На сервере выполните:
+v109 устанавливает unrar/rar из Ubuntu multiverse и перед завершением реально
+создаёт тестовый RAR, открывает index.html в editor.php, сохраняет изменение,
+запускает HTML-preview и проверяет style.css через site-resource.php.
 
-cd /root && \
-rm -rf /root/hyper-hosting-panel && \
-git clone --depth 1 --branch main \
-https://github.com/memes4u1337/hyper-hosting-panel.git \
-/root/hyper-hosting-panel && \
-cd /root/hyper-hosting-panel && \
-chmod +x apply-v2.6-cloud-runtime-repair.sh && \
-sudo ./apply-v2.6-cloud-runtime-repair.sh /root/hyper-hosting-panel
-
-Установка НЕ удаляет существующие Cloud-аккаунты, приватные файлы, shared-папку
-и public shares. Перед изменениями создаётся backup в
-/opt/hyper-host/backups/cloud-v108-<date>.
-
-Успешный финал обязан содержать:
-CLOUD_RUNTIME_PERMISSIONS_OK
-PANEL_DB_ISOLATED_OK
-CLOUD_CODE_READONLY_OK
-EDITOR_SITE_PROBE_OK
-DOMAIN_OK: HYPER_CLOUD_V108
-
-Если runtime-доступ снова невозможен, installer теперь печатает namei/getfacl для
-точного каталога, а не маскирует проблему сообщением Cloud DB.
+Поле кода подтверждения из Cloud-login удалено. Для panel-linked аккаунта Cloud
+использует логин+пароль панели; настройки 2FA входа в саму HYPER-HOST панель
+этот патч не меняет.

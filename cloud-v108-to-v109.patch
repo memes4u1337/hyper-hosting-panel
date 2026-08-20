@@ -1,0 +1,1389 @@
+diff -ruN /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/MANIFEST.txt /mnt/data/v109build/MANIFEST.txt
+--- /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/MANIFEST.txt	2026-08-20 09:33:07.000000000 +0000
++++ /mnt/data/v109build/MANIFEST.txt	2026-08-20 09:48:41.314782688 +0000
+@@ -1,16 +1,15 @@
+-MANIFEST.txt
+-PATCH-v108-RUNTIME-PERMISSIONS.md
++HYPER CLOUD v109
++PATCH-v109-RAR-PREVIEW-AUTH.md
+ README-INSTALL.txt
+-SHA256SUMS.txt
+-apply-v2.6-cloud-runtime-repair.sh
++apply-v2.7-cloud-rar-preview-auth.sh
+ scripts/hyper-cloud-nginx-fragment.sh
+ scripts/hyper-cloud-panel-auth
+ src/cloud/app/bootstrap.php
+ src/cloud/app/filelib.php
++src/cloud/public/index.php
++src/cloud/public/editor.php
++src/cloud/public/site.php
++src/cloud/public/site-resource.php
+ src/cloud/public/api/upload.php
+ src/cloud/public/cloud.css
+ src/cloud/public/cloud.js
+-src/cloud/public/editor.php
+-src/cloud/public/index.php
+-src/cloud/public/site-resource.php
+-src/cloud/public/site.php
+diff -ruN /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/PATCH-v108-RUNTIME-PERMISSIONS.md /mnt/data/v109build/PATCH-v108-RUNTIME-PERMISSIONS.md
+--- /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/PATCH-v108-RUNTIME-PERMISSIONS.md	2026-08-20 09:32:58.000000000 +0000
++++ /mnt/data/v109build/PATCH-v108-RUNTIME-PERMISSIONS.md	1970-01-01 00:00:00.000000000 +0000
+@@ -1,27 +0,0 @@
+-# HYPER CLOUD v108 — runtime permissions repair
+-
+-## Причина падения v107
+-
+-На конкретной установке пользователь `hypercloud` не мог пройти по одному из
+-родительских каталогов / ACL и прочитать:
+-
+-`/var/www/hyper-host-cloud-app/app/bootstrap.php`
+-
+-Сам файл был установлен, но CLI-проверка под `hypercloud` получила EACCES.
+-
+-## Что исправлено
+-
+-- Сбрасываются только старые ACL внутри `/var/www/hyper-host-cloud-app`.
+-- PHP-файлы остаются `root:hypercloud 0640`: runtime может читать, но не менять.
+-- `app/` остаётся закрытым от посторонних, public-каталог доступен nginx для stat/static.
+-- На `/var/www` для `hypercloud` добавляется только traverse (`--x`), а не чтение списка.
+-- На `/etc/hyper-host` добавляется только traverse, доступ выдаётся только к `cloud.php`.
+-- До DB init выполняются реальные `runuser -u hypercloud -- test -r ...`.
+-- При проблеме выводятся `namei -l` и `getfacl` с конкретным узлом.
+-- DB init и smoke-tests выполняются через `runuser`, без зависимости от общей sudo-policy.
+-- Сохраняются изоляция panel DB, read-only application code, отдельный FPM pool,
+-  editor/site smoke-test и vhost persistence.
+-
+-## Данные
+-
+-Cloud DB, аккаунты, личные файлы, shared и публичные ссылки не сбрасываются.
+diff -ruN /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/PATCH-v109-RAR-PREVIEW-AUTH.md /mnt/data/v109build/PATCH-v109-RAR-PREVIEW-AUTH.md
+--- /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/PATCH-v109-RAR-PREVIEW-AUTH.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/v109build/PATCH-v109-RAR-PREVIEW-AUTH.md	2026-08-20 09:48:41.312692500 +0000
+@@ -0,0 +1,30 @@
++# HYPER CLOUD v109 — RAR / HTML preview / auth repair
++
++Основные изменения:
++
++- Исправлено чтение файлов внутри RAR/RAR5: первичный reader — `unrar`, затем fallback `rar`, `7z/7zz`, `bsdtar`.
++- Installer включает Ubuntu `multiverse` и ставит `unrar` + `rar`, поэтому RAR можно не только читать, но и редактировать/сохранять.
++- Поиск файла внутри архива имеет безопасный case-insensitive fallback для архивов, созданных в Windows.
++- HTML-preview проверяет файл до открытия и запускается в полноэкранном sandbox iframe без лишней панели.
++- `site-resource.php` умеет подтягивать CSS/JS/images/fonts/media из той же папки/архива, поддерживает case-insensitive filesystem lookup и `folder/ -> folder/index.html`.
++- Ошибки resource/archive пишутся в `/var/log/hyper-cloud/php-error.log`, пользователю внутренние пути не раскрываются.
++- Поле «Код подтверждения» удалено из авторизации Cloud. Панельный аккаунт в Cloud проверяется по логину+паролю через изолированный privileged helper. 2FA самой HYPER-HOST панели при входе в панель не меняется.
++- Сохраняются Cloud DB, аккаунты, личные файлы, общая папка и публичные ссылки.
++- Installer выполняет реальные authenticated probes: обычный HTML editor/site/CSS и отдельный RAR editor/save/site/CSS.
++
++Установка:
++
++```bash
++sudo ./apply-v2.7-cloud-rar-preview-auth.sh /root/hyper-hosting-panel
++```
++
++Успешный конец содержит:
++
++```text
++CLOUD_RUNTIME_PERMISSIONS_OK
++PANEL_DB_ISOLATED_OK
++CLOUD_CODE_READONLY_OK
++EDITOR_SITE_PROBE_OK
++RAR_EDITOR_SITE_PROBE_OK
++DOMAIN_OK: HYPER_CLOUD_V109
++```
+diff -ruN /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/README-INSTALL.txt /mnt/data/v109build/README-INSTALL.txt
+--- /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/README-INSTALL.txt	2026-08-20 09:32:58.000000000 +0000
++++ /mnt/data/v109build/README-INSTALL.txt	2026-08-20 09:48:41.313939316 +0000
+@@ -1,36 +1,20 @@
+-HYPER CLOUD v108
+-================
++HYPER CLOUD v109
+ 
+-Исправление для прерванной установки v107:
+-Permission denied на /var/www/hyper-host-cloud-app/app/bootstrap.php.
++Установка из корня репозитория:
+ 
+-v108 очищает старые ACL только внутри Cloud-приложения, задаёт точные права
+-для runtime-пользователя hypercloud и отдельно проверяет доступ к bootstrap.php
+-и /etc/hyper-host/cloud.php ДО инициализации Cloud DB.
++  chmod +x apply-v2.7-cloud-rar-preview-auth.sh
++  sudo ./apply-v2.7-cloud-rar-preview-auth.sh /root/hyper-hosting-panel
+ 
+-1. Добавьте содержимое GitHub Overlay в корень main-ветки HYPER-HOST.
+-
+-2. На сервере выполните:
+-
+-cd /root && \
+-rm -rf /root/hyper-hosting-panel && \
+-git clone --depth 1 --branch main \
+-https://github.com/memes4u1337/hyper-hosting-panel.git \
+-/root/hyper-hosting-panel && \
+-cd /root/hyper-hosting-panel && \
+-chmod +x apply-v2.6-cloud-runtime-repair.sh && \
+-sudo ./apply-v2.6-cloud-runtime-repair.sh /root/hyper-hosting-panel
+-
+-Установка НЕ удаляет существующие Cloud-аккаунты, приватные файлы, shared-папку
+-и public shares. Перед изменениями создаётся backup в
+-/opt/hyper-host/backups/cloud-v108-<date>.
+-
+-Успешный финал обязан содержать:
+-CLOUD_RUNTIME_PERMISSIONS_OK
+-PANEL_DB_ISOLATED_OK
+-CLOUD_CODE_READONLY_OK
+-EDITOR_SITE_PROBE_OK
+-DOMAIN_OK: HYPER_CLOUD_V108
+-
+-Если runtime-доступ снова невозможен, installer теперь печатает namei/getfacl для
+-точного каталога, а не маскирует проблему сообщением Cloud DB.
++Патч НЕ удаляет:
++- /var/lib/hyper-host-cloud/cloud.sqlite
++- /var/www/hyper-host-cloud/users/
++- /var/www/hyper-host-cloud/shared/
++- публичные ссылки
++
++v109 устанавливает unrar/rar из Ubuntu multiverse и перед завершением реально
++создаёт тестовый RAR, открывает index.html в editor.php, сохраняет изменение,
++запускает HTML-preview и проверяет style.css через site-resource.php.
++
++Поле кода подтверждения из Cloud-login удалено. Для panel-linked аккаунта Cloud
++использует логин+пароль панели; настройки 2FA входа в саму HYPER-HOST панель
++этот патч не меняет.
+diff -ruN /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/SHA256SUMS.txt /mnt/data/v109build/SHA256SUMS.txt
+--- /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/SHA256SUMS.txt	2026-08-20 09:33:07.000000000 +0000
++++ /mnt/data/v109build/SHA256SUMS.txt	2026-08-20 09:48:41.317384944 +0000
+@@ -1,15 +1,15 @@
+-412e41a0bda900e253d91050341a1019676ca8e9ec8872fc0dbd5631e9dd45a1  ./MANIFEST.txt
+-1577203d6c1d328fd4e980d5376b07f4629a9548bb7a4340b7f66397acf2d9e9  ./PATCH-v108-RUNTIME-PERMISSIONS.md
+-870395fc941a4d3927ae9f468ba5dfacd54dd7725231c88833baea0f6e88a740  ./README-INSTALL.txt
+-727814dc4bd6c67e5852d11ea75902b44f509a387476139283175e75af522001  ./apply-v2.6-cloud-runtime-repair.sh
+-7c2186a03cefbdf2bba98efa9c56ae4b230dbb424cf1bc8dca87be241ff4e0e7  ./scripts/hyper-cloud-nginx-fragment.sh
+-6ee14e3f00261bdafd0101169d444618c796f0466fa4d5bed518012c19ae289c  ./scripts/hyper-cloud-panel-auth
+-55ad3b50f68490d5b18618a85988bea1326f49d0556fef06678966a54dfe4eb7  ./src/cloud/app/bootstrap.php
+-5d70b77ca849a3e3eb2679184898e9051afe581f39f976b1a952899ce912cd64  ./src/cloud/app/filelib.php
++5d6269c6040bc3447fc5476b7d5d64de7567143663b48abff465177381fdd33d  ./MANIFEST.txt
++8a057cde8b31451403e1a61bfe2c0ca42e26d657fadfd222c6773321d6eba528  ./PATCH-v109-RAR-PREVIEW-AUTH.md
++87e98976d4ea09c9d368eaa7691fda86aa8616d4d0aa5776da43110b89ac53aa  ./README-INSTALL.txt
++7a23814ecc259abab13fb665bfbaaad6b6852926093f12d80f5d850598226bce  ./apply-v2.7-cloud-rar-preview-auth.sh
++31722709f34cbf9e9538220f0e2cd3c612ebac5dc6ba829f138f8bc2d52c11b3  ./scripts/hyper-cloud-nginx-fragment.sh
++1f60545f1f00d2f848389acb12a19bd5388c949a0dc56f9e957e18b9689af221  ./scripts/hyper-cloud-panel-auth
++ad3851f0ae459b61f3ee53f22905726a93105acb284eb80db2ea66864dc0e2d6  ./src/cloud/app/bootstrap.php
++1b5368af81906f64dcdd85dbbdf1d20f2ba736cbbc7c19c41d3a5309362584b0  ./src/cloud/app/filelib.php
+ bd50b9805c26f1a041f25edfa8066b1f3642ed70dccb6b392cb1624746981bc3  ./src/cloud/public/api/upload.php
+-66572c8d89f5b5fe2287cf41bbf4ff3cf10576d505b672693a367c529953ca2c  ./src/cloud/public/cloud.css
++f5cc82707724e8346c729ff5017f74f677e2f8f405dac66c7210c90b847b5596  ./src/cloud/public/cloud.css
+ 91cf0c34195b0e210e328ed56c2b8cb64dc85d07ee0c3a0ceeff901a2967a0ab  ./src/cloud/public/cloud.js
+-7e7c4111a1f91ff88a87fcfa245f3835b4b33eeca3c5e57dd237ea438ba0ccbe  ./src/cloud/public/editor.php
+-5198df1a50783d0049000dbc4e5bf0064c0269f22035890fbbe3712613f1572b  ./src/cloud/public/index.php
+-7b07e71d7154e93d923455cddf41ac7241aafe831aaca25c5360d0f46cbd2fa5  ./src/cloud/public/site-resource.php
+-2006b934e7662b0d2f7a399dfc2a3e28ff70d25badfd2481506ba16bf987ba24  ./src/cloud/public/site.php
++64775f934462afd79bba073c4e8d0a09c46c4cb935a7e9ecce91d2bd900542a5  ./src/cloud/public/editor.php
++24264b2c286b7e54ac3e6fbe195835830f05c414666af287c2fdff89a02f9723  ./src/cloud/public/index.php
++104398f3f5066ea3b426d8c07aea4abc3c7ac0e2d732ef6469c087bed9f1c3b4  ./src/cloud/public/site-resource.php
++be8d854f566d59b1f47328a1c46d5f33122360d1597fc9b41f76d56df19d2a2e  ./src/cloud/public/site.php
+diff -ruN /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/apply-v2.6-cloud-runtime-repair.sh /mnt/data/v109build/apply-v2.6-cloud-runtime-repair.sh
+--- /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/apply-v2.6-cloud-runtime-repair.sh	2026-08-20 09:32:59.000000000 +0000
++++ /mnt/data/v109build/apply-v2.6-cloud-runtime-repair.sh	1970-01-01 00:00:00.000000000 +0000
+@@ -1,294 +0,0 @@
+-#!/usr/bin/env bash
+-set -Eeuo pipefail
+-
+-# HYPER CLOUD v108 — runtime permission repair + editor/site/security hardening.
+-# Usage: sudo ./apply-v2.6-cloud-runtime-repair.sh [/root/hyper-hosting-panel]
+-
+-SRC="${1:-$(pwd)}"
+-CLOUD_DOMAIN="${CLOUD_DOMAIN:-cloud.hyper-host.pw}"
+-PANEL_DOMAIN="${PANEL_DOMAIN:-panel.hyper-host.pw}"
+-APP_ROOT="/var/www/hyper-host-cloud-app"
+-STORAGE_ROOT="/var/www/hyper-host-cloud"
+-META_ROOT="/var/lib/hyper-host-cloud"
+-PANEL_ROOT="/var/www/hyper-host"
+-PANEL_CONFIG="$PANEL_ROOT/app/config.php"
+-CLOUD_CONFIG="/etc/hyper-host/cloud.php"
+-CLOUD_USER="hypercloud"
+-CLOUD_SOCK="/run/php/hypercloud.sock"
+-STAMP="$(date +%Y%m%d-%H%M%S)"
+-BACKUP="/opt/hyper-host/backups/cloud-v108-${STAMP}"
+-
+-log(){ printf '\n\033[1;36m[HYPER CLOUD]\033[0m %s\n' "$*"; }
+-warn(){ printf '\n\033[1;33m[WARN]\033[0m %s\n' "$*" >&2; }
+-die(){ printf '\n\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
+-
+-[[ ${EUID} -eq 0 ]] || die "Запустите от root"
+-for f in src/cloud/app/bootstrap.php src/cloud/app/filelib.php src/cloud/public/index.php src/cloud/public/editor.php src/cloud/public/site.php src/cloud/public/site-resource.php src/cloud/public/cloud.css src/cloud/public/cloud.js src/cloud/public/api/upload.php scripts/hyper-cloud-nginx-fragment.sh scripts/hyper-cloud-panel-auth; do
+-  [[ -f "$SRC/$f" ]] || die "Нет файла $SRC/$f"
+-done
+-
+-log "Backup конфигурации: $BACKUP"
+-mkdir -p "$BACKUP"
+-[[ -d "$APP_ROOT" ]] && cp -a "$APP_ROOT" "$BACKUP/cloud-app" || true
+-[[ -f "$CLOUD_CONFIG" ]] && cp -a "$CLOUD_CONFIG" "$BACKUP/cloud.php" || true
+-[[ -f /etc/nginx/hyper-host-managed/15-cloud-app.conf ]] && cp -a /etc/nginx/hyper-host-managed/15-cloud-app.conf "$BACKUP/nginx-cloud.conf" || true
+-[[ -f "$PANEL_ROOT/public/index.php" ]] && cp -a "$PANEL_ROOT/public/index.php" "$BACKUP/panel-index.php" || true
+-
+-log "Проверяю PHP и необходимые модули"
+-export DEBIAN_FRONTEND=noninteractive
+-apt-get update -y >/dev/null
+-apt-get install -y nginx sqlite3 zip unzip p7zip-full libarchive-tools file curl ca-certificates sudo acl >/dev/null
+-FPM_VER="$(find /etc/php -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -V | tail -n1 || true)"
+-[[ -n "$FPM_VER" ]] || die "Не найдена версия PHP-FPM"
+-apt-get install -y "php${FPM_VER}-fpm" "php${FPM_VER}-sqlite3" "php${FPM_VER}-zip" "php${FPM_VER}-mbstring" "php${FPM_VER}-xml" >/dev/null
+-log "Cloud PHP-FPM: ${FPM_VER}, отдельный socket $CLOUD_SOCK"
+-
+-if ! id "$CLOUD_USER" >/dev/null 2>&1; then
+-  useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$CLOUD_USER"
+-fi
+-
+-log "Устанавливаю Cloud-приложение и отдельные editor/site endpoints"
+-mkdir -p "$APP_ROOT/app" "$APP_ROOT/public/api" "$STORAGE_ROOT/users" "$STORAGE_ROOT/shared" "$META_ROOT/uploads" "$META_ROOT/sessions" "$META_ROOT/tmp" /etc/hyper-host
+-install -o root -g "$CLOUD_USER" -m 0640 "$SRC/src/cloud/app/bootstrap.php" "$APP_ROOT/app/bootstrap.php"
+-install -o root -g "$CLOUD_USER" -m 0640 "$SRC/src/cloud/app/filelib.php" "$APP_ROOT/app/filelib.php"
+-for f in index.php editor.php site.php site-resource.php; do install -o root -g "$CLOUD_USER" -m 0640 "$SRC/src/cloud/public/$f" "$APP_ROOT/public/$f"; done
+-install -o root -g root -m 0644 "$SRC/src/cloud/public/cloud.css" "$APP_ROOT/public/cloud.css"
+-install -o root -g root -m 0644 "$SRC/src/cloud/public/cloud.js" "$APP_ROOT/public/cloud.js"
+-install -o root -g "$CLOUD_USER" -m 0640 "$SRC/src/cloud/public/api/upload.php" "$APP_ROOT/public/api/upload.php"
+-# Remove stale ACLs left by interrupted v107 installs, then apply deterministic
+-# read/traverse permissions for the dedicated runtime account.
+-setfacl -Rb "$APP_ROOT" 2>/dev/null || true
+-chown root:"$CLOUD_USER" "$APP_ROOT" "$APP_ROOT/app" "$APP_ROOT/public" "$APP_ROOT/public/api"
+-chmod 0755 "$APP_ROOT" "$APP_ROOT/public" "$APP_ROOT/public/api"
+-chmod 0750 "$APP_ROOT/app"
+-find "$APP_ROOT/app" -type f -exec chown root:"$CLOUD_USER" {} + -exec chmod 0640 {} +
+-find "$APP_ROOT/public" -type f -name '*.php' -exec chown root:"$CLOUD_USER" {} + -exec chmod 0640 {} +
+-find "$APP_ROOT/public" -type f ! -name '*.php' -exec chown root:root {} + -exec chmod 0644 {} +
+-
+-cat > "$CLOUD_CONFIG" <<PHP
+-<?php
+-return [
+-    'storage_root' => '$STORAGE_ROOT',
+-    'cloud_meta_dir' => '$META_ROOT',
+-    'cloud_db_path' => '$META_ROOT/cloud.sqlite',
+-    'panel_config' => '$PANEL_CONFIG',
+-    'panel_url' => 'https://$PANEL_DOMAIN',
+-    'cloud_url' => 'https://$CLOUD_DOMAIN',
+-];
+-PHP
+-chown root:"$CLOUD_USER" "$CLOUD_CONFIG"; chmod 0640 "$CLOUD_CONFIG"
+-
+-# The panel may have a restrictive /var/www or /etc/hyper-host mode/ACL.
+-# Grant only traversal to the Cloud account on parents and read access only to
+-# its own application/config. Never open the panel database/config itself.
+-setfacl -m u:"$CLOUD_USER":--x /var/www 2>/dev/null || true
+-setfacl -m u:"$CLOUD_USER":r-x "$APP_ROOT" "$APP_ROOT/app" "$APP_ROOT/public" "$APP_ROOT/public/api" 2>/dev/null || true
+-setfacl -m u:"$CLOUD_USER":--x /etc/hyper-host 2>/dev/null || true
+-setfacl -m u:"$CLOUD_USER":r-- "$CLOUD_CONFIG" 2>/dev/null || true
+-
+-# Fail here with useful diagnostics instead of later with a misleading DB error.
+-if ! runuser -u "$CLOUD_USER" -- test -r "$APP_ROOT/app/bootstrap.php"; then
+-  echo '[HYPER CLOUD] bootstrap.php недоступен runtime-пользователю:' >&2
+-  namei -l "$APP_ROOT/app/bootstrap.php" >&2 || true
+-  getfacl -p "$APP_ROOT" "$APP_ROOT/app" "$APP_ROOT/app/bootstrap.php" >&2 2>/dev/null || true
+-  die "Runtime $CLOUD_USER не может читать bootstrap.php"
+-fi
+-if ! runuser -u "$CLOUD_USER" -- test -r "$CLOUD_CONFIG"; then
+-  echo '[HYPER CLOUD] cloud.php недоступен runtime-пользователю:' >&2
+-  namei -l "$CLOUD_CONFIG" >&2 || true
+-  getfacl -p /etc/hyper-host "$CLOUD_CONFIG" >&2 2>/dev/null || true
+-  die "Runtime $CLOUD_USER не может читать Cloud config"
+-fi
+-echo "CLOUD_RUNTIME_PERMISSIONS_OK"
+-
+-# Mutable Cloud data belongs only to the dedicated Cloud process user.
+-chown -R "$CLOUD_USER:$CLOUD_USER" "$STORAGE_ROOT" "$META_ROOT"
+-find "$STORAGE_ROOT" -type d -exec chmod 0750 {} +
+-find "$STORAGE_ROOT" -type f -exec chmod 0640 {} + 2>/dev/null || true
+-find "$META_ROOT" -type d -exec chmod 0700 {} +
+-find "$META_ROOT" -type f -exec chmod 0600 {} + 2>/dev/null || true
+-chmod 0700 "$META_ROOT/sessions" "$META_ROOT/tmp" "$META_ROOT/uploads"
+-
+-log "Изолирую Cloud от базы и секретов панели"
+-PANEL_DB="$(php -r '$c=require "/var/www/hyper-host/app/config.php"; echo (string)($c["db_path"]??"");' 2>/dev/null || true)"
+-[[ -n "$PANEL_DB" && -f "$PANEL_DB" ]] || die "Не найдена база панели"
+-cp -a "$PANEL_DB" "$BACKUP/panel-db.sqlite" 2>/dev/null || true
+-# Do not change the panel's owner/group layout. Explicit POSIX ACLs deny only the
+-# dedicated Cloud runtime account, so panel services keep their existing access.
+-PANEL_DB_DIR="$(dirname "$PANEL_DB")"
+-setfacl -m u:$CLOUD_USER:--- "$PANEL_CONFIG" "$PANEL_DB_DIR" "$PANEL_DB" 2>/dev/null || die "Не удалось изолировать Cloud от базы панели"
+-setfacl -m d:u:$CLOUD_USER:--- "$PANEL_DB_DIR" 2>/dev/null || true
+-for dbf in "$PANEL_DB-wal" "$PANEL_DB-shm"; do [[ -e "$dbf" ]] || continue; setfacl -m u:$CLOUD_USER:--- "$dbf" 2>/dev/null || true; done
+-
+-install -o root -g root -m 0755 "$SRC/scripts/hyper-cloud-panel-auth" /usr/local/sbin/hyper-cloud-panel-auth
+-cat > /etc/sudoers.d/hyper-cloud-panel-auth <<SUDO
+-# HYPER CLOUD v108: only this fixed credential verifier may run as root.
+-$CLOUD_USER ALL=(root) NOPASSWD: /usr/local/sbin/hyper-cloud-panel-auth
+-SUDO
+-chmod 0440 /etc/sudoers.d/hyper-cloud-panel-auth
+-visudo -cf /etc/sudoers.d/hyper-cloud-panel-auth >/dev/null || die "Ошибка sudoers для Cloud auth helper"
+-mkdir -p /var/lib/hyper-cloud-auth; chown root:root /var/lib/hyper-cloud-auth; chmod 0700 /var/lib/hyper-cloud-auth
+-
+-log "Создаю отдельный PHP-FPM pool пользователя $CLOUD_USER"
+-POOL="/etc/php/${FPM_VER}/fpm/pool.d/hypercloud.conf"
+-cat > "$POOL" <<POOLCONF
+-[hypercloud]
+-user = $CLOUD_USER
+-group = $CLOUD_USER
+-listen = $CLOUD_SOCK
+-listen.owner = www-data
+-listen.group = www-data
+-listen.mode = 0660
+-pm = ondemand
+-pm.max_children = 14
+-pm.process_idle_timeout = 20s
+-pm.max_requests = 500
+-clear_env = yes
+-catch_workers_output = yes
+-php_admin_flag[display_errors] = off
+-php_admin_flag[log_errors] = on
+-php_admin_value[error_log] = /var/log/hyper-cloud/php-error.log
+-php_admin_value[session.save_path] = $META_ROOT/sessions
+-php_admin_value[upload_tmp_dir] = $META_ROOT/tmp
+-php_admin_value[sys_temp_dir] = $META_ROOT/tmp
+-php_admin_value[upload_max_filesize] = 8192M
+-php_admin_value[post_max_size] = 8192M
+-php_admin_value[max_execution_time] = 0
+-php_admin_value[max_input_time] = -1
+-php_admin_value[memory_limit] = 1024M
+-php_admin_value[session.cookie_secure] = 1
+-php_admin_value[session.cookie_httponly] = 1
+-php_admin_value[session.cookie_samesite] = Lax
+-php_admin_value[session.use_strict_mode] = 1
+-php_admin_value[expose_php] = Off
+-POOLCONF
+-mkdir -p /var/log/hyper-cloud; touch /var/log/hyper-cloud/php-error.log; chown "$CLOUD_USER:$CLOUD_USER" /var/log/hyper-cloud/php-error.log; chmod 0640 /var/log/hyper-cloud/php-error.log
+-systemctl restart "php${FPM_VER}-fpm"
+-[[ -S "$CLOUD_SOCK" ]] || die "Не создан $CLOUD_SOCK"
+-
+-log "Обновляю Cloud DB без сброса аккаунтов и файлов"
+-# Initialize/upgrade schema as the isolated runtime user.
+-runuser -u "$CLOUD_USER" -- php -d session.save_path="$META_ROOT/sessions" -d display_errors=0 -r 'require "/var/www/hyper-host-cloud-app/app/bootstrap.php"; hc_db(); echo "CLOUD_DB_OK\n";' | grep -q CLOUD_DB_OK || die "Cloud DB не открывается"
+-# Ensure at least one panel admin Cloud profile exists on clean installs; existing installations are untouched.
+-PANEL_FIRST="$(php -r '$c=require "/var/www/hyper-host/app/config.php";$p=new PDO("sqlite:".$c["db_path"]);$r=$p->query("SELECT id,username FROM users ORDER BY id ASC LIMIT 1")->fetch(PDO::FETCH_ASSOC);if($r)echo (int)$r["id"]."|".$r["username"];' 2>/dev/null || true)"
+-if [[ "$PANEL_FIRST" == *"|"* ]]; then
+-  IFS='|' read -r PID PUSER <<< "$PANEL_FIRST"
+-  runuser -u "$CLOUD_USER" -- env PID="$PID" PUSER="$PUSER" php -d session.save_path="$META_ROOT/sessions" -d display_errors=0 -r 'require "/var/www/hyper-host-cloud-app/app/bootstrap.php";$u=hc_upsert_panel_cloud_user(["id"=>(int)getenv("PID"),"username"=>(string)getenv("PUSER")]);hc_ensure_user_root($u);' || true
+-fi
+-chown -R "$CLOUD_USER:$CLOUD_USER" "$STORAGE_ROOT" "$META_ROOT"
+-
+-log "Проверяю privileged auth bridge и изоляцию"
+-if [[ "$PANEL_FIRST" == *"|"* ]]; then
+-  IFS='|' read -r _ PUSER <<< "$PANEL_FIRST"
+-  AUTH_TEST="$(printf '{"action":"exists","username":"%s"}' "$PUSER" | sudo -u "$CLOUD_USER" sudo -n /usr/local/sbin/hyper-cloud-panel-auth 2>/dev/null || true)"
+-  [[ "$AUTH_TEST" == *'"exists":true'* ]] || die "Cloud auth bridge не видит пользователя панели"
+-fi
+-if runuser -u "$CLOUD_USER" -- test -r "$PANEL_DB"; then die "Cloud process всё ещё может читать базу панели — установка остановлена"; else echo "PANEL_DB_ISOLATED_OK"; fi
+-if runuser -u "$CLOUD_USER" -- test -w "$APP_ROOT/public/index.php"; then die "Cloud process может изменять собственный PHP-код"; else echo "CLOUD_CODE_READONLY_OK"; fi
+-
+-log "Обновляю постоянный Nginx vhost"
+-install -o root -g root -m 0755 "$SRC/scripts/hyper-cloud-nginx-fragment.sh" /opt/hyper-host/bin/hyper-cloud-nginx-fragment.sh
+-# Existing v106 installations already have this hook. Add it only if absent.
+-if [[ -f /usr/local/sbin/hyper-host-nginx-reconcile ]] && ! grep -Fq '/opt/hyper-host/bin/hyper-cloud-nginx-fragment.sh' /usr/local/sbin/hyper-host-nginx-reconcile; then
+-  cp -a /usr/local/sbin/hyper-host-nginx-reconcile "$BACKUP/nginx-reconcile.before-v108"
+-  python3 - <<'PY'
+-from pathlib import Path
+-p=Path('/usr/local/sbin/hyper-host-nginx-reconcile');s=p.read_text();hook='\n# HYPER CLOUD v108 persistent vhost hook\nif [[ -x /opt/hyper-host/bin/hyper-cloud-nginx-fragment.sh ]]; then\n  /opt/hyper-host/bin/hyper-cloud-nginx-fragment.sh\nfi\n'
+-anchor='if ! TEST_OUTPUT="$(nginx -t 2>&1)"; then'
+-if anchor not in s: raise SystemExit('nginx reconcile anchor not found')
+-s=s.replace(anchor,hook+'\n'+anchor,1);p.write_text(s)
+-PY
+-  bash -n /usr/local/sbin/hyper-host-nginx-reconcile
+-fi
+-export PHP_FPM_SOCK="$CLOUD_SOCK"
+-[[ -x /usr/local/sbin/hyper-host-nginx-reconcile ]] && /usr/local/sbin/hyper-host-nginx-reconcile || true
+-PHP_FPM_SOCK="$CLOUD_SOCK" /opt/hyper-host/bin/hyper-cloud-nginx-fragment.sh
+-nginx -t
+-systemctl reload nginx
+-
+-log "Обновляю ссылку Cloud в панели"
+-python3 - "$PANEL_ROOT/public/index.php" "$CLOUD_DOMAIN" <<'PY' || true
+-from pathlib import Path
+-import re,sys
+-p=Path(sys.argv[1]);domain=sys.argv[2]
+-if not p.exists(): raise SystemExit
+-s=p.read_text()
+-s=re.sub(r"function hh_app_version\(\): string \{ return '[^']+'; \}","function hh_app_version(): string { return '1.9-v108-cloud'; }",s)
+-anchor="$action = $_POST['action'] ?? $_GET['action'] ?? null;"
+-redir=f"\nif ($page === 'cloud') {{ header('Location: https://{domain}/', true, 302); exit; }}"
+-if redir not in s and anchor in s:s=s.replace(anchor,anchor+redir,1)
+-if "'cloud'=>['fa-cloud','Облако']" not in s:s=s.replace("'files'=>['fa-folder-open','Файлы'],","'files'=>['fa-folder-open','Файлы'],'cloud'=>['fa-cloud','Облако'],",1)
+-p.write_text(s)
+-PY
+-php -l "$PANEL_ROOT/public/index.php" >/dev/null || true
+-
+-log "Финальная проверка v108"
+-php -l "$APP_ROOT/app/bootstrap.php"
+-php -l "$APP_ROOT/app/filelib.php"
+-php -l "$APP_ROOT/public/index.php"
+-php -l "$APP_ROOT/public/editor.php"
+-php -l "$APP_ROOT/public/site.php"
+-php -l "$APP_ROOT/public/site-resource.php"
+-php -l "$APP_ROOT/public/api/upload.php"
+-command -v node >/dev/null 2>&1 && node --check "$APP_ROOT/public/cloud.js" || true
+-nginx -t
+-MARKER="$(curl -ksS --resolve "$CLOUD_DOMAIN:443:127.0.0.1" "https://$CLOUD_DOMAIN/__hyper_cloud_route__" || true)"
+-[[ "$MARKER" == "HYPER_CLOUD_V108" ]] || die "Домен не отдаёт HYPER CLOUD v108 (получено: $MARKER)"
+-# Unauthenticated editor/site must redirect to auth, not return HTTP 500.
+-EDITOR_CODE="$(curl -ksS -o /dev/null -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" "https://$CLOUD_DOMAIN/editor.php?path=test.html" || true)"
+-SITE_CODE="$(curl -ksS -o /dev/null -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" "https://$CLOUD_DOMAIN/site.php?path=test.html" || true)"
+-[[ "$EDITOR_CODE" =~ ^(302|303)$ ]] || die "editor.php возвращает HTTP $EDITOR_CODE вместо редиректа авторизации"
+-[[ "$SITE_CODE" =~ ^(302|303)$ ]] || die "site.php возвращает HTTP $SITE_CODE вместо редиректа авторизации"
+-
+-# Real authenticated probe: open editor, SAVE HTML, then render it through the
+-# isolated site preview endpoint. This catches the exact HTTP 500 class that v108 repairs.
+-log "Проверяю редактор и HTML-preview под реальной Cloud-сессией"
+-PROBE_SID="$(runuser -u "$CLOUD_USER" -- php -d session.save_path="$META_ROOT/sessions" -d display_errors=0 -r '
+-require "/var/www/hyper-host-cloud-app/app/bootstrap.php";
+-$u=hc_db()->query("SELECT * FROM cloud_users WHERE is_active=1 ORDER BY CASE WHEN auth_source=\"panel\" THEN 0 ELSE 1 END,id ASC LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+-if(!$u)exit(2);hc_ensure_user_root($u);$f=hc_root_for_user($u,"private")."/.hc-v108-probe.html";file_put_contents($f,"<!doctype html><html><body><h1>probe-before</h1></body></html>");chmod($f,0660);$_SESSION["hc_user_id"]=(int)$u["id"];$_SESSION["hc_started_at"]=time();$_SESSION["hc_last_seen"]=time();$sid=session_id();session_write_close();echo $sid;' 2>/dev/null)"
+-[[ -n "$PROBE_SID" ]] || die "Не удалось создать тестовую Cloud-сессию"
+-PROBE_COOKIE="HYPERCLOUDSESSID=$PROBE_SID"
+-TMP_EDITOR="$(mktemp)"; TMP_SAVE="$(mktemp)"; TMP_SITE="$(mktemp)"; TMP_RES="$(mktemp)"
+-cleanup_probe(){
+-  rm -f "$TMP_EDITOR" "$TMP_SAVE" "$TMP_SITE" "$TMP_RES" "$META_ROOT/sessions/sess_$PROBE_SID" 2>/dev/null || true
+-  runuser -u "$CLOUD_USER" -- php -d session.save_path="$META_ROOT/sessions" -d display_errors=0 -r 'require "/var/www/hyper-host-cloud-app/app/bootstrap.php";$u=hc_db()->query("SELECT * FROM cloud_users WHERE is_active=1 ORDER BY CASE WHEN auth_source=\"panel\" THEN 0 ELSE 1 END,id ASC LIMIT 1")->fetch(PDO::FETCH_ASSOC);if($u)@unlink(hc_root_for_user($u,"private")."/.hc-v108-probe.html");' >/dev/null 2>&1 || true
+-}
+-trap cleanup_probe EXIT
+-PROBE_EDITOR_CODE="$(curl -ksS -o "$TMP_EDITOR" -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" -H "Cookie: $PROBE_COOKIE" --get --data-urlencode 'space=private' --data-urlencode 'path=.hc-v108-probe.html' "https://$CLOUD_DOMAIN/editor.php" || true)"
+-[[ "$PROBE_EDITOR_CODE" == "200" ]] || { tail -n 80 /var/log/hyper-cloud/php-error.log >&2 || true; die "Авторизованный editor.php вернул HTTP $PROBE_EDITOR_CODE"; }
+-grep -q 'hc-code-shell' "$TMP_EDITOR" || die "editor.php не отдал интерфейс редактора"
+-PROBE_CSRF="$(python3 - "$TMP_EDITOR" <<'PY2'
+-import html,re,sys
+-s=open(sys.argv[1],encoding='utf-8',errors='replace').read();m=re.search(r'name="_csrf" value="([^"]+)"',s);print(html.unescape(m.group(1)) if m else '')
+-PY2
+-)"
+-[[ -n "$PROBE_CSRF" ]] || die "Не найден CSRF редактора"
+-PROBE_SAVE_CODE="$(curl -ksS -o "$TMP_SAVE" -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" -H "Cookie: $PROBE_COOKIE" -X POST --data-urlencode "_csrf=$PROBE_CSRF" --data-urlencode 'space=private' --data-urlencode 'path=.hc-v108-probe.html' --data-urlencode 'content=<!doctype html><html><body><h1>probe-after</h1></body></html>' "https://$CLOUD_DOMAIN/editor.php" || true)"
+-[[ "$PROBE_SAVE_CODE" == "200" ]] || { tail -n 80 /var/log/hyper-cloud/php-error.log >&2 || true; die "Сохранение editor.php вернуло HTTP $PROBE_SAVE_CODE"; }
+-grep -q 'probe-after' "$TMP_SAVE" || die "Редактор не сохранил тестовый HTML"
+-PROBE_SITE_CODE="$(curl -ksS -o "$TMP_SITE" -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" -H "Cookie: $PROBE_COOKIE" --get --data-urlencode 'space=private' --data-urlencode 'path=.hc-v108-probe.html' "https://$CLOUD_DOMAIN/site.php" || true)"
+-[[ "$PROBE_SITE_CODE" == "200" ]] || { tail -n 80 /var/log/hyper-cloud/php-error.log >&2 || true; die "Авторизованный site.php вернул HTTP $PROBE_SITE_CODE"; }
+-PROBE_SRC="$(python3 - "$TMP_SITE" <<'PY2'
+-import html,re,sys
+-s=open(sys.argv[1],encoding='utf-8',errors='replace').read();m=re.search(r'<iframe[^>]+id="preview"[^>]+src="([^"]+)"',s);print(html.unescape(m.group(1)) if m else '')
+-PY2
+-)"
+-[[ "$PROBE_SRC" == /site-resource.php* ]] || die "HTML-preview не создал защищённый ресурс"
+-PROBE_RES_CODE="$(curl -ksS -o "$TMP_RES" -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" "https://$CLOUD_DOMAIN$PROBE_SRC" || true)"
+-[[ "$PROBE_RES_CODE" == "200" ]] || { tail -n 80 /var/log/hyper-cloud/php-error.log >&2 || true; die "site-resource.php вернул HTTP $PROBE_RES_CODE"; }
+-grep -q 'probe-after' "$TMP_RES" || die "HTML-preview не отдал сохранённый HTML"
+-echo "EDITOR_SITE_PROBE_OK"
+-cleanup_probe
+-trap - EXIT
+-
+-printf '\n============================================================\n'
+-printf ' HYPER CLOUD v108 установлен\n'
+-printf ' URL:      https://%s/\n' "$CLOUD_DOMAIN"
+-printf ' Editor:   отдельный /editor.php\n'
+-printf ' Preview:  sandbox /site.php + signed resources\n'
+-printf ' Runtime:  %s via %s\n' "$CLOUD_USER" "$CLOUD_SOCK"
+-printf ' Security: panel DB isolated / code read-only / rate limit enabled\n'
+-printf ' Backup:   %s\n' "$BACKUP"
+-printf ' DOMAIN_OK: HYPER_CLOUD_V108\n'
+-printf '============================================================\n'
+diff -ruN /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/apply-v2.7-cloud-rar-preview-auth.sh /mnt/data/v109build/apply-v2.7-cloud-rar-preview-auth.sh
+--- /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/apply-v2.7-cloud-rar-preview-auth.sh	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/v109build/apply-v2.7-cloud-rar-preview-auth.sh	2026-08-20 09:48:10.207562813 +0000
+@@ -0,0 +1,352 @@
++#!/usr/bin/env bash
++set -Eeuo pipefail
++
++# HYPER CLOUD v109 — runtime permission repair + editor/site/security hardening.
++# Usage: sudo ./apply-v2.7-cloud-rar-preview-auth.sh [/root/hyper-hosting-panel]
++
++SRC="${1:-$(pwd)}"
++CLOUD_DOMAIN="${CLOUD_DOMAIN:-cloud.hyper-host.pw}"
++PANEL_DOMAIN="${PANEL_DOMAIN:-panel.hyper-host.pw}"
++APP_ROOT="/var/www/hyper-host-cloud-app"
++STORAGE_ROOT="/var/www/hyper-host-cloud"
++META_ROOT="/var/lib/hyper-host-cloud"
++PANEL_ROOT="/var/www/hyper-host"
++PANEL_CONFIG="$PANEL_ROOT/app/config.php"
++CLOUD_CONFIG="/etc/hyper-host/cloud.php"
++CLOUD_USER="hypercloud"
++CLOUD_SOCK="/run/php/hypercloud.sock"
++STAMP="$(date +%Y%m%d-%H%M%S)"
++BACKUP="/opt/hyper-host/backups/cloud-v109-${STAMP}"
++
++log(){ printf '\n\033[1;36m[HYPER CLOUD]\033[0m %s\n' "$*"; }
++warn(){ printf '\n\033[1;33m[WARN]\033[0m %s\n' "$*" >&2; }
++die(){ printf '\n\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
++
++[[ ${EUID} -eq 0 ]] || die "Запустите от root"
++for f in src/cloud/app/bootstrap.php src/cloud/app/filelib.php src/cloud/public/index.php src/cloud/public/editor.php src/cloud/public/site.php src/cloud/public/site-resource.php src/cloud/public/cloud.css src/cloud/public/cloud.js src/cloud/public/api/upload.php scripts/hyper-cloud-nginx-fragment.sh scripts/hyper-cloud-panel-auth; do
++  [[ -f "$SRC/$f" ]] || die "Нет файла $SRC/$f"
++done
++
++log "Backup конфигурации: $BACKUP"
++mkdir -p "$BACKUP"
++[[ -d "$APP_ROOT" ]] && cp -a "$APP_ROOT" "$BACKUP/cloud-app" || true
++[[ -f "$CLOUD_CONFIG" ]] && cp -a "$CLOUD_CONFIG" "$BACKUP/cloud.php" || true
++[[ -f /etc/nginx/hyper-host-managed/15-cloud-app.conf ]] && cp -a /etc/nginx/hyper-host-managed/15-cloud-app.conf "$BACKUP/nginx-cloud.conf" || true
++[[ -f "$PANEL_ROOT/public/index.php" ]] && cp -a "$PANEL_ROOT/public/index.php" "$BACKUP/panel-index.php" || true
++
++log "Проверяю PHP и необходимые модули"
++export DEBIAN_FRONTEND=noninteractive
++apt-get update -y >/dev/null
++apt-get install -y nginx sqlite3 zip unzip p7zip-full libarchive-tools file curl ca-certificates sudo acl software-properties-common >/dev/null
++# RAR5 archives are common in Windows workflows. p7zip/libarchive can list some
++# of them but cannot reliably extract/update every RAR5 variant, so install the
++# official unrar/rar tools from Ubuntu multiverse as the primary backend.
++add-apt-repository -y multiverse >/dev/null 2>&1 || true
++apt-get update -y >/dev/null
++apt-get install -y unrar rar >/dev/null || die "Не удалось установить unrar/rar из Ubuntu multiverse"
++command -v unrar >/dev/null 2>&1 || die "unrar не установлен — RAR нельзя надёжно читать"
++command -v rar >/dev/null 2>&1 || die "rar не установлен — RAR нельзя редактировать"
++FPM_VER="$(find /etc/php -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -V | tail -n1 || true)"
++[[ -n "$FPM_VER" ]] || die "Не найдена версия PHP-FPM"
++apt-get install -y "php${FPM_VER}-fpm" "php${FPM_VER}-sqlite3" "php${FPM_VER}-zip" "php${FPM_VER}-mbstring" "php${FPM_VER}-xml" >/dev/null
++log "Cloud PHP-FPM: ${FPM_VER}, отдельный socket $CLOUD_SOCK"
++
++if ! id "$CLOUD_USER" >/dev/null 2>&1; then
++  useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$CLOUD_USER"
++fi
++
++log "Устанавливаю Cloud-приложение и отдельные editor/site endpoints"
++mkdir -p "$APP_ROOT/app" "$APP_ROOT/public/api" "$STORAGE_ROOT/users" "$STORAGE_ROOT/shared" "$META_ROOT/uploads" "$META_ROOT/sessions" "$META_ROOT/tmp" /etc/hyper-host
++install -o root -g "$CLOUD_USER" -m 0640 "$SRC/src/cloud/app/bootstrap.php" "$APP_ROOT/app/bootstrap.php"
++install -o root -g "$CLOUD_USER" -m 0640 "$SRC/src/cloud/app/filelib.php" "$APP_ROOT/app/filelib.php"
++for f in index.php editor.php site.php site-resource.php; do install -o root -g "$CLOUD_USER" -m 0640 "$SRC/src/cloud/public/$f" "$APP_ROOT/public/$f"; done
++install -o root -g root -m 0644 "$SRC/src/cloud/public/cloud.css" "$APP_ROOT/public/cloud.css"
++install -o root -g root -m 0644 "$SRC/src/cloud/public/cloud.js" "$APP_ROOT/public/cloud.js"
++install -o root -g "$CLOUD_USER" -m 0640 "$SRC/src/cloud/public/api/upload.php" "$APP_ROOT/public/api/upload.php"
++# Remove stale ACLs left by interrupted v107 installs, then apply deterministic
++# read/traverse permissions for the dedicated runtime account.
++setfacl -Rb "$APP_ROOT" 2>/dev/null || true
++chown root:"$CLOUD_USER" "$APP_ROOT" "$APP_ROOT/app" "$APP_ROOT/public" "$APP_ROOT/public/api"
++chmod 0755 "$APP_ROOT" "$APP_ROOT/public" "$APP_ROOT/public/api"
++chmod 0750 "$APP_ROOT/app"
++find "$APP_ROOT/app" -type f -exec chown root:"$CLOUD_USER" {} + -exec chmod 0640 {} +
++find "$APP_ROOT/public" -type f -name '*.php' -exec chown root:"$CLOUD_USER" {} + -exec chmod 0640 {} +
++find "$APP_ROOT/public" -type f ! -name '*.php' -exec chown root:root {} + -exec chmod 0644 {} +
++
++cat > "$CLOUD_CONFIG" <<PHP
++<?php
++return [
++    'storage_root' => '$STORAGE_ROOT',
++    'cloud_meta_dir' => '$META_ROOT',
++    'cloud_db_path' => '$META_ROOT/cloud.sqlite',
++    'panel_config' => '$PANEL_CONFIG',
++    'panel_url' => 'https://$PANEL_DOMAIN',
++    'cloud_url' => 'https://$CLOUD_DOMAIN',
++];
++PHP
++chown root:"$CLOUD_USER" "$CLOUD_CONFIG"; chmod 0640 "$CLOUD_CONFIG"
++
++# The panel may have a restrictive /var/www or /etc/hyper-host mode/ACL.
++# Grant only traversal to the Cloud account on parents and read access only to
++# its own application/config. Never open the panel database/config itself.
++setfacl -m u:"$CLOUD_USER":--x /var/www 2>/dev/null || true
++setfacl -m u:"$CLOUD_USER":r-x "$APP_ROOT" "$APP_ROOT/app" "$APP_ROOT/public" "$APP_ROOT/public/api" 2>/dev/null || true
++setfacl -m u:"$CLOUD_USER":--x /etc/hyper-host 2>/dev/null || true
++setfacl -m u:"$CLOUD_USER":r-- "$CLOUD_CONFIG" 2>/dev/null || true
++
++# Fail here with useful diagnostics instead of later with a misleading DB error.
++if ! runuser -u "$CLOUD_USER" -- test -r "$APP_ROOT/app/bootstrap.php"; then
++  echo '[HYPER CLOUD] bootstrap.php недоступен runtime-пользователю:' >&2
++  namei -l "$APP_ROOT/app/bootstrap.php" >&2 || true
++  getfacl -p "$APP_ROOT" "$APP_ROOT/app" "$APP_ROOT/app/bootstrap.php" >&2 2>/dev/null || true
++  die "Runtime $CLOUD_USER не может читать bootstrap.php"
++fi
++if ! runuser -u "$CLOUD_USER" -- test -r "$CLOUD_CONFIG"; then
++  echo '[HYPER CLOUD] cloud.php недоступен runtime-пользователю:' >&2
++  namei -l "$CLOUD_CONFIG" >&2 || true
++  getfacl -p /etc/hyper-host "$CLOUD_CONFIG" >&2 2>/dev/null || true
++  die "Runtime $CLOUD_USER не может читать Cloud config"
++fi
++echo "CLOUD_RUNTIME_PERMISSIONS_OK"
++
++# Mutable Cloud data belongs only to the dedicated Cloud process user.
++chown -R "$CLOUD_USER:$CLOUD_USER" "$STORAGE_ROOT" "$META_ROOT"
++find "$STORAGE_ROOT" -type d -exec chmod 0750 {} +
++find "$STORAGE_ROOT" -type f -exec chmod 0640 {} + 2>/dev/null || true
++find "$META_ROOT" -type d -exec chmod 0700 {} +
++find "$META_ROOT" -type f -exec chmod 0600 {} + 2>/dev/null || true
++chmod 0700 "$META_ROOT/sessions" "$META_ROOT/tmp" "$META_ROOT/uploads"
++
++log "Изолирую Cloud от базы и секретов панели"
++PANEL_DB="$(php -r '$c=require "/var/www/hyper-host/app/config.php"; echo (string)($c["db_path"]??"");' 2>/dev/null || true)"
++[[ -n "$PANEL_DB" && -f "$PANEL_DB" ]] || die "Не найдена база панели"
++cp -a "$PANEL_DB" "$BACKUP/panel-db.sqlite" 2>/dev/null || true
++# Do not change the panel's owner/group layout. Explicit POSIX ACLs deny only the
++# dedicated Cloud runtime account, so panel services keep their existing access.
++PANEL_DB_DIR="$(dirname "$PANEL_DB")"
++setfacl -m u:$CLOUD_USER:--- "$PANEL_CONFIG" "$PANEL_DB_DIR" "$PANEL_DB" 2>/dev/null || die "Не удалось изолировать Cloud от базы панели"
++setfacl -m d:u:$CLOUD_USER:--- "$PANEL_DB_DIR" 2>/dev/null || true
++for dbf in "$PANEL_DB-wal" "$PANEL_DB-shm"; do [[ -e "$dbf" ]] || continue; setfacl -m u:$CLOUD_USER:--- "$dbf" 2>/dev/null || true; done
++
++install -o root -g root -m 0755 "$SRC/scripts/hyper-cloud-panel-auth" /usr/local/sbin/hyper-cloud-panel-auth
++cat > /etc/sudoers.d/hyper-cloud-panel-auth <<SUDO
++# HYPER CLOUD v109: only this fixed credential verifier may run as root.
++$CLOUD_USER ALL=(root) NOPASSWD: /usr/local/sbin/hyper-cloud-panel-auth
++SUDO
++chmod 0440 /etc/sudoers.d/hyper-cloud-panel-auth
++visudo -cf /etc/sudoers.d/hyper-cloud-panel-auth >/dev/null || die "Ошибка sudoers для Cloud auth helper"
++mkdir -p /var/lib/hyper-cloud-auth; chown root:root /var/lib/hyper-cloud-auth; chmod 0700 /var/lib/hyper-cloud-auth
++
++log "Создаю отдельный PHP-FPM pool пользователя $CLOUD_USER"
++POOL="/etc/php/${FPM_VER}/fpm/pool.d/hypercloud.conf"
++cat > "$POOL" <<POOLCONF
++[hypercloud]
++user = $CLOUD_USER
++group = $CLOUD_USER
++listen = $CLOUD_SOCK
++listen.owner = www-data
++listen.group = www-data
++listen.mode = 0660
++pm = ondemand
++pm.max_children = 14
++pm.process_idle_timeout = 20s
++pm.max_requests = 500
++clear_env = yes
++catch_workers_output = yes
++php_admin_flag[display_errors] = off
++php_admin_flag[log_errors] = on
++php_admin_value[error_log] = /var/log/hyper-cloud/php-error.log
++php_admin_value[session.save_path] = $META_ROOT/sessions
++php_admin_value[upload_tmp_dir] = $META_ROOT/tmp
++php_admin_value[sys_temp_dir] = $META_ROOT/tmp
++php_admin_value[upload_max_filesize] = 8192M
++php_admin_value[post_max_size] = 8192M
++php_admin_value[max_execution_time] = 0
++php_admin_value[max_input_time] = -1
++php_admin_value[memory_limit] = 1024M
++php_admin_value[session.cookie_secure] = 1
++php_admin_value[session.cookie_httponly] = 1
++php_admin_value[session.cookie_samesite] = Lax
++php_admin_value[session.use_strict_mode] = 1
++php_admin_value[expose_php] = Off
++POOLCONF
++mkdir -p /var/log/hyper-cloud; touch /var/log/hyper-cloud/php-error.log; chown "$CLOUD_USER:$CLOUD_USER" /var/log/hyper-cloud/php-error.log; chmod 0640 /var/log/hyper-cloud/php-error.log
++systemctl restart "php${FPM_VER}-fpm"
++[[ -S "$CLOUD_SOCK" ]] || die "Не создан $CLOUD_SOCK"
++
++log "Обновляю Cloud DB без сброса аккаунтов и файлов"
++# Initialize/upgrade schema as the isolated runtime user.
++runuser -u "$CLOUD_USER" -- php -d session.save_path="$META_ROOT/sessions" -d display_errors=0 -r 'require "/var/www/hyper-host-cloud-app/app/bootstrap.php"; hc_db(); echo "CLOUD_DB_OK\n";' | grep -q CLOUD_DB_OK || die "Cloud DB не открывается"
++# Ensure at least one panel admin Cloud profile exists on clean installs; existing installations are untouched.
++PANEL_FIRST="$(php -r '$c=require "/var/www/hyper-host/app/config.php";$p=new PDO("sqlite:".$c["db_path"]);$r=$p->query("SELECT id,username FROM users ORDER BY id ASC LIMIT 1")->fetch(PDO::FETCH_ASSOC);if($r)echo (int)$r["id"]."|".$r["username"];' 2>/dev/null || true)"
++if [[ "$PANEL_FIRST" == *"|"* ]]; then
++  IFS='|' read -r PID PUSER <<< "$PANEL_FIRST"
++  runuser -u "$CLOUD_USER" -- env PID="$PID" PUSER="$PUSER" php -d session.save_path="$META_ROOT/sessions" -d display_errors=0 -r 'require "/var/www/hyper-host-cloud-app/app/bootstrap.php";$u=hc_upsert_panel_cloud_user(["id"=>(int)getenv("PID"),"username"=>(string)getenv("PUSER")]);hc_ensure_user_root($u);' || true
++fi
++chown -R "$CLOUD_USER:$CLOUD_USER" "$STORAGE_ROOT" "$META_ROOT"
++
++log "Проверяю privileged auth bridge и изоляцию"
++if [[ "$PANEL_FIRST" == *"|"* ]]; then
++  IFS='|' read -r _ PUSER <<< "$PANEL_FIRST"
++  AUTH_TEST="$(printf '{"action":"exists","username":"%s"}' "$PUSER" | sudo -u "$CLOUD_USER" sudo -n /usr/local/sbin/hyper-cloud-panel-auth 2>/dev/null || true)"
++  [[ "$AUTH_TEST" == *'"exists":true'* ]] || die "Cloud auth bridge не видит пользователя панели"
++fi
++if runuser -u "$CLOUD_USER" -- test -r "$PANEL_DB"; then die "Cloud process всё ещё может читать базу панели — установка остановлена"; else echo "PANEL_DB_ISOLATED_OK"; fi
++if runuser -u "$CLOUD_USER" -- test -w "$APP_ROOT/public/index.php"; then die "Cloud process может изменять собственный PHP-код"; else echo "CLOUD_CODE_READONLY_OK"; fi
++
++log "Обновляю постоянный Nginx vhost"
++install -o root -g root -m 0755 "$SRC/scripts/hyper-cloud-nginx-fragment.sh" /opt/hyper-host/bin/hyper-cloud-nginx-fragment.sh
++# Existing v106 installations already have this hook. Add it only if absent.
++if [[ -f /usr/local/sbin/hyper-host-nginx-reconcile ]] && ! grep -Fq '/opt/hyper-host/bin/hyper-cloud-nginx-fragment.sh' /usr/local/sbin/hyper-host-nginx-reconcile; then
++  cp -a /usr/local/sbin/hyper-host-nginx-reconcile "$BACKUP/nginx-reconcile.before-v109"
++  python3 - <<'PY'
++from pathlib import Path
++p=Path('/usr/local/sbin/hyper-host-nginx-reconcile');s=p.read_text();hook='\n# HYPER CLOUD v109 persistent vhost hook\nif [[ -x /opt/hyper-host/bin/hyper-cloud-nginx-fragment.sh ]]; then\n  /opt/hyper-host/bin/hyper-cloud-nginx-fragment.sh\nfi\n'
++anchor='if ! TEST_OUTPUT="$(nginx -t 2>&1)"; then'
++if anchor not in s: raise SystemExit('nginx reconcile anchor not found')
++s=s.replace(anchor,hook+'\n'+anchor,1);p.write_text(s)
++PY
++  bash -n /usr/local/sbin/hyper-host-nginx-reconcile
++fi
++export PHP_FPM_SOCK="$CLOUD_SOCK"
++[[ -x /usr/local/sbin/hyper-host-nginx-reconcile ]] && /usr/local/sbin/hyper-host-nginx-reconcile || true
++PHP_FPM_SOCK="$CLOUD_SOCK" /opt/hyper-host/bin/hyper-cloud-nginx-fragment.sh
++nginx -t
++systemctl reload nginx
++
++log "Обновляю ссылку Cloud в панели"
++python3 - "$PANEL_ROOT/public/index.php" "$CLOUD_DOMAIN" <<'PY' || true
++from pathlib import Path
++import re,sys
++p=Path(sys.argv[1]);domain=sys.argv[2]
++if not p.exists(): raise SystemExit
++s=p.read_text()
++s=re.sub(r"function hh_app_version\(\): string \{ return '[^']+'; \}","function hh_app_version(): string { return '1.9-v109-cloud'; }",s)
++anchor="$action = $_POST['action'] ?? $_GET['action'] ?? null;"
++redir=f"\nif ($page === 'cloud') {{ header('Location: https://{domain}/', true, 302); exit; }}"
++if redir not in s and anchor in s:s=s.replace(anchor,anchor+redir,1)
++if "'cloud'=>['fa-cloud','Облако']" not in s:s=s.replace("'files'=>['fa-folder-open','Файлы'],","'files'=>['fa-folder-open','Файлы'],'cloud'=>['fa-cloud','Облако'],",1)
++p.write_text(s)
++PY
++php -l "$PANEL_ROOT/public/index.php" >/dev/null || true
++
++log "Финальная проверка v109"
++php -l "$APP_ROOT/app/bootstrap.php"
++php -l "$APP_ROOT/app/filelib.php"
++php -l "$APP_ROOT/public/index.php"
++php -l "$APP_ROOT/public/editor.php"
++php -l "$APP_ROOT/public/site.php"
++php -l "$APP_ROOT/public/site-resource.php"
++php -l "$APP_ROOT/public/api/upload.php"
++command -v node >/dev/null 2>&1 && node --check "$APP_ROOT/public/cloud.js" || true
++nginx -t
++MARKER="$(curl -ksS --resolve "$CLOUD_DOMAIN:443:127.0.0.1" "https://$CLOUD_DOMAIN/__hyper_cloud_route__" || true)"
++[[ "$MARKER" == "HYPER_CLOUD_V109" ]] || die "Домен не отдаёт HYPER CLOUD v109 (получено: $MARKER)"
++# Unauthenticated editor/site must redirect to auth, not return HTTP 500.
++EDITOR_CODE="$(curl -ksS -o /dev/null -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" "https://$CLOUD_DOMAIN/editor.php?path=test.html" || true)"
++SITE_CODE="$(curl -ksS -o /dev/null -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" "https://$CLOUD_DOMAIN/site.php?path=test.html" || true)"
++[[ "$EDITOR_CODE" =~ ^(302|303)$ ]] || die "editor.php возвращает HTTP $EDITOR_CODE вместо редиректа авторизации"
++[[ "$SITE_CODE" =~ ^(302|303)$ ]] || die "site.php возвращает HTTP $SITE_CODE вместо редиректа авторизации"
++
++# Real authenticated probe: normal HTML editor + sandboxed site render + signed
++# resources, then the same full cycle inside a real RAR archive.
++log "Проверяю редактор, HTML-preview и RAR под реальной Cloud-сессией"
++PROBE_INFO="$(runuser -u "$CLOUD_USER" -- php -d session.save_path="$META_ROOT/sessions" -d display_errors=0 -r '
++require "/var/www/hyper-host-cloud-app/app/bootstrap.php";
++$u=hc_db()->query("SELECT * FROM cloud_users WHERE is_active=1 ORDER BY CASE WHEN auth_source=\"panel\" THEN 0 ELSE 1 END,id ASC LIMIT 1")->fetch(PDO::FETCH_ASSOC);
++if(!$u)exit(2);hc_ensure_user_root($u);$root=hc_root_for_user($u,"private");file_put_contents($root."/.hc-v109-probe.html","<!doctype html><html><head><link rel=\"stylesheet\" href=\".hc-v109-probe.css\"></head><body><h1>probe-before</h1></body></html>");file_put_contents($root."/.hc-v109-probe.css","body{--hc-probe:109}");chmod($root."/.hc-v109-probe.html",0660);chmod($root."/.hc-v109-probe.css",0660);$_SESSION["hc_user_id"]=(int)$u["id"];$_SESSION["hc_started_at"]=time();$_SESSION["hc_last_seen"]=time();$sid=session_id();session_write_close();echo $sid."\n".$root;' 2>/dev/null)"
++PROBE_SID="$(printf '%s\n' "$PROBE_INFO" | sed -n '1p')"; PROBE_ROOT="$(printf '%s\n' "$PROBE_INFO" | sed -n '2p')"
++[[ -n "$PROBE_SID" && -d "$PROBE_ROOT" ]] || die "Не удалось создать тестовую Cloud-сессию"
++PROBE_COOKIE="HYPERCLOUDSESSID=$PROBE_SID"
++TMP_EDITOR="$(mktemp)"; TMP_SAVE="$(mktemp)"; TMP_SITE="$(mktemp)"; TMP_HTML="$(mktemp)"; TMP_ASSET="$(mktemp)"; TMP_RAR_EDITOR="$(mktemp)"; TMP_RAR_SAVE="$(mktemp)"; TMP_RAR_SITE="$(mktemp)"; TMP_RAR_HTML="$(mktemp)"; TMP_RAR_ASSET="$(mktemp)"
++cleanup_probe(){
++  rm -f "$TMP_EDITOR" "$TMP_SAVE" "$TMP_SITE" "$TMP_HTML" "$TMP_ASSET" "$TMP_RAR_EDITOR" "$TMP_RAR_SAVE" "$TMP_RAR_SITE" "$TMP_RAR_HTML" "$TMP_RAR_ASSET" "$META_ROOT/sessions/sess_$PROBE_SID" 2>/dev/null || true
++  rm -rf "$META_ROOT/tmp/v109-rar-probe-$STAMP" 2>/dev/null || true
++  runuser -u "$CLOUD_USER" -- env PROBE_ROOT="$PROBE_ROOT" php -r '$r=(string)getenv("PROBE_ROOT");foreach(["/.hc-v109-probe.html","/.hc-v109-probe.css","/.hc-v109-probe.rar"] as $f)@unlink($r.$f);' >/dev/null 2>&1 || true
++}
++trap cleanup_probe EXIT
++PROBE_EDITOR_CODE="$(curl -ksS -o "$TMP_EDITOR" -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" -H "Cookie: $PROBE_COOKIE" --get --data-urlencode 'space=private' --data-urlencode 'path=.hc-v109-probe.html' "https://$CLOUD_DOMAIN/editor.php" || true)"
++[[ "$PROBE_EDITOR_CODE" == "200" ]] || { tail -n 100 /var/log/hyper-cloud/php-error.log >&2 || true; die "Авторизованный editor.php вернул HTTP $PROBE_EDITOR_CODE"; }
++grep -q 'hc-code-shell' "$TMP_EDITOR" || die "editor.php не отдал интерфейс редактора"
++PROBE_CSRF="$(python3 - "$TMP_EDITOR" <<'PY2'
++import html,re,sys
++s=open(sys.argv[1],encoding='utf-8',errors='replace').read();m=re.search(r'name="_csrf" value="([^"]+)"',s);print(html.unescape(m.group(1)) if m else '')
++PY2
++)"
++[[ -n "$PROBE_CSRF" ]] || die "Не найден CSRF редактора"
++PROBE_SAVE_CODE="$(curl -ksS -o "$TMP_SAVE" -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" -H "Cookie: $PROBE_COOKIE" -X POST --data-urlencode "_csrf=$PROBE_CSRF" --data-urlencode 'space=private' --data-urlencode 'path=.hc-v109-probe.html' --data-urlencode 'content=<!doctype html><html><head><link rel="stylesheet" href=".hc-v109-probe.css"></head><body><h1>probe-after</h1></body></html>' "https://$CLOUD_DOMAIN/editor.php" || true)"
++[[ "$PROBE_SAVE_CODE" == "200" ]] || { tail -n 100 /var/log/hyper-cloud/php-error.log >&2 || true; die "Сохранение editor.php вернуло HTTP $PROBE_SAVE_CODE"; }
++PROBE_SITE_CODE="$(curl -ksS -o "$TMP_SITE" -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" -H "Cookie: $PROBE_COOKIE" --get --data-urlencode 'space=private' --data-urlencode 'path=.hc-v109-probe.html' "https://$CLOUD_DOMAIN/site.php" || true)"
++[[ "$PROBE_SITE_CODE" == "200" ]] || { tail -n 100 /var/log/hyper-cloud/php-error.log >&2 || true; die "Авторизованный site.php вернул HTTP $PROBE_SITE_CODE"; }
++PROBE_ROOT_URL="$(python3 - "$TMP_SITE" <<'PY2'
++import html,re,sys
++s=open(sys.argv[1],encoding='utf-8',errors='replace').read();m=re.search(r'<iframe[^>]+src="([^"]+)"',s);print(html.unescape(m.group(1)) if m else '')
++PY2
++)"
++[[ "$PROBE_ROOT_URL" == /site-resource.php* ]] || die "site.php не создал защищённый HTML resource"
++PROBE_HTML_CODE="$(curl -ksS -o "$TMP_HTML" -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" "https://$CLOUD_DOMAIN$PROBE_ROOT_URL" || true)"
++[[ "$PROBE_HTML_CODE" == "200" ]] || { tail -n 100 /var/log/hyper-cloud/php-error.log >&2 || true; die "HTML site-resource.php вернул HTTP $PROBE_HTML_CODE"; }
++grep -q 'probe-after' "$TMP_HTML" || die "HTML-preview не отдал сохранённый HTML"
++PROBE_ASSET="$(python3 - "$TMP_HTML" <<'PY2'
++import html,re,sys
++s=open(sys.argv[1],encoding='utf-8',errors='replace').read();m=re.search(r'href=["\']([^"\']*site-resource\.php[^"\']+)["\']',s);print(html.unescape(m.group(1)) if m else '')
++PY2
++)"
++[[ "$PROBE_ASSET" == /site-resource.php* ]] || die "HTML-preview не переписал CSS"
++PROBE_ASSET_CODE="$(curl -ksS -o "$TMP_ASSET" -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" "https://$CLOUD_DOMAIN$PROBE_ASSET" || true)"
++[[ "$PROBE_ASSET_CODE" == "200" ]] || { tail -n 100 /var/log/hyper-cloud/php-error.log >&2 || true; die "CSS site-resource.php вернул HTTP $PROBE_ASSET_CODE"; }
++grep -q -- '--hc-probe:109' "$TMP_ASSET" || die "HTML-preview не отдал CSS из папки сайта"
++echo "EDITOR_SITE_PROBE_OK"
++
++RAR_SRC="$META_ROOT/tmp/v109-rar-probe-$STAMP"; mkdir -p "$RAR_SRC"; chown "$CLOUD_USER:$CLOUD_USER" "$RAR_SRC"; chmod 0700 "$RAR_SRC"
++cat > "$RAR_SRC/index.html" <<'EOF_RAR_HTML'
++<!doctype html><html><head><link rel="stylesheet" href="style.css"></head><body><h1>rar-before</h1></body></html>
++EOF_RAR_HTML
++printf 'body{--rar-probe:109}\n' > "$RAR_SRC/style.css"; chown "$CLOUD_USER:$CLOUD_USER" "$RAR_SRC/index.html" "$RAR_SRC/style.css"
++runuser -u "$CLOUD_USER" -- bash -c 'cd "$1" && /usr/bin/rar a -idq -p- "$2" index.html style.css >/dev/null' _ "$RAR_SRC" "$PROBE_ROOT/.hc-v109-probe.rar" || die "Не удалось создать тестовый RAR"
++chmod 0660 "$PROBE_ROOT/.hc-v109-probe.rar"
++RAR_EDITOR_CODE="$(curl -ksS -o "$TMP_RAR_EDITOR" -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" -H "Cookie: $PROBE_COOKIE" --get --data-urlencode 'space=private' --data-urlencode 'path=.hc-v109-probe.rar' --data-urlencode 'entry=index.html' "https://$CLOUD_DOMAIN/editor.php" || true)"
++[[ "$RAR_EDITOR_CODE" == "200" ]] || { tail -n 120 /var/log/hyper-cloud/php-error.log >&2 || true; die "RAR editor.php вернул HTTP $RAR_EDITOR_CODE"; }
++grep -q 'rar-before' "$TMP_RAR_EDITOR" || die "RAR index.html не прочитан редактором"
++RAR_CSRF="$(python3 - "$TMP_RAR_EDITOR" <<'PY2'
++import html,re,sys
++s=open(sys.argv[1],encoding='utf-8',errors='replace').read();m=re.search(r'name="_csrf" value="([^"]+)"',s);print(html.unescape(m.group(1)) if m else '')
++PY2
++)"
++[[ -n "$RAR_CSRF" ]] || die "Не найден CSRF RAR редактора"
++RAR_SAVE_CODE="$(curl -ksS -o "$TMP_RAR_SAVE" -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" -H "Cookie: $PROBE_COOKIE" -X POST --data-urlencode "_csrf=$RAR_CSRF" --data-urlencode 'space=private' --data-urlencode 'path=.hc-v109-probe.rar' --data-urlencode 'entry=index.html' --data-urlencode 'content=<!doctype html><html><head><link rel="stylesheet" href="style.css"></head><body><h1>rar-after</h1></body></html>' "https://$CLOUD_DOMAIN/editor.php" || true)"
++[[ "$RAR_SAVE_CODE" == "200" ]] || { tail -n 120 /var/log/hyper-cloud/php-error.log >&2 || true; die "Сохранение RAR вернуло HTTP $RAR_SAVE_CODE"; }
++grep -q 'rar-after' "$TMP_RAR_SAVE" || die "RAR index.html не сохранился"
++RAR_SITE_CODE="$(curl -ksS -o "$TMP_RAR_SITE" -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" -H "Cookie: $PROBE_COOKIE" --get --data-urlencode 'space=private' --data-urlencode 'path=.hc-v109-probe.rar' --data-urlencode 'entry=index.html' "https://$CLOUD_DOMAIN/site.php" || true)"
++[[ "$RAR_SITE_CODE" == "200" ]] || { tail -n 120 /var/log/hyper-cloud/php-error.log >&2 || true; die "RAR site.php вернул HTTP $RAR_SITE_CODE"; }
++RAR_ROOT_URL="$(python3 - "$TMP_RAR_SITE" <<'PY2'
++import html,re,sys
++s=open(sys.argv[1],encoding='utf-8',errors='replace').read();m=re.search(r'<iframe[^>]+src="([^"]+)"',s);print(html.unescape(m.group(1)) if m else '')
++PY2
++)"
++[[ "$RAR_ROOT_URL" == /site-resource.php* ]] || die "RAR site.php не создал HTML resource"
++RAR_HTML_CODE="$(curl -ksS -o "$TMP_RAR_HTML" -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" "https://$CLOUD_DOMAIN$RAR_ROOT_URL" || true)"
++[[ "$RAR_HTML_CODE" == "200" ]] || { tail -n 120 /var/log/hyper-cloud/php-error.log >&2 || true; die "RAR HTML resource вернул HTTP $RAR_HTML_CODE"; }
++grep -q 'rar-after' "$TMP_RAR_HTML" || die "RAR HTML-preview не отдал index.html"
++RAR_ASSET="$(python3 - "$TMP_RAR_HTML" <<'PY2'
++import html,re,sys
++s=open(sys.argv[1],encoding='utf-8',errors='replace').read();m=re.search(r'href=["\']([^"\']*site-resource\.php[^"\']+)["\']',s);print(html.unescape(m.group(1)) if m else '')
++PY2
++)"
++[[ "$RAR_ASSET" == /site-resource.php* ]] || die "RAR HTML-preview не переписал style.css"
++RAR_ASSET_CODE="$(curl -ksS -o "$TMP_RAR_ASSET" -w '%{http_code}' --resolve "$CLOUD_DOMAIN:443:127.0.0.1" "https://$CLOUD_DOMAIN$RAR_ASSET" || true)"
++[[ "$RAR_ASSET_CODE" == "200" ]] || { tail -n 120 /var/log/hyper-cloud/php-error.log >&2 || true; die "RAR CSS resource вернул HTTP $RAR_ASSET_CODE"; }
++grep -q -- '--rar-probe:109' "$TMP_RAR_ASSET" || die "RAR HTML-preview не отдал CSS"
++echo "RAR_EDITOR_SITE_PROBE_OK"
++cleanup_probe; trap - EXIT
++
++printf '\n============================================================\n'
++printf ' HYPER CLOUD v109 установлен\n'
++printf ' URL:      https://%s/\n' "$CLOUD_DOMAIN"
++printf ' Editor:   отдельный /editor.php\n'
++printf ' Preview:  sandbox /site.php + signed resources\n'
++printf ' Runtime:  %s via %s\n' "$CLOUD_USER" "$CLOUD_SOCK"
++printf ' Security: panel DB isolated / code read-only / rate limit enabled\n'
++printf ' Backup:   %s\n' "$BACKUP"
++printf ' DOMAIN_OK: HYPER_CLOUD_V109\n'
++printf '============================================================\n'
+diff -ruN /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/scripts/hyper-cloud-nginx-fragment.sh /mnt/data/v109build/scripts/hyper-cloud-nginx-fragment.sh
+--- /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/scripts/hyper-cloud-nginx-fragment.sh	2026-08-20 09:31:36.000000000 +0000
++++ /mnt/data/v109build/scripts/hyper-cloud-nginx-fragment.sh	2026-08-20 09:45:52.195889302 +0000
+@@ -17,7 +17,7 @@
+ fi
+ 
+ FPM_SOCK="${PHP_FPM_SOCK:-/run/php/hypercloud.sock}"
+-# v108: do not parse hyper-host.conf with sed here. The old expression broke on
++# v109: do not parse hyper-host.conf with sed here. The old expression broke on
+ # embedded quotes and aborted every reconcile with "unterminated s command".
+ # The active FPM socket is deterministic on this host and can be autodetected.
+ if [[ -z "$FPM_SOCK" || ! -S "$FPM_SOCK" ]]; then
+@@ -45,14 +45,14 @@
+     client_max_body_size 8192m;
+     client_body_timeout 3600s;
+     send_timeout 3600s;
+-    add_header X-Hyper-Cloud "v108" always;
++    add_header X-Hyper-Cloud "v109" always;
+     add_header X-Content-Type-Options "nosniff" always;
+     add_header Referrer-Policy "same-origin" always;
+     add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+ 
+     location = /__hyper_cloud_route__ {
+         default_type text/plain;
+-        return 200 "HYPER_CLOUD_V108";
++        return 200 "HYPER_CLOUD_V109";
+     }
+ 
+     location ^~ /.well-known/acme-challenge/ {
+@@ -68,7 +68,7 @@
+ 
+     location ~ \.php$ {
+         # Do not include snippets/fastcgi-php.conf here: Ubuntu's snippet already
+-        # contains try_files, which caused duplicate directive failures in v105 (fixed in v108).
++        # contains try_files, which caused duplicate directive failures in v105 (fixed in v109).
+         try_files \$uri =404;
+         include /etc/nginx/fastcgi_params;
+         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+@@ -84,7 +84,7 @@
+     location ~* \.(?:css|js|png|jpg|jpeg|gif|webp|svg|ico|woff|woff2|ttf|otf)$ {
+         expires 1d;
+         add_header Cache-Control "public, max-age=86400";
+-        add_header X-Hyper-Cloud "v108" always;
++        add_header X-Hyper-Cloud "v109" always;
+         try_files \$uri =404;
+     }
+ 
+@@ -95,7 +95,7 @@
+ 
+ {
+   cat <<NGINX
+-# HYPER CLOUD v108 — reserved standalone application.
++# HYPER CLOUD v109 — reserved standalone application.
+ # Generated by /opt/hyper-host/bin/hyper-cloud-nginx-fragment.sh
+ server {
+     listen 80;
+diff -ruN /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/scripts/hyper-cloud-panel-auth /mnt/data/v109build/scripts/hyper-cloud-panel-auth
+--- /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/scripts/hyper-cloud-panel-auth	2026-08-20 09:31:36.000000000 +0000
++++ /mnt/data/v109build/scripts/hyper-cloud-panel-auth	2026-08-20 09:45:52.195987618 +0000
+@@ -2,12 +2,9 @@
+ <?php
+ declare(strict_types=1);
+ 
+-// HYPER CLOUD v108 — narrow privileged bridge for panel authentication.
++// HYPER CLOUD v109 — narrow privileged bridge for panel password authentication.
+ // Reads one JSON object from stdin and returns only minimal auth result.
+ function out(array $v,int $code=0): never { echo json_encode($v,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES); exit($code); }
+-function b32(string $s): string { $a='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';$s=strtoupper(preg_replace('/[^A-Z2-7]/','',$s)??'');$bits='';for($i=0;$i<strlen($s);$i++){$v=strpos($a,$s[$i]);if($v===false)continue;$bits.=str_pad(decbin($v),5,'0',STR_PAD_LEFT);} $o='';for($i=0;$i+8<=strlen($bits);$i+=8)$o.=chr(bindec(substr($bits,$i,8)));return $o; }
+-function totp(string $secret,int $slice): string { $k=b32($secret);if($k==='')return '';$time=pack('N*',0).pack('N*',$slice);$h=hash_hmac('sha1',$time,$k,true);$off=ord(substr($h,-1))&15;$n=unpack('N',substr($h,$off,4))[1]&0x7fffffff;return str_pad((string)($n%1000000),6,'0',STR_PAD_LEFT); }
+-function verify_totp_local(string $secret,string $code): bool { $code=preg_replace('/\D/','',$code)??'';if(strlen($code)!==6)return false;$s=(int)floor(time()/30);for($i=-1;$i<=1;$i++)if(hash_equals(totp($secret,$s+$i),$code))return true;return false; }
+ function rate_file_state(): array {
+     $dir='/var/lib/hyper-cloud-auth';if(!is_dir($dir))@mkdir($dir,0700,true);$file=$dir.'/attempts.json';
+     $fh=@fopen($file,'c+');if(!$fh)return [null,[],time()];flock($fh,LOCK_EX);$raw=stream_get_contents($fh);$d=json_decode(is_string($raw)?$raw:'',true);if(!is_array($d))$d=[];$now=time();
+@@ -37,6 +34,5 @@
+     $get=function(string $key,string $default='')use($pdo):string{$s=$pdo->prepare('SELECT value FROM settings WHERE key=? LIMIT 1');$s->execute([$key]);$v=$s->fetchColumn();return $v===false?$default:(string)$v;};
+     $allow=trim($get('security_ip_allowlist',''));if($allow!==''){$allowed=false;foreach(preg_split('/[\r\n,]+/',$allow)?:[] as $line){$line=trim($line);if($line==='')continue;if($line===$ip||str_ends_with($line,'.*')&&str_starts_with($ip,substr($line,0,-1))){$allowed=true;break;}}if(!$allowed){rate_record($username,$ip,false);out(['ok'=>false]);}}
+     $password=(string)($req['password']??'');if($password===''||!password_verify($password,(string)$u['password_hash'])){rate_record($username,$ip,false);out(['ok'=>false]);}
+-    if($get('security_2fa_enabled','0')==='1'){$secret=$get('security_2fa_secret','');$code=(string)($req['totp']??'');if($secret===''||!verify_totp_local($secret,$code)){rate_record($username,$ip,false);out(['ok'=>false]);}}
+     rate_record($username,$ip,true);out(['ok'=>true,'id'=>(int)$u['id'],'username'=>(string)$u['username']]);
+ } catch(Throwable $e) { error_log('hyper-cloud-panel-auth: '.$e->getMessage()); out(['ok'=>false],1); }
+diff -ruN /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/src/cloud/app/bootstrap.php /mnt/data/v109build/src/cloud/app/bootstrap.php
+--- /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/src/cloud/app/bootstrap.php	2026-08-20 09:31:36.000000000 +0000
++++ /mnt/data/v109build/src/cloud/app/bootstrap.php	2026-08-20 09:45:52.196125833 +0000
+@@ -1,7 +1,7 @@
+ <?php
+ declare(strict_types=1);
+ 
+-/** HYPER CLOUD v108 hardened standalone bootstrap. */
++/** HYPER CLOUD v109 hardened standalone bootstrap. */
+ ini_set('session.use_strict_mode', '1');
+ ini_set('session.use_only_cookies', '1');
+ session_name('HYPERCLOUDSESSID');
+@@ -197,11 +197,11 @@
+ {
+     $u=current_user(); if(!$u) redirect('/?auth=login'); return $u;
+ }
+-function hc_login(string $username,string $password,string $totp=''): array
++function hc_login(string $username,string $password): array
+ {
+     $username=trim($username);if($username===''||$password==='')throw new RuntimeException('Введите логин и пароль');
+     hc_auth_guard($username);
+-    $panel=hc_panel_auth_helper(['action'=>'login','username'=>$username,'password'=>$password,'totp'=>$totp,'ip'=>(string)($_SERVER['REMOTE_ADDR']??'')]);
++    $panel=hc_panel_auth_helper(['action'=>'login','username'=>$username,'password'=>$password,'ip'=>(string)($_SERVER['REMOTE_ADDR']??'')]);
+     if(!empty($panel['ok'])){
+         $panelUser=['id'=>(int)($panel['id']??0),'username'=>(string)($panel['username']??$username)];
+         $u=hc_upsert_panel_cloud_user($panelUser);$_SESSION['hc_user_id']=(int)$u['id'];session_regenerate_id(true);$_SESSION['hc_started_at']=time();$_SESSION['hc_last_seen']=time();hc_ensure_user_root($u);hc_auth_record($username,true);add_event('auth','Вход администратора');return $u;
+diff -ruN /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/src/cloud/app/filelib.php /mnt/data/v109build/src/cloud/app/filelib.php
+--- /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/src/cloud/app/filelib.php	2026-08-20 09:31:36.000000000 +0000
++++ /mnt/data/v109build/src/cloud/app/filelib.php	2026-08-20 09:49:19.701284063 +0000
+@@ -1,7 +1,7 @@
+ <?php
+ declare(strict_types=1);
+ 
+-/** HYPER CLOUD v108 — isolated file/editor/preview helpers. */
++/** HYPER CLOUD v109 — archive/editor/site helpers. */
+ 
+ function hcfl_space(?string $space): string { return $space === 'shared' ? 'shared' : 'private'; }
+ function hcfl_clean_rel(string $value): string
+@@ -70,9 +70,23 @@
+     $out=$limit>0?stream_get_contents($pipes[1],$limit+1):stream_get_contents($pipes[1]);fclose($pipes[1]);$err=stream_get_contents($pipes[2]);fclose($pipes[2]);$code=proc_close($p);
+     return ['ok'=>$code===0,'data'=>is_string($out)?$out:'','error'=>trim((string)$err),'code'=>$code];
+ }
++function hcfl_lower(string $s): string { return function_exists('mb_strtolower') ? mb_strtolower($s,'UTF-8') : strtolower($s); }
++function hcfl_unrar_bin(): string
++{
++    foreach(['/usr/bin/unrar','/usr/bin/unrar-nonfree','/usr/bin/unrar-free'] as $bin) if(is_executable($bin)) return $bin;
++    return '';
++}
++function hcfl_rar_bin(): string { return is_executable('/usr/bin/rar') ? '/usr/bin/rar' : ''; }
+ function hcfl_archive_entries(string $archive,int $limit=0): array
+ {
+     $rows=[];$lower=strtolower($archive);
++    if(str_ends_with($lower,'.rar')){
++        $unrar=hcfl_unrar_bin();
++        if($unrar!==''){
++            $r=hcfl_capture([$unrar,'lb','-c-','-p-',$archive]);
++            if($r['ok']){foreach(preg_split('/\R/',trim((string)$r['data']))?:[] as $name){if($name==='')continue;$rows[]=['name'=>$name,'size'=>0,'modified'=>'—'];if($limit>0&&count($rows)>=$limit)break;}if($rows)return ['ok'=>true,'entries'=>$rows,'truncated'=>$limit>0&&count($rows)>=$limit];}
++        }
++    }
+     if(str_ends_with($lower,'.zip') && class_exists('ZipArchive')){
+         $z=new ZipArchive();if($z->open($archive)===true){for($i=0;$i<$z->numFiles;$i++){if($limit>0&&count($rows)>=$limit)break;$s=$z->statIndex($i);if(!is_array($s))continue;$rows[]=['name'=>(string)($s['name']??''),'size'=>(int)($s['size']??0),'modified'=>isset($s['mtime'])?date('d.m.Y H:i',(int)$s['mtime']):'—'];}$z->close();return ['ok'=>true,'entries'=>$rows,'truncated'=>$limit>0&&count($rows)>=$limit];}
+     }
+@@ -91,23 +105,47 @@
+ }
+ function hcfl_archive_lookup(string $archive,string $entry): array
+ {
+-    $canonical=hcfl_entry_clean($entry);$lower=strtolower($archive);
+-    if(str_ends_with($lower,'.zip')&&class_exists('ZipArchive')){$z=new ZipArchive();if($z->open($archive)===true){for($i=0;$i<$z->numFiles;$i++){$s=$z->statIndex($i);if(!is_array($s))continue;$raw=(string)($s['name']??'');if($raw===''||str_ends_with($raw,'/'))continue;try{$c=hcfl_entry_clean($raw);}catch(Throwable){continue;}if($c===$canonical){$ret=['canonical'=>$canonical,'actual'=>$raw,'size'=>(int)($s['size']??0),'index'=>$i];$z->close();return $ret;}}$z->close();}}
+-    $list=hcfl_archive_entries($archive,0);foreach($list['entries']??[] as $row){$raw=(string)($row['name']??'');if($raw===''||str_ends_with($raw,'/'))continue;try{$c=hcfl_entry_clean($raw);}catch(Throwable){continue;}if($c===$canonical)return ['canonical'=>$canonical,'actual'=>$raw,'size'=>(int)($row['size']??0),'index'=>null];}
++    $canonical=hcfl_entry_clean($entry);$lower=strtolower($archive);$fallback=null;$wantLower=hcfl_lower($canonical);
++    if(str_ends_with($lower,'.zip')&&class_exists('ZipArchive')){
++        $z=new ZipArchive();if($z->open($archive)===true){
++            for($i=0;$i<$z->numFiles;$i++){$s=$z->statIndex($i);if(!is_array($s))continue;$raw=(string)($s['name']??'');if($raw===''||str_ends_with($raw,'/'))continue;try{$c=hcfl_entry_clean($raw);}catch(Throwable){continue;}
++                if($c===$canonical){$ret=['canonical'=>$canonical,'actual'=>$raw,'size'=>(int)($s['size']??0),'index'=>$i];$z->close();return $ret;}
++                if(hcfl_lower($c)===$wantLower){if($fallback!==null){$fallback=false;}elseif($fallback!==false)$fallback=['canonical'=>$c,'actual'=>$raw,'size'=>(int)($s['size']??0),'index'=>$i];}
++            }
++            $z->close();if(is_array($fallback))return $fallback;$fallback=null;
++        }
++    }
++    $list=hcfl_archive_entries($archive,0);
++    foreach($list['entries']??[] as $row){$raw=(string)($row['name']??'');if($raw===''||str_ends_with($raw,'/'))continue;try{$c=hcfl_entry_clean($raw);}catch(Throwable){continue;}
++        if($c===$canonical)return ['canonical'=>$canonical,'actual'=>$raw,'size'=>(int)($row['size']??0),'index'=>null];
++        if(hcfl_lower($c)===$wantLower){if($fallback!==null){$fallback=false;}elseif($fallback!==false)$fallback=['canonical'=>$c,'actual'=>$raw,'size'=>(int)($row['size']??0),'index'=>null];}
++    }
++    if(is_array($fallback))return $fallback;
+     throw new RuntimeException('Файл внутри архива не найден');
+ }
+ function hcfl_archive_read_bytes(string $archive,string $entry,int $limit=0): array
+ {
+     $f=hcfl_archive_lookup($archive,$entry);$actual=(string)$f['actual'];$canonical=(string)$f['canonical'];$lower=strtolower($archive);
+-    if(str_ends_with($lower,'.zip')&&class_exists('ZipArchive')){$z=new ZipArchive();if($z->open($archive)===true){$stream=$z->getStream($actual);if(is_resource($stream)){$data=$limit>0?stream_get_contents($stream,$limit+1):stream_get_contents($stream);fclose($stream);$z->close();if(!is_string($data))$data='';if($limit>0&&strlen($data)>$limit)throw new RuntimeException('Файл слишком большой для этой операции');return ['content'=>$data,'entry'=>$canonical,'actual'=>$actual,'size'=>strlen($data)];}$z->close();}}
+-    $tries=[];if(str_ends_with($lower,'.zip')&&is_executable('/usr/bin/unzip'))$tries[]=['/usr/bin/unzip','-p',$archive,$actual];
+-    if(is_executable('/usr/bin/7z'))$tries[]=['/usr/bin/7z','x','-so','-bd','-y',$archive,$actual];if(is_executable('/usr/bin/7zz'))$tries[]=['/usr/bin/7zz','x','-so','-bd','-y',$archive,$actual];if(is_executable('/usr/bin/bsdtar'))$tries[]=['/usr/bin/bsdtar','-xOf',$archive,$actual];
+-    foreach($tries as $argv){$r=hcfl_capture($argv,$limit);if($r['ok']){$data=(string)$r['data'];if($limit>0&&strlen($data)>$limit)throw new RuntimeException('Файл слишком большой для этой операции');return ['content'=>$data,'entry'=>$canonical,'actual'=>$actual,'size'=>strlen($data)];}}
++    if(str_ends_with($lower,'.zip')&&class_exists('ZipArchive')){
++        $z=new ZipArchive();if($z->open($archive)===true){$stream=$z->getStream($actual);if(is_resource($stream)){$data=$limit>0?stream_get_contents($stream,$limit+1):stream_get_contents($stream);fclose($stream);$z->close();if(!is_string($data))$data='';if($limit>0&&strlen($data)>$limit)throw new RuntimeException('Файл слишком большой для этой операции');return ['content'=>$data,'entry'=>$canonical,'actual'=>$actual,'size'=>strlen($data)];}$z->close();}
++    }
++    $tries=[];
++    if(str_ends_with($lower,'.rar')){
++        $unrar=hcfl_unrar_bin();if($unrar!=='')$tries[]=[[$unrar,'p','-inul','-c-','-p-',$archive,$actual],'unrar'];
++        $rar=hcfl_rar_bin();if($rar!=='')$tries[]=[[$rar,'p','-inul','-c-','-p-',$archive,$actual],'rar'];
++    }
++    if(str_ends_with($lower,'.zip')&&is_executable('/usr/bin/unzip'))$tries[]=[[ '/usr/bin/unzip','-p',$archive,$actual],'unzip'];
++    if(is_executable('/usr/bin/7z'))$tries[]=[[ '/usr/bin/7z','x','-so','-bd','-y','-spd',$archive,$actual],'7z'];
++    if(is_executable('/usr/bin/7zz'))$tries[]=[[ '/usr/bin/7zz','x','-so','-bd','-y','-spd',$archive,$actual],'7zz'];
++    if(is_executable('/usr/bin/bsdtar'))$tries[]=[[ '/usr/bin/bsdtar','-xOf',$archive,$actual],'bsdtar'];
++    $errors=[];
++    foreach($tries as [$argv,$label]){$r=hcfl_capture($argv,$limit);if($r['ok']){$data=(string)$r['data'];if($limit>0&&strlen($data)>$limit)throw new RuntimeException('Файл слишком большой для этой операции');return ['content'=>$data,'entry'=>$canonical,'actual'=>$actual,'size'=>strlen($data),'reader'=>$label];}$errors[]=$label.':'.trim((string)$r['error']);}
++    error_log('HYPER CLOUD archive read failed for '.basename($archive).' / '.$canonical.' :: '.implode(' | ',$errors));
+     throw new RuntimeException('Не удалось прочитать файл из архива');
+ }
+ function hcfl_archive_writer(string $archive): string
+ {
+-    $n=strtolower($archive);if(str_ends_with($n,'.zip')&&class_exists('ZipArchive'))return 'zip';if((str_ends_with($n,'.zip')||str_ends_with($n,'.7z'))&&is_executable('/usr/bin/7z'))return '7z';if((str_ends_with($n,'.zip')||str_ends_with($n,'.7z'))&&is_executable('/usr/bin/7zz'))return '7zz';if(str_ends_with($n,'.rar')&&is_executable('/usr/bin/rar'))return 'rar';return '';
++    $n=strtolower($archive);if(str_ends_with($n,'.zip')&&class_exists('ZipArchive'))return 'zip';if((str_ends_with($n,'.zip')||str_ends_with($n,'.7z'))&&is_executable('/usr/bin/7z'))return '7z';if((str_ends_with($n,'.zip')||str_ends_with($n,'.7z'))&&is_executable('/usr/bin/7zz'))return '7zz';if(str_ends_with($n,'.rar')&&hcfl_rar_bin()!=='')return 'rar';return '';
+ }
+ function hcfl_rrmdir(string $dir): void { if(!is_dir($dir)){@unlink($dir);return;}foreach(scandir($dir)?:[] as $n){if($n==='.'||$n==='..')continue;$p=$dir.'/'.$n;is_dir($p)&&!is_link($p)?hcfl_rrmdir($p):@unlink($p);}@rmdir($dir); }
+ function hcfl_archive_backup(string $archive): string
+@@ -123,7 +161,7 @@
+     $entry=hcfl_entry_clean($entry);if(!hcfl_editable_name($entry)||str_contains($content,"\0"))throw new RuntimeException('Этот файл нельзя сохранить');$found=hcfl_archive_lookup($archive,$entry);$actual=(string)$found['actual'];$writer=hcfl_archive_writer($archive);if($writer==='')throw new RuntimeException('На сервере нет архиватора для записи этого формата');$backup=hcfl_archive_backup($archive);
+     try{
+         if($writer==='zip'){$z=new ZipArchive();if($z->open($archive)!==true)throw new RuntimeException('Не удалось открыть ZIP');$idx=$z->locateName($actual,0);if($idx===false){$z->close();throw new RuntimeException('Файл внутри ZIP не найден');}$tmp=tempnam((string)app_config('cloud_meta_dir','/var/lib/hyper-host-cloud'),'hc-edit-');if($tmp===false||file_put_contents($tmp,$content,LOCK_EX)===false){if($tmp)@unlink($tmp);$z->close();throw new RuntimeException('Не удалось подготовить изменения');}if(!$z->deleteIndex($idx)||!$z->addFile($tmp,$actual)){@unlink($tmp);$z->close();throw new RuntimeException('Не удалось обновить ZIP');}if(!$z->close()){@unlink($tmp);throw new RuntimeException('Не удалось сохранить ZIP');}@unlink($tmp);
+-        } else {$tmp=rtrim((string)app_config('cloud_meta_dir','/var/lib/hyper-host-cloud'),'/').'/tmp-edit-'.bin2hex(random_bytes(8));$fs=ltrim(str_replace('\\','/',$actual),'/');$target=$tmp.'/'.$fs;if(!@mkdir(dirname($target),0700,true)&&!is_dir(dirname($target)))throw new RuntimeException('Не удалось подготовить редактор');if(file_put_contents($target,$content,LOCK_EX)===false)throw new RuntimeException('Не удалось подготовить изменения');if($writer==='7z'||$writer==='7zz'){$bin=$writer==='7z'?'/usr/bin/7z':'/usr/bin/7zz';$r=hcfl_capture([$bin,'u','-y','-bd',$archive,$fs],0,$tmp);}else{$r=hcfl_capture(['/usr/bin/rar','u','-idq',$archive,$fs],0,$tmp);}hcfl_rrmdir($tmp);if(!$r['ok'])throw new RuntimeException('Архиватор не смог сохранить изменения');}
++        } else {$tmp=rtrim((string)app_config('cloud_meta_dir','/var/lib/hyper-host-cloud'),'/').'/tmp-edit-'.bin2hex(random_bytes(8));$fs=ltrim(str_replace('\\','/',$actual),'/');$target=$tmp.'/'.$fs;if(!@mkdir(dirname($target),0700,true)&&!is_dir(dirname($target)))throw new RuntimeException('Не удалось подготовить редактор');if(file_put_contents($target,$content,LOCK_EX)===false)throw new RuntimeException('Не удалось подготовить изменения');if($writer==='7z'||$writer==='7zz'){$bin=$writer==='7z'?'/usr/bin/7z':'/usr/bin/7zz';$r=hcfl_capture([$bin,'u','-y','-bd',$archive,$fs],0,$tmp);}else{$r=hcfl_capture([hcfl_rar_bin(),'u','-idq','-p-',$archive,$fs],0,$tmp);}hcfl_rrmdir($tmp);if(!$r['ok'])throw new RuntimeException('Архиватор не смог сохранить изменения');}
+     }catch(Throwable $e){if($backup!==''&&is_file($backup))@copy($backup,$archive);throw $e;}
+     @chmod($archive,0660);
+ }
+@@ -136,6 +174,17 @@
+ {
+     if(!is_file($path)||is_link($path)||!hcfl_editable_name(basename($path))||str_contains($content,"\0"))throw new RuntimeException('Файл нельзя сохранить');$tmp=dirname($path).'/.hc-edit-'.bin2hex(random_bytes(8));if(file_put_contents($tmp,$content,LOCK_EX)===false)throw new RuntimeException('Не удалось записать изменения');$mode=@fileperms($path);@chmod($tmp,is_int($mode)?($mode&0777):0660);if(!@rename($tmp,$path)){@unlink($tmp);throw new RuntimeException('Не удалось заменить файл');}
+ }
++function hcfl_resolve_casefold(array $user,string $space,string $rel): array
++{
++    try{return hcfl_resolve($user,$space,$rel,true);}catch(Throwable $first){}
++    $root=hcfl_root($user,$space);$rootReal=realpath($root)?:$root;$clean=hcfl_clean_rel($rel);$cur=$root;$resolved=[];
++    foreach($clean===''?[]:explode('/',$clean) as $part){
++        if(!is_dir($cur))throw new RuntimeException('Ресурс не найден');$match=null;$want=hcfl_lower($part);
++        foreach(scandir($cur)?:[] as $name){if($name==='.'||$name==='..')continue;if(hcfl_lower($name)===$want){if($match!==null&&$match!==$name)throw new RuntimeException('Неоднозначное имя ресурса');$match=$name;}}
++        if($match===null)throw new RuntimeException('Ресурс не найден');$cur.='/'.$match;$resolved[]=$match;if(is_link($cur))throw new RuntimeException('Символические ссылки запрещены');
++    }
++    $real=realpath($cur);if($real===false||($real!==$rootReal&&!str_starts_with($real,$rootReal.DIRECTORY_SEPARATOR)))throw new RuntimeException('Недопустимый путь');return [$root,implode('/',$resolved),$real];
++}
+ function hcfl_mime_name(string $name): string
+ {
+     $ext=strtolower(pathinfo(parse_url($name,PHP_URL_PATH)?:$name,PATHINFO_EXTENSION));return match($ext){'html','htm'=>'text/html; charset=utf-8','css'=>'text/css; charset=utf-8','js','mjs','cjs'=>'application/javascript; charset=utf-8','json','map'=>'application/json; charset=utf-8','xml'=>'application/xml; charset=utf-8','jpg','jpeg'=>'image/jpeg','png'=>'image/png','gif'=>'image/gif','webp'=>'image/webp','svg'=>'image/svg+xml','ico'=>'image/x-icon','mp4'=>'video/mp4','webm'=>'video/webm','mp3'=>'audio/mpeg','ogg'=>'audio/ogg','wav'=>'audio/wav','woff'=>'font/woff','woff2'=>'font/woff2','ttf'=>'font/ttf','otf'=>'font/otf',default=>'application/octet-stream'};
+@@ -168,7 +217,7 @@
+     $path=parse_url($url,PHP_URL_PATH);if(!is_string($path)||$path==='')return null;$path=rawurldecode($path);$root=hcfl_clean_rel($siteRoot);$base=hcfl_clean_rel($baseRel);
+     $parts=str_starts_with($path,'/')?($root!==''?explode('/',$root):[]):($base!==''?explode('/',$base):[]);$min=$root!==''?count(explode('/',$root)):0;
+     foreach(explode('/',str_replace('\\','/',$path)) as $p){if($p===''||$p==='.')continue;if($p==='..'){if(count($parts)>$min)array_pop($parts);else return null;continue;}if(preg_match('/[\x00-\x1F\x7F]/u',$p))return null;$parts[]=$p;}
+-    $full=implode('/',$parts);if($root!==''&&$full!==$root&&!str_starts_with($full,$root.'/'))return null;return $root!==''?(string)substr($full,strlen($root)+($full===$root?0:1)):$full;
++    $full=implode('/',$parts);if($root!==''&&$full!==$root&&!str_starts_with($full,$root.'/'))return null;if($full===$root)return 'index.html';return $root!==''?(string)substr($full,strlen($root)+1):($full!==''?$full:'index.html');
+ }
+ function hcfl_preview_url(string $token,string $resource): string { return '/site-resource.php?t='.rawurlencode($token).'&r='.rawurlencode($resource); }
+ function hcfl_rewrite_css(string $css,string $currentRel,string $siteRoot,string $token): string
+diff -ruN /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/src/cloud/public/cloud.css /mnt/data/v109build/src/cloud/public/cloud.css
+--- /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/src/cloud/public/cloud.css	2026-08-20 09:31:36.000000000 +0000
++++ /mnt/data/v109build/src/cloud/public/cloud.css	2026-08-20 09:45:52.196862477 +0000
+@@ -234,7 +234,7 @@
+ @media(max-width:700px){.hc-file-actions .hc-site-quick{min-width:40px;width:40px;padding:0}.hc-file-actions .hc-site-quick span{display:none}}
+ 
+ /* ========================================================================
+-   HYPER CLOUD v108 — premium UI / icon system / security polish
++   HYPER CLOUD v109 — premium UI / icon system / security polish
+    ======================================================================== */
+ :root{--hc-blue:#4b63ff;--hc-violet:#7157ff;--hc-ink:#141b2d;--hc-sub:#7d879d;--hc-card:#fff;--hc-line:#e7eaf3;--hc-sidebar:#f9faff}
+ .hc-sidebar{width:276px;padding:20px 16px 18px;background:linear-gradient(180deg,#fbfcff 0%,#f7f8fd 100%);border-right:1px solid #e6e9f2;box-shadow:14px 0 42px rgba(35,48,84,.035)}
+@@ -256,7 +256,7 @@
+ @media(max-width:1000px){.hc-sidebar{width:276px;transform:translateX(-100%)}.hc-sidebar.open{transform:translateX(0)}.hc-shell{margin-left:0;width:100%}.hc-main{padding:24px 18px}.hc-header{padding:0 18px}.hc-mobile-menu{display:grid;place-items:center}}
+ @media(max-width:600px){.hc-main{padding:18px 11px}.hc-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.hc-file-icon{height:100px}.hc-toolbar{padding:3px}.hc-user-copy{display:none}}
+ 
+-/* v108 final visual pass */
++/* v109 final visual pass */
+ .hc-ext-chip{position:absolute;left:12px;bottom:10px;min-width:34px;height:21px;padding:0 7px;border-radius:7px;display:grid;place-items:center;background:rgba(255,255,255,.88);border:1px solid rgba(255,255,255,.9);box-shadow:0 5px 14px rgba(36,48,83,.08);font-size:8px;font-weight:900;letter-spacing:.08em;color:#59657a;backdrop-filter:blur(10px)}
+ .hc-file-icon{position:relative}.hc-file-icon>i{filter:drop-shadow(0 5px 9px rgba(54,67,103,.08));transition:transform .18s ease}.hc-file-card:hover .hc-file-icon>i{transform:translateY(-2px) scale(1.04)}
+ .hc-file-icon.html .hc-ext-chip{color:#d75a20;background:#fff8f3}.hc-file-icon.php .hc-ext-chip{color:#5951b9;background:#f7f5ff}.hc-file-icon.css .hc-ext-chip{color:#2565c0;background:#f3f7ff}.hc-file-icon.js .hc-ext-chip{color:#9d7600;background:#fffae7}.hc-file-icon.data .hc-ext-chip{color:#2d7e74;background:#f1fbf9}.hc-file-icon.code .hc-ext-chip{color:#35777c;background:#f1f9f9}
+diff -ruN /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/src/cloud/public/editor.php /mnt/data/v109build/src/cloud/public/editor.php
+--- /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/src/cloud/public/editor.php	2026-08-20 07:35:00.000000000 +0000
++++ /mnt/data/v109build/src/cloud/public/editor.php	2026-08-20 09:45:52.196947043 +0000
+@@ -33,7 +33,7 @@
+ $return='/?'.http_build_query(array_filter(['space'=>$space==='shared'?'shared':null,'preview'=>$rel],fn($v)=>$v!==null),'','&',PHP_QUERY_RFC3986);
+ ?>
+ <!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?=e($name)?> — HYPER CLOUD</title>
+-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud.css?v=107">
++<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud.css?v=109">
+ <style>
+ body.hc-editor-page{background:#0b1020;color:#e8eefc;min-height:100vh;overflow:hidden}.hc-code-shell{height:100vh;display:flex;flex-direction:column}.hc-code-top{height:72px;display:flex;align-items:center;gap:14px;padding:0 22px;border-bottom:1px solid rgba(255,255,255,.08);background:rgba(13,19,37,.96);backdrop-filter:blur(20px)}.hc-code-back,.hc-code-action{height:42px;display:inline-flex;align-items:center;gap:9px;padding:0 14px;border-radius:13px;border:1px solid rgba(255,255,255,.09);color:#e8eefc;text-decoration:none;background:rgba(255,255,255,.05)}.hc-code-action.primary{background:linear-gradient(135deg,#4f6cff,#725bff);border:0;box-shadow:0 10px 28px rgba(79,108,255,.28)}.hc-code-title{min-width:0;flex:1}.hc-code-title b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:15px}.hc-code-title span{display:block;color:#8290ad;font-size:12px;margin-top:2px}.hc-code-badge{padding:7px 10px;border-radius:9px;background:rgba(92,115,255,.14);color:#aebaff;font:700 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace}.hc-editor-area{position:relative;flex:1;min-height:0;background:#0a0f1d}.hc-editor-area textarea{width:100%;height:100%;resize:none;border:0;outline:0;padding:24px 30px 80px;background:#0a0f1d;color:#e8eefc;font:14px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;tab-size:4;caret-color:#8da0ff}.hc-editor-area textarea::selection{background:#334bb8}.hc-editor-status{position:absolute;right:18px;bottom:16px;display:flex;gap:8px;pointer-events:none}.hc-editor-status span{padding:7px 10px;border-radius:9px;background:rgba(18,26,48,.9);border:1px solid rgba(255,255,255,.07);font-size:11px;color:#8997b5}.hc-editor-alert{margin:22px;border-radius:18px;padding:18px 20px;background:#301824;border:1px solid #6f293e;color:#ffc4d0}.hc-editor-ok{position:fixed;right:22px;top:88px;z-index:5;padding:12px 15px;border-radius:13px;background:#12392d;border:1px solid #2f7f63;color:#a7f1d5;box-shadow:0 14px 35px rgba(0,0,0,.25)}@media(max-width:700px){.hc-code-top{padding:0 10px}.hc-code-action span,.hc-code-back span{display:none}.hc-editor-area textarea{padding:18px 16px 70px}}
+ </style></head><body class="hc-editor-page">
+diff -ruN /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/src/cloud/public/index.php /mnt/data/v109build/src/cloud/public/index.php
+--- /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/src/cloud/public/index.php	2026-08-20 09:31:36.000000000 +0000
++++ /mnt/data/v109build/src/cloud/public/index.php	2026-08-20 09:46:53.674414627 +0000
+@@ -2,10 +2,11 @@
+ declare(strict_types=1);
+ 
+ /**
+- * HYPER CLOUD v108 — hardened standalone multi-user cloud on cloud.hyper-host.pw.
++ * HYPER CLOUD v109 — hardened standalone multi-user cloud on cloud.hyper-host.pw.
+  * Panel administrators can sign in with panel credentials; cloud registrations stay cloud-only.
+  */
+ require __DIR__ . '/../app/bootstrap.php';
++require __DIR__ . '/../app/filelib.php';
+ 
+ $GLOBALS['HC_SPACE'] = ((string)($_GET['space'] ?? $_POST['space'] ?? 'private') === 'shared') ? 'shared' : 'private';
+ 
+@@ -493,81 +494,9 @@
+ 
+ function hc_archive_entries(string $path, int $limit = 1000): array
+ {
+-    $entries = [];
+-    if (str_ends_with(strtolower($path), '.zip') && class_exists('ZipArchive')) {
+-        $zip = new ZipArchive();
+-        if ($zip->open($path) === true) {
+-            $count = $limit > 0 ? min($zip->numFiles, $limit) : $zip->numFiles;
+-            for ($i = 0; $i < $count; $i++) {
+-                $st = $zip->statIndex($i);
+-                if (!is_array($st)) continue;
+-                $entries[] = [
+-                    'name' => (string)($st['name'] ?? ''),
+-                    'size' => (int)($st['size'] ?? 0),
+-                    'packed' => (int)($st['comp_size'] ?? 0),
+-                    'modified' => !empty($st['mtime']) ? date('d.m.Y H:i', (int)$st['mtime']) : '—',
+-                ];
+-            }
+-            $truncated = $limit > 0 && $zip->numFiles > $limit;
+-            $zip->close();
+-            return ['ok'=>true,'entries'=>$entries,'truncated'=>$truncated,'engine'=>'ZipArchive'];
+-        }
+-    }
+-
+-    if (str_ends_with(strtolower($path), '.zip') && is_executable('/usr/bin/unzip')) {
+-        $out = []; $code = 0;
+-        exec('/usr/bin/unzip -Z -1 '.escapeshellarg($path).' 2>/dev/null', $out, $code);
+-        if ($code === 0) {
+-            foreach ($out as $raw) {
+-                if ($limit > 0 && count($entries) >= $limit) break;
+-                $raw = rtrim((string)$raw);
+-                if ($raw !== '') $entries[] = ['name'=>$raw,'size'=>0,'packed'=>0,'modified'=>'—'];
+-            }
+-            if ($entries) return ['ok'=>true,'entries'=>$entries,'truncated'=>$limit > 0 && count($out)>$limit,'engine'=>'unzip'];
+-        }
+-    }
+-
+-    $commands = [];
+-    if (is_executable('/usr/bin/7z')) $commands[] = ['/usr/bin/7z','l','-slt',$path];
+-    if (is_executable('/usr/bin/7zz')) $commands[] = ['/usr/bin/7zz','l','-slt',$path];
+-    if (is_executable('/usr/bin/bsdtar')) $commands[] = ['/usr/bin/bsdtar','-tf',$path];
+-
+-    foreach ($commands as $cmd) {
+-        $line = implode(' ', array_map('escapeshellarg', $cmd)) . ' 2>&1';
+-        $out = []; $code = 0; exec($line, $out, $code);
+-        if ($code !== 0 && !$out) continue;
+-        if (str_contains($cmd[0], '7z')) {
+-            $current = [];
+-            foreach ($out as $raw) {
+-                $raw = rtrim((string)$raw);
+-                if ($raw === '') {
+-                    if (!empty($current['Path'])) {
+-                        $n = (string)$current['Path'];
+-                        if ($n !== $path && $n !== basename($path)) {
+-                            $entries[] = ['name'=>$n,'size'=>(int)($current['Size']??0),'packed'=>(int)($current['Packed Size']??0),'modified'=>(string)($current['Modified']??'—')];
+-                            if ($limit > 0 && count($entries) >= $limit) break;
+-                        }
+-                    }
+-                    $current = [];
+-                    continue;
+-                }
+-                if (preg_match('/^([^=]+) = (.*)$/', $raw, $m)) $current[trim($m[1])] = $m[2];
+-            }
+-            if (($limit <= 0 || count($entries) < $limit) && !empty($current['Path'])) {
+-                $n=(string)$current['Path'];
+-                if ($n!==$path && $n!==basename($path)) $entries[]=['name'=>$n,'size'=>(int)($current['Size']??0),'packed'=>(int)($current['Packed Size']??0),'modified'=>(string)($current['Modified']??'—')];
+-            }
+-            if ($entries) return ['ok'=>true,'entries'=>$entries,'truncated'=>$limit > 0 && count($entries)>=$limit,'engine'=>basename($cmd[0])];
+-        } else {
+-            foreach ($out as $raw) {
+-                if ($limit > 0 && count($entries) >= $limit) break;
+-                $raw = trim((string)$raw);
+-                if ($raw !== '') $entries[] = ['name'=>$raw,'size'=>0,'packed'=>0,'modified'=>'—'];
+-            }
+-            if ($entries) return ['ok'=>true,'entries'=>$entries,'truncated'=>$limit > 0 && count($entries)>=$limit,'engine'=>'bsdtar'];
+-        }
+-    }
+-    return ['ok'=>false,'entries'=>[],'truncated'=>false,'engine'=>'','error'=>'Не удалось прочитать архив. Установите p7zip-full/libarchive-tools.'];
++    $r=hcfl_archive_entries($path,$limit);
++    $rows=[];foreach($r['entries']??[] as $row)$rows[]=['name'=>(string)($row['name']??''),'size'=>(int)($row['size']??0),'packed'=>0,'modified'=>(string)($row['modified']??'—')];
++    return ['ok'=>!empty($r['ok']),'entries'=>$rows,'truncated'=>!empty($r['truncated']),'engine'=>str_ends_with(strtolower($path),'.rar')&&hcfl_unrar_bin()!==''?'unrar':'archive','error'=>!empty($r['ok'])?'':'Не удалось прочитать архив'];
+ }
+ 
+ function hc_is_editable_text_name(string $name): bool
+@@ -1037,7 +966,7 @@
+     http_response_code(404);
+     hc_public_headers();
+     ?>
+-<!doctype html><html lang="ru" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ссылка недоступна — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud.css?v=107"></head><body class="hc-public-body hc-public-error-body">
++<!doctype html><html lang="ru" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ссылка недоступна — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud.css?v=109"></head><body class="hc-public-body hc-public-error-body">
+ <main class="hc-public-page"><section class="hc-public-card hc-public-error-card"><div class="hc-public-brand"><span><i class="fa-solid fa-cloud"></i></span><b>HYPER CLOUD</b></div><div class="hc-public-error-icon"><i class="fa-solid fa-link-slash"></i></div><h1>Ссылка недоступна</h1><p>Доступ закрыт или файл больше не существует.</p></section></main></body></html><?php
+     exit;
+ }
+@@ -1055,7 +984,7 @@
+     http_response_code(200);
+     hc_public_headers();
+     ?>
+-<!doctype html><html lang="ru" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($name) ?> — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud.css?v=107"></head><body class="hc-public-body">
++<!doctype html><html lang="ru" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($name) ?> — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud.css?v=109"></head><body class="hc-public-body">
+ <main class="hc-public-page"><section class="hc-public-card"><div class="hc-public-brand"><span><i class="fa-solid fa-cloud"></i></span><b>HYPER CLOUD</b></div>
+ <div class="hc-public-file"><div class="hc-public-file-icon <?= e($kind) ?>"><i class="fa-solid <?= e(hc_icon($path)) ?>"></i></div><div><h1><?= e($name) ?></h1><p><?= e(human_bytes($size)) ?> <span>•</span> <?= e(date('d.m.Y H:i', (int)(filemtime($path) ?: time()))) ?></p></div></div>
+ <?php if(str_starts_with($mime,'image/')): ?><div class="hc-public-preview image"><img src="<?= e($inline) ?>" alt=""></div>
+@@ -1081,14 +1010,14 @@
+     $register=$mode==='register';$flash=flash();if($error===''&&$flash)$error=(string)($flash['message']??'');
+     http_response_code(200);header('X-Frame-Options: DENY');header('Cache-Control: no-store');
+     ?>
+-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= $register?'Регистрация':'Вход' ?> — HYPER CLOUD</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud.css?v=107"></head><body class="hc-auth-body">
++<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= $register?'Регистрация':'Вход' ?> — HYPER CLOUD</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud.css?v=109"></head><body class="hc-auth-body">
+ <div class="hc-auth-wrap"><section class="hc-auth-card"><div class="hc-auth-brand"><span><i class="fa-solid fa-cloud"></i></span><div><b>HYPER CLOUD</b><small>cloud.hyper-host.pw</small></div></div><div class="hc-auth-copy"><h1><?= $register?'Создать аккаунт':'Вход в облако' ?></h1></div>
+ <?php if($error!==''): ?><div class="hc-auth-error"><i class="fa-solid fa-circle-exclamation"></i><?= e($error) ?></div><?php endif; ?>
+ <form method="post" action="/?auth=<?= $register?'register':'login' ?>" class="hc-auth-form"><?= '<input type="hidden" name="_csrf" value="'.e(csrf_token()).'">' ?>
+ <label><span>Логин</span><div><i class="fa-regular fa-user"></i><input name="username" autocomplete="username" required autofocus></div></label>
+ <?php if($register): ?><label><span>E-mail</span><div><i class="fa-regular fa-envelope"></i><input type="email" name="email" autocomplete="email"></div></label><?php endif; ?>
+ <label><span>Пароль</span><div><i class="fa-solid fa-lock"></i><input type="password" name="password" autocomplete="<?= $register?'new-password':'current-password' ?>" required></div></label>
+-<?php if($register): ?><label><span>Повторите пароль</span><div><i class="fa-solid fa-lock"></i><input type="password" name="password2" autocomplete="new-password" required></div></label><?php else: ?><label><span>Код подтверждения <small>если используется</small></span><div><i class="fa-solid fa-shield-halved"></i><input name="totp" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="000000"></div></label><?php endif; ?>
++<?php if($register): ?><label><span>Повторите пароль</span><div><i class="fa-solid fa-lock"></i><input type="password" name="password2" autocomplete="new-password" required></div></label><?php endif; ?>
+ <button type="submit"><i class="fa-solid <?= $register?'fa-user-plus':'fa-arrow-right-to-bracket' ?>"></i><?= $register?'Создать аккаунт':'Войти' ?></button></form>
+ <div class="hc-auth-switch"><?php if($register): ?>Уже есть аккаунт? <a href="/?auth=login">Войти</a><?php else: ?>Нет аккаунта? <a href="/?auth=register">Регистрация</a><?php endif; ?></div>
+ </section></div></body></html><?php exit;
+@@ -1099,14 +1028,14 @@
+ if($authAction==='login'||$authAction==='register'){
+     if(current_user())redirect('/');
+     if($_SERVER['REQUEST_METHOD']==='POST'){
+-        try{check_csrf();if($authAction==='login')hc_login((string)($_POST['username']??''),(string)($_POST['password']??''),(string)($_POST['totp']??''));else hc_register((string)($_POST['username']??''),(string)($_POST['email']??''),(string)($_POST['password']??''),(string)($_POST['password2']??''));redirect('/');}
++        try{check_csrf();if($authAction==='login')hc_login((string)($_POST['username']??''),(string)($_POST['password']??''));else hc_register((string)($_POST['username']??''),(string)($_POST['email']??''),(string)($_POST['password']??''),(string)($_POST['password2']??''));redirect('/');}
+         catch(Throwable $e){hc_render_auth_page($authAction,$e->getMessage());}
+     }
+     hc_render_auth_page($authAction);
+ }
+ if(!current_user()) hc_render_auth_page('login');
+ $user=require_auth();hc_ensure_user_root($user);
+-// v108: editor and website preview are isolated endpoints. Old URLs are redirected
++// v109: editor and website preview are isolated endpoints. Old URLs are redirected
+ // before the legacy preview block can execute, preventing editor/HTML HTTP 500s.
+ if ((string)($_GET['edit'] ?? '') === '1' && !empty($_GET['preview'])) {
+     redirect('/editor.php?'.http_build_query(['space'=>hc_space(),'path'=>hc_clean_rel((string)$_GET['preview'])],'','&',PHP_QUERY_RFC3986));
+@@ -1395,7 +1324,7 @@
+ <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+ <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+ <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css">
+-<link rel="stylesheet" href="/cloud.css?v=107">
++<link rel="stylesheet" href="/cloud.css?v=109">
+ </head>
+ <body data-share-open="<?= e($shareOpenRel) ?>">
+ <div class="hc-app" id="hcApp">
+@@ -1593,6 +1522,6 @@
+ <?php endif; ?>
+ 
+ <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous" defer></script>
+-<script src="/cloud.js?v=107" defer></script>
++<script src="/cloud.js?v=109" defer></script>
+ </body>
+ </html>
+diff -ruN /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/src/cloud/public/site-resource.php /mnt/data/v109build/src/cloud/public/site-resource.php
+--- /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/src/cloud/public/site-resource.php	2026-08-20 07:35:00.000000000 +0000
++++ /mnt/data/v109build/src/cloud/public/site-resource.php	2026-08-20 09:45:52.196459178 +0000
+@@ -1,12 +1,59 @@
+ <?php
+ declare(strict_types=1);
+-require __DIR__.'/../app/bootstrap.php';require __DIR__.'/../app/filelib.php';
+-header('X-Content-Type-Options: nosniff');header('Referrer-Policy: no-referrer');header('Cache-Control: private, no-store, max-age=0');header('Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()');
+-try{
+-    $payload=hcfl_preview_verify((string)($_GET['t']??''));$uid=(int)($payload['uid']??0);$user=hc_cloud_user_by_id($uid);if(!$user)throw new RuntimeException('Предпросмотр недоступен');$space=hcfl_space((string)($payload['space']??'private'));$root=hcfl_clean_rel((string)($payload['root']??''));$resource=hcfl_clean_rel((string)($_GET['r']??''));if($resource==='')throw new RuntimeException('Ресурс не найден');if(!hcfl_web_asset_allowed($resource))throw new RuntimeException('Тип ресурса запрещён');$archive=hcfl_clean_rel((string)($payload['archive']??''));$full=trim(($root!==''?$root.'/':'').$resource,'/');
+-    if($archive!==''){[,,$archivePath]=hcfl_resolve($user,$space,$archive,true);if(!is_file($archivePath)||!hcfl_archive_name($archivePath))throw new RuntimeException('Архив недоступен');$data=hcfl_archive_read_bytes($archivePath,$full,33554432);$body=(string)$data['content'];}
+-    else{[,,$path]=hcfl_resolve($user,$space,$full,true);if(!is_file($path))throw new RuntimeException('Ресурс не найден');$size=(int)(@filesize($path)?:0);if($size>67108864)throw new RuntimeException('Ресурс слишком большой для предпросмотра');$body=@file_get_contents($path);if(!is_string($body))throw new RuntimeException('Ресурс недоступен');}
+-    $ext=strtolower(pathinfo($resource,PATHINFO_EXTENSION));if(in_array($ext,['html','htm'],true)){$body=hcfl_rewrite_html($body,$full,$root,(string)($_GET['t']??''));header("Content-Security-Policy: sandbox allow-scripts allow-forms allow-modals allow-popups allow-downloads; default-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: blob: https:; media-src 'self' blob: https:; font-src 'self' data: https:; connect-src 'self' https:; frame-src https:; object-src 'none'; base-uri 'none'");}
+-    elseif($ext==='css')$body=hcfl_rewrite_css($body,$full,$root,(string)($_GET['t']??''));elseif(in_array($ext,['js','mjs','cjs'],true))$body=hcfl_rewrite_js($body,$full,$root,(string)($_GET['t']??''));
+-    header('Content-Type: '.hcfl_mime_name($resource));header('Content-Length: '.strlen($body));echo $body;
+-}catch(Throwable $e){http_response_code(404);header('Content-Type: text/plain; charset=utf-8');echo 'Resource unavailable';}
++require __DIR__.'/../app/bootstrap.php';
++require __DIR__.'/../app/filelib.php';
++header('X-Content-Type-Options: nosniff');
++header('Referrer-Policy: no-referrer');
++header('Cache-Control: private, no-store, max-age=0');
++header('Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()');
++
++try {
++    $token=(string)($_GET['t']??'');
++    $payload=hcfl_preview_verify($token);
++    $uid=(int)($payload['uid']??0);$user=hc_cloud_user_by_id($uid);if(!$user)throw new RuntimeException('Предпросмотр недоступен');
++    $space=hcfl_space((string)($payload['space']??'private'));
++    $root=hcfl_clean_rel((string)($payload['root']??''));
++    $resource=hcfl_clean_rel((string)($_GET['r']??''));if($resource==='')throw new RuntimeException('Ресурс не найден');
++    $archive=hcfl_clean_rel((string)($payload['archive']??''));
++    $full=trim(($root!==''?$root.'/':'').$resource,'/');
++    $actualFull=$full;
++
++    if($archive!=='') {
++        [,,$archivePath]=hcfl_resolve($user,$space,$archive,true);
++        if(!is_file($archivePath)||!hcfl_archive_name($archivePath))throw new RuntimeException('Архив недоступен');
++        $candidate=$full;
++        try{$data=hcfl_archive_read_bytes($archivePath,$candidate,134217728);}catch(Throwable $first){
++            if(pathinfo($resource,PATHINFO_EXTENSION)!=='')throw $first;
++            $candidate=rtrim($full,'/').'/index.html';$data=hcfl_archive_read_bytes($archivePath,$candidate,134217728);
++        }
++        $body=(string)$data['content'];$actualFull=(string)$data['entry'];
++    } else {
++        $candidate=$full;
++        try{[,,$path]=hcfl_resolve_casefold($user,$space,$candidate);}catch(Throwable $first){
++            if(pathinfo($resource,PATHINFO_EXTENSION)!=='')throw $first;
++            $candidate=rtrim($full,'/').'/index.html';[,,$path]=hcfl_resolve_casefold($user,$space,$candidate);
++        }
++        if(is_dir($path)){$candidate=rtrim($candidate,'/').'/index.html';[,,$path]=hcfl_resolve_casefold($user,$space,$candidate);}
++        if(!is_file($path))throw new RuntimeException('Ресурс не найден');
++        $size=(int)(@filesize($path)?:0);if($size>134217728)throw new RuntimeException('Ресурс слишком большой для предпросмотра');
++        $body=@file_get_contents($path);if(!is_string($body))throw new RuntimeException('Ресурс недоступен');
++        $actualFull=$candidate;
++    }
++
++    if(!hcfl_web_asset_allowed($actualFull))throw new RuntimeException('Тип ресурса запрещён');
++    $ext=strtolower(pathinfo($actualFull,PATHINFO_EXTENSION));
++    if(in_array($ext,['html','htm'],true)){
++        $body=hcfl_rewrite_html($body,$actualFull,$root,$token);
++        header("Content-Security-Policy: sandbox allow-scripts allow-forms allow-modals allow-popups allow-downloads; default-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: blob: https:; media-src 'self' blob: https:; font-src 'self' data: https:; connect-src 'self' https:; frame-src https:; object-src 'none'; base-uri 'none'");
++    } elseif($ext==='css') {
++        $body=hcfl_rewrite_css($body,$actualFull,$root,$token);
++    } elseif(in_array($ext,['js','mjs','cjs'],true)) {
++        $body=hcfl_rewrite_js($body,$actualFull,$root,$token);
++    }
++    header('Content-Type: '.hcfl_mime_name($actualFull));
++    header('Content-Length: '.strlen($body));
++    echo $body;
++} catch(Throwable $e) {
++    error_log('HYPER CLOUD site-resource: '.$e->getMessage().' r='.(string)($_GET['r']??''));
++    http_response_code(404);header('Content-Type: text/plain; charset=utf-8');echo 'Resource unavailable';
++}
+diff -ruN /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/src/cloud/public/site.php /mnt/data/v109build/src/cloud/public/site.php
+--- /mnt/data/v109src/HYPER-HOST-CLOUD-v108-PATCH/src/cloud/public/site.php	2026-08-20 07:35:00.000000000 +0000
++++ /mnt/data/v109build/src/cloud/public/site.php	2026-08-20 09:47:34.610544034 +0000
+@@ -1,14 +1,29 @@
+ <?php
+ declare(strict_types=1);
+-require __DIR__.'/../app/bootstrap.php';require __DIR__.'/../app/filelib.php';
+-header('X-Content-Type-Options: nosniff');header('Referrer-Policy: no-referrer');header('Cache-Control: private, no-store, max-age=0');header('X-Frame-Options: SAMEORIGIN');header('Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()');header("Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; script-src 'self' 'unsafe-inline'; font-src 'self' https://cdnjs.cloudflare.com data:; img-src 'self' data:; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'");
+-$user=require_auth();$space=hcfl_space((string)($_GET['space']??'private'));$rel='';$entry='';$error='';$token='';$resource='';$title='Предпросмотр сайта';
++require __DIR__.'/../app/bootstrap.php';
++require __DIR__.'/../app/filelib.php';
++header('X-Content-Type-Options: nosniff');
++header('Referrer-Policy: no-referrer');
++header('Cache-Control: private, no-store, max-age=0');
++header('X-Frame-Options: SAMEORIGIN');
++header('Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()');
++header("Content-Security-Policy: default-src 'self'; frame-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'");
++
++$user=require_auth();$space=hcfl_space((string)($_GET['space']??'private'));$rel='';$entry='';$error='';$src='';$title='Предпросмотр сайта';
+ try{
+-    $rel=hcfl_clean_rel((string)($_GET['path']??''));if($rel==='')throw new RuntimeException('HTML-файл не выбран');[,,$path]=hcfl_resolve($user,$space,$rel,true);if(!is_file($path))throw new RuntimeException('Файл не найден');$entry=trim((string)($_GET['entry']??''));
+-    if($entry!==''){$entry=hcfl_entry_clean($entry);if(!hcfl_html_name($entry))throw new RuntimeException('Выбранный файл не является HTML');if(!hcfl_archive_name($path))throw new RuntimeException('Архив не найден');$root=dirname($entry);if($root==='.')$root='';$payload=['uid'=>(int)$user['id'],'space'=>$space,'archive'=>$rel,'root'=>$root];$resource=$root!==''?(string)substr($entry,strlen($root)+1):$entry;$title=basename($entry);}
+-    else{if(!hcfl_html_name($path))throw new RuntimeException('Выбранный файл не является HTML');$root=dirname($rel);if($root==='.')$root='';$payload=['uid'=>(int)$user['id'],'space'=>$space,'archive'=>'','root'=>$root];$resource=$root!==''?(string)substr($rel,strlen($root)+1):$rel;$title=basename($rel);}
+-    $token=hcfl_preview_token($payload,3600);
+-}catch(Throwable $e){$error=$e->getMessage();http_response_code(400);}
+-$src=$error===''?hcfl_preview_url($token,$resource):'';
+-?>
+-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?=e($title)?> — HYPER CLOUD Preview</title><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><style>html,body{margin:0;width:100%;height:100%;background:#111827;font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif}.bar{height:54px;display:flex;align-items:center;gap:12px;padding:0 14px;background:#0c1220;border-bottom:1px solid #202a3e;color:#dce5f6;box-sizing:border-box}.dots{display:flex;gap:6px}.dots i{width:10px;height:10px;border-radius:50%;background:#ff5f57}.dots i:nth-child(2){background:#febc2e}.dots i:nth-child(3){background:#28c840}.address{flex:1;height:34px;border:1px solid #27334c;background:#121a2c;border-radius:10px;display:flex;align-items:center;gap:9px;padding:0 12px;min-width:0;color:#8fa0bd;font-size:12px}.address span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.btn{width:36px;height:36px;border:1px solid #27334c;background:#141d30;color:#d7e1f2;border-radius:10px;display:grid;place-items:center;text-decoration:none;cursor:pointer}.frame{display:block;width:100%;height:calc(100% - 54px);border:0;background:white}.err{height:100%;display:grid;place-items:center;color:#e7edf8;background:radial-gradient(circle at 50% 20%,#152646,#090e1a 55%)}.err>div{max-width:520px;padding:34px;text-align:center;border:1px solid #283651;border-radius:24px;background:#10182a}.err i{font-size:32px;color:#8194ff}.err h1{font-size:20px}.err p{color:#94a2ba;line-height:1.6}</style></head><body><?php if($error!==''):?><div class="err"><div><i class="fa-solid fa-window-restore"></i><h1>Не удалось открыть страницу</h1><p><?=e($error)?></p></div></div><?php else:?><div class="bar"><span class="dots"><i></i><i></i><i></i></span><div class="address"><i class="fa-solid fa-shield-halved"></i><span><?=e($entry!==''?basename($rel).' / '.$entry:$rel)?></span></div><button class="btn" type="button" onclick="document.getElementById('preview').contentWindow.location.reload()" title="Обновить"><i class="fa-solid fa-rotate-right"></i></button><a class="btn" href="/editor.php?<?=e(http_build_query(array_filter(['space'=>$space,'path'=>$rel,'entry'=>$entry!==''?$entry:null],fn($v)=>$v!==null),'','&',PHP_QUERY_RFC3986))?>" title="Редактировать"><i class="fa-solid fa-code"></i></a></div><iframe id="preview" class="frame" sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads" referrerpolicy="no-referrer" src="<?=e($src)?>"></iframe><?php endif;?></body></html>
++    $rel=hcfl_clean_rel((string)($_GET['path']??''));if($rel==='')throw new RuntimeException('HTML-файл не выбран');
++    [,,$path]=hcfl_resolve($user,$space,$rel,true);if(!is_file($path))throw new RuntimeException('Файл не найден');
++    $entry=trim((string)($_GET['entry']??''));
++    if($entry!==''){
++        if(!hcfl_archive_name($path))throw new RuntimeException('Архив не найден');$entry=hcfl_entry_clean($entry);if(!hcfl_html_name($entry))throw new RuntimeException('Выбранный файл не является HTML');
++        // Preflight with the same archive reader used by site-resource.php. This
++        // catches unsupported/corrupt archives before the browser opens the frame.
++        $read=hcfl_archive_read_bytes($path,$entry,134217728);$current=(string)$read['entry'];$root=dirname($current);if($root==='.')$root='';
++        $payload=['uid'=>(int)$user['id'],'space'=>$space,'archive'=>$rel,'root'=>$root];$resource=$root!==''?(string)substr($current,strlen($root)+1):$current;$title=basename($current);
++    }else{
++        if(!hcfl_html_name($path))throw new RuntimeException('Выбранный файл не является HTML');$size=(int)(@filesize($path)?:0);if($size>134217728)throw new RuntimeException('HTML-файл слишком большой для предпросмотра');
++        $probe=@file_get_contents($path);if(!is_string($probe))throw new RuntimeException('Не удалось прочитать HTML-файл');$root=dirname($rel);if($root==='.')$root='';$payload=['uid'=>(int)$user['id'],'space'=>$space,'archive'=>'','root'=>$root];$resource=$root!==''?(string)substr($rel,strlen($root)+1):$rel;$title=basename($rel);
++    }
++    $token=hcfl_preview_token($payload,3600);$src=hcfl_preview_url($token,$resource);
++}catch(Throwable $e){$error=$e->getMessage();error_log('HYPER CLOUD site preview: '.$error.' path='.$rel.' entry='.$entry);http_response_code(400);}
++?><!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?=e($title)?></title><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#fff}.frame{display:block;width:100%;height:100%;border:0;background:#fff}.err{min-height:100%;display:grid;place-items:center;padding:24px;box-sizing:border-box;background:#090e1a;color:#e7edf8;font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif}.card{width:min(520px,100%);padding:34px;border:1px solid #283651;border-radius:24px;background:#10182a;text-align:center;box-shadow:0 30px 80px rgba(0,0,0,.38)}.card b{display:block;font-size:20px;margin-bottom:10px}.card p{margin:0;color:#94a2ba;line-height:1.6}</style></head><body><?php if($error!==''):?><div class="err"><div class="card"><b>Не удалось открыть страницу</b><p><?=e($error)?></p></div></div><?php else:?><iframe class="frame" sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads" referrerpolicy="no-referrer" src="<?=e($src)?>"></iframe><?php endif;?></body></html>
