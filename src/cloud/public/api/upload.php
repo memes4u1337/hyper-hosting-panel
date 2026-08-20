@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-/** HYPER CLOUD v104 chunk upload API. Always returns JSON. */
+/** HYPER CLOUD v103 chunk upload API. Always returns JSON. */
 require dirname(__DIR__, 2) . '/app/bootstrap.php';
 
 header('Content-Type: application/json; charset=utf-8');
@@ -65,7 +65,7 @@ function api_upload_base(array $user): string
     $key = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string)($user['storage_key'] ?? 'user')) ?: 'user';
     $dir = rtrim((string)app_config('cloud_meta_dir','/var/lib/hyper-host-cloud'),'/') . '/uploads/' . $key;
     if (!is_dir($dir) && !@mkdir($dir,02770,true) && !is_dir($dir)) throw new RuntimeException('Не удалось подготовить временную папку');
-    @chmod($dir,02770); @chown($dir,'www-data'); @chgrp($dir,'www-data');
+    @chmod($dir,02770); @chown($dir,'hypercloud'); @chgrp($dir,'hypercloud');
     return $dir;
 }
 function api_session_dir(array $user, string $id, bool $create = true): string
@@ -137,7 +137,7 @@ try {
         } finally { fclose($out); }
         if($expected!==$written){@unlink($tmpFinal);throw new RuntimeException('Файл загружен не полностью: '.human_bytes($written).' из '.human_bytes($expected));}
         if(!@rename($tmpFinal,$final)){@unlink($tmpFinal);throw new RuntimeException('Не удалось завершить загрузку');}
-        @chmod($final,0660);@chown($final,'www-data');@chgrp($final,'www-data');
+        @chmod($final,0660);@chown($final,'hypercloud');@chgrp($final,'hypercloud');
         $finalRel=trim($targetRel.'/'.basename($final),'/'); if(api_space()==='shared')hc_shared_mark($finalRel,(int)$user['id'],'file');
         api_remove_tree($dir); add_event('cloud','Загружен файл: '.$finalRel);
         $query=api_space()==='shared'?('?space=shared'.($targetRel!==''?'&path='.rawurlencode($targetRel):'')):($targetRel!==''?'?path='.rawurlencode($targetRel):'');
@@ -157,7 +157,7 @@ try {
             $tmp=(string)($tmps[$i]??'');if($tmp===''||!is_uploaded_file($tmp))throw new RuntimeException('Временный файл недоступен');
             $name=api_valid_name((string)$raw);$final=api_unique_target($targetDir,$name);
             if(!@move_uploaded_file($tmp,$final))throw new RuntimeException('Не удалось сохранить '.$name);
-            @chmod($final,0660);@chown($final,'www-data');@chgrp($final,'www-data');
+            @chmod($final,0660);@chown($final,'hypercloud');@chgrp($final,'hypercloud');
             $rel=trim($targetRel.'/'.basename($final),'/');if(api_space()==='shared')hc_shared_mark($rel,(int)$user['id'],'file');$count++;
         }
         if($count<1)throw new RuntimeException('Не удалось загрузить файлы');

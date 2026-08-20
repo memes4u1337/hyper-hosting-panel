@@ -1,0 +1,42 @@
+#!/usr/bin/php
+<?php
+declare(strict_types=1);
+
+// HYPER CLOUD v107 — narrow privileged bridge for panel authentication.
+// Reads one JSON object from stdin and returns only minimal auth result.
+function out(array $v,int $code=0): never { echo json_encode($v,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES); exit($code); }
+function b32(string $s): string { $a='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';$s=strtoupper(preg_replace('/[^A-Z2-7]/','',$s)??'');$bits='';for($i=0;$i<strlen($s);$i++){$v=strpos($a,$s[$i]);if($v===false)continue;$bits.=str_pad(decbin($v),5,'0',STR_PAD_LEFT);} $o='';for($i=0;$i+8<=strlen($bits);$i+=8)$o.=chr(bindec(substr($bits,$i,8)));return $o; }
+function totp(string $secret,int $slice): string { $k=b32($secret);if($k==='')return '';$time=pack('N*',0).pack('N*',$slice);$h=hash_hmac('sha1',$time,$k,true);$off=ord(substr($h,-1))&15;$n=unpack('N',substr($h,$off,4))[1]&0x7fffffff;return str_pad((string)($n%1000000),6,'0',STR_PAD_LEFT); }
+function verify_totp_local(string $secret,string $code): bool { $code=preg_replace('/\D/','',$code)??'';if(strlen($code)!==6)return false;$s=(int)floor(time()/30);for($i=-1;$i<=1;$i++)if(hash_equals(totp($secret,$s+$i),$code))return true;return false; }
+function rate_file_state(): array {
+    $dir='/var/lib/hyper-cloud-auth';if(!is_dir($dir))@mkdir($dir,0700,true);$file=$dir.'/attempts.json';
+    $fh=@fopen($file,'c+');if(!$fh)return [null,[],time()];flock($fh,LOCK_EX);$raw=stream_get_contents($fh);$d=json_decode(is_string($raw)?$raw:'',true);if(!is_array($d))$d=[];$now=time();
+    foreach($d as $k=>$arr){if(!is_array($arr)){unset($d[$k]);continue;}$d[$k]=array_values(array_filter($arr,fn($t)=>(int)$t>$now-3600));if(!$d[$k])unset($d[$k]);}
+    return [$fh,$d,$now];
+}
+function rate_save($fh,array $d): void { if(!is_resource($fh))return;ftruncate($fh,0);rewind($fh);fwrite($fh,json_encode($d));fflush($fh);flock($fh,LOCK_UN);fclose($fh);@chmod('/var/lib/hyper-cloud-auth/attempts.json',0600); }
+function rate_blocked(string $username,string $ip): bool {
+    [$fh,$d,$now]=rate_file_state();$uk='u:'.hash('sha256',strtolower($username));$ik='i:'.hash('sha256',$ip);
+    $blocked=count($d[$uk]??[])>=12||count(array_filter($d[$ik]??[],fn($t)=>(int)$t>$now-900))>=40;rate_save($fh,$d);return $blocked;
+}
+function rate_record(string $username,string $ip,bool $success): void {
+    [$fh,$d,$now]=rate_file_state();$uk='u:'.hash('sha256',strtolower($username));$ik='i:'.hash('sha256',$ip);
+    if($success){unset($d[$uk]);}else{$d[$uk][]=$now;$d[$ik][]=$now;}rate_save($fh,$d);
+}
+try {
+    $raw=stream_get_contents(STDIN);$req=json_decode((string)$raw,true);if(!is_array($req))out(['ok'=>false],1);
+    $action=(string)($req['action']??'');$username=trim((string)($req['username']??''));if(!preg_match('/^[A-Za-z0-9_.@-]{1,80}$/',$username))out(['ok'=>false,'exists'=>false]);
+    $cfgFile='/var/www/hyper-host/app/config.php';if(!is_file($cfgFile))out(['ok'=>false],2);$cfg=require $cfgFile;if(!is_array($cfg)||empty($cfg['db_path']))out(['ok'=>false],2);
+    $pdo=new PDO('sqlite:'.(string)$cfg['db_path']);$pdo->setAttribute(PDO::ATTR_ERRMODE,PDO::ERRMODE_EXCEPTION);$pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE,PDO::FETCH_ASSOC);
+    $st=$pdo->prepare('SELECT id,username,password_hash FROM users WHERE username=? LIMIT 1');$st->execute([$username]);$u=$st->fetch();
+    if($action==='exists')out(['ok'=>true,'exists'=>is_array($u)]);
+    $ip=preg_replace('/[^0-9A-Fa-f:.]/','',(string)($req['ip']??''))??'';
+    if($action!=='login')out(['ok'=>false]);
+    if(rate_blocked($username,$ip))out(['ok'=>false]);
+    if(!is_array($u)){rate_record($username,$ip,false);out(['ok'=>false]);}
+    $get=function(string $key,string $default='')use($pdo):string{$s=$pdo->prepare('SELECT value FROM settings WHERE key=? LIMIT 1');$s->execute([$key]);$v=$s->fetchColumn();return $v===false?$default:(string)$v;};
+    $allow=trim($get('security_ip_allowlist',''));if($allow!==''){$allowed=false;foreach(preg_split('/[\r\n,]+/',$allow)?:[] as $line){$line=trim($line);if($line==='')continue;if($line===$ip||str_ends_with($line,'.*')&&str_starts_with($ip,substr($line,0,-1))){$allowed=true;break;}}if(!$allowed){rate_record($username,$ip,false);out(['ok'=>false]);}}
+    $password=(string)($req['password']??'');if($password===''||!password_verify($password,(string)$u['password_hash'])){rate_record($username,$ip,false);out(['ok'=>false]);}
+    if($get('security_2fa_enabled','0')==='1'){$secret=$get('security_2fa_secret','');$code=(string)($req['totp']??'');if($secret===''||!verify_totp_local($secret,$code)){rate_record($username,$ip,false);out(['ok'=>false]);}}
+    rate_record($username,$ip,true);out(['ok'=>true,'id'=>(int)$u['id'],'username'=>(string)$u['username']]);
+} catch(Throwable $e) { error_log('hyper-cloud-panel-auth: '.$e->getMessage()); out(['ok'=>false],1); }

@@ -1,17 +1,27 @@
 <?php
 declare(strict_types=1);
 
-/** HYPER CLOUD v104 standalone bootstrap. */
+/** HYPER CLOUD v107 hardened standalone bootstrap. */
+ini_set('session.use_strict_mode', '1');
+ini_set('session.use_only_cookies', '1');
 session_name('HYPERCLOUDSESSID');
 session_set_cookie_params([
     'lifetime' => 0,
     'path' => '/',
     'domain' => '',
-    'secure' => (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off'),
+    'secure' => true,
     'httponly' => true,
     'samesite' => 'Lax',
 ]);
 session_start();
+if (!isset($_SESSION['hc_started_at'])) $_SESSION['hc_started_at'] = time();
+if (!isset($_SESSION['hc_last_seen'])) $_SESSION['hc_last_seen'] = time();
+if ((time() - (int)$_SESSION['hc_last_seen']) > 28800 || (time() - (int)$_SESSION['hc_started_at']) > 86400) {
+    $_SESSION = [];
+    session_regenerate_id(true);
+    $_SESSION['hc_started_at'] = time();
+}
+$_SESSION['hc_last_seen'] = time();
 date_default_timezone_set('Europe/Moscow');
 
 $hcConfig = [
@@ -101,53 +111,55 @@ function hc_init_schema(PDO $pdo): void
         token TEXT PRIMARY KEY, owner_user_id INTEGER NOT NULL, space TEXT NOT NULL DEFAULT 'private', rel_path TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )");
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_public_shares_owner ON public_shares(owner_user_id,space,rel_path)");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS auth_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, login_key TEXT NOT NULL, success INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_auth_attempts_key_time ON auth_attempts(login_key,created_at)");
 }
-function hc_panel_config(): array
+function hc_panel_auth_helper(array $payload): array
 {
-    static $cfg=null; if(is_array($cfg))return $cfg;
-    $path=(string)app_config('panel_config','/var/www/hyper-host/app/config.php');
-    if(!is_file($path)) return $cfg=[];
-    $data=require $path; return $cfg=is_array($data)?$data:[];
+    $helper = '/usr/local/sbin/hyper-cloud-panel-auth';
+    if (!is_executable($helper)) return ['ok'=>false,'exists'=>false];
+    $spec = [0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']];
+    $proc = @proc_open(['/usr/bin/sudo','-n',$helper], $spec, $pipes, null, ['PATH'=>'/usr/sbin:/usr/bin:/sbin:/bin']);
+    if (!is_resource($proc)) return ['ok'=>false,'exists'=>false];
+    fwrite($pipes[0], json_encode($payload, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)); fclose($pipes[0]);
+    $out = stream_get_contents($pipes[1]); fclose($pipes[1]);
+    $err = stream_get_contents($pipes[2]); fclose($pipes[2]);
+    $code = proc_close($proc);
+    $data = json_decode((string)$out, true);
+    if ($code !== 0 || !is_array($data)) { error_log('HYPER CLOUD auth helper failed: '.trim((string)$err)); return ['ok'=>false,'exists'=>false]; }
+    return $data;
 }
-function hc_panel_db(): ?PDO
+function hc_panel_user_exists(string $username): bool
 {
-    static $pdo=false; if($pdo instanceof PDO)return $pdo; if($pdo===null)return null;
-    $cfg=hc_panel_config(); $path=(string)($cfg['db_path']??'');
-    if($path===''||!is_file($path)){ $pdo=null; return null; }
-    try{ $pdo=new PDO('sqlite:'.$path); $pdo->setAttribute(PDO::ATTR_ERRMODE,PDO::ERRMODE_EXCEPTION); $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE,PDO::FETCH_ASSOC); return $pdo; }
-    catch(Throwable){$pdo=null;return null;}
+    $r = hc_panel_auth_helper(['action'=>'exists','username'=>trim($username)]);
+    return !empty($r['exists']);
 }
-function hc_panel_user_by_username(string $username): ?array
+function hc_login_key(string $username): string
 {
-    $pdo=hc_panel_db(); if(!$pdo)return null;
-    try{$st=$pdo->prepare('SELECT * FROM users WHERE lower(username)=lower(?) LIMIT 1');$st->execute([$username]);$r=$st->fetch();return is_array($r)?$r:null;}catch(Throwable){return null;}
+    $ip = (string)($_SERVER['REMOTE_ADDR'] ?? 'unknown');
+    return hash('sha256', strtolower(trim($username)).'|'.$ip);
 }
-function hc_base32_decode(string $base32): string
+function hc_auth_guard(string $username): void
 {
-    $alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';$base32=strtoupper((string)preg_replace('/[^A-Z2-7]/','',$base32));$bits='';
-    for($i=0;$i<strlen($base32);$i++){ $v=strpos($alphabet,$base32[$i]); if($v===false)continue; $bits.=str_pad(decbin($v),5,'0',STR_PAD_LEFT); }
-    $out=''; for($i=0;$i+8<=strlen($bits);$i+=8)$out.=chr(bindec(substr($bits,$i,8))); return $out;
+    $key=hc_login_key($username);$now=time();$since=$now-900;
+    $db=hc_db();$db->prepare('DELETE FROM auth_attempts WHERE created_at < ?')->execute([$now-86400]);
+    $st=$db->prepare('SELECT COUNT(*) FROM auth_attempts WHERE login_key=? AND success=0 AND created_at>=?');$st->execute([$key,$since]);
+    if((int)$st->fetchColumn()>=8) throw new RuntimeException('Слишком много попыток. Попробуйте через несколько минут.');
 }
-function hc_totp_code(string $secret,?int $slice=null): string
+function hc_auth_record(string $username,bool $success): void
 {
-    $slice??=(int)floor(time()/30);$key=hc_base32_decode($secret);if($key==='')return '';
-    $time=pack('N*',0).pack('N*',$slice);$hash=hash_hmac('sha1',$time,$key,true);$offset=ord(substr($hash,-1))&0x0F;$tr=unpack('N',substr($hash,$offset,4))[1]&0x7FFFFFFF;
-    return str_pad((string)($tr%1000000),6,'0',STR_PAD_LEFT);
+    $key=hc_login_key($username);$db=hc_db();
+    if($success){$db->prepare('DELETE FROM auth_attempts WHERE login_key=?')->execute([$key]);return;}
+    $db->prepare('INSERT INTO auth_attempts(login_key,success,created_at) VALUES(?,0,?)')->execute([$key,time()]);
 }
-function hc_verify_totp(string $secret,string $code): bool
+
+function hc_registration_guard(): void
 {
-    $code=(string)preg_replace('/\D/','',$code); if(strlen($code)!==6)return false;$slice=(int)floor(time()/30);
-    for($i=-1;$i<=1;$i++) if(hash_equals(hc_totp_code($secret,$slice+$i),$code)) return true; return false;
-}
-function hc_panel_2fa_required(): bool
-{
-    $pdo=hc_panel_db(); if(!$pdo)return false;
-    try{$st=$pdo->prepare("SELECT value FROM settings WHERE key='security_2fa_enabled'");$st->execute();return (string)($st->fetchColumn()?:'0')==='1';}catch(Throwable){return false;}
-}
-function hc_panel_2fa_secret(): string
-{
-    $pdo=hc_panel_db(); if(!$pdo)return '';
-    try{$st=$pdo->prepare("SELECT value FROM settings WHERE key='security_2fa_secret'");$st->execute();return (string)($st->fetchColumn()?:'');}catch(Throwable){return '';}
+    $ip=(string)($_SERVER['REMOTE_ADDR']??'unknown');$key='register:'.hash('sha256',$ip);$now=time();$db=hc_db();
+    $db->prepare('DELETE FROM auth_attempts WHERE created_at < ?')->execute([$now-86400]);
+    $st=$db->prepare('SELECT COUNT(*) FROM auth_attempts WHERE login_key=? AND created_at>=?');$st->execute([$key,$now-3600]);
+    if((int)$st->fetchColumn()>=10)throw new RuntimeException('Слишком много регистраций с этого адреса. Попробуйте позже.');
+    $db->prepare('INSERT INTO auth_attempts(login_key,success,created_at) VALUES(?,1,?)')->execute([$key,$now]);
 }
 function hc_storage_key_for_panel(int $panelId): string { return 'panel-'.$panelId; }
 function hc_storage_key_for_cloud(int $id): string { return 'user-'.$id; }
@@ -175,7 +187,11 @@ function hc_cloud_user_by_username(string $username): ?array
 }
 function current_user(): ?array
 {
-    $id=(int)($_SESSION['hc_user_id']??0); return $id>0?hc_cloud_user_by_id($id):null;
+    $id=(int)($_SESSION['hc_user_id']??0);
+    if($id<1) return null;
+    $u=hc_cloud_user_by_id($id);
+    if(!$u){unset($_SESSION['hc_user_id']);return null;}
+    return $u;
 }
 function require_auth(): array
 {
@@ -184,31 +200,31 @@ function require_auth(): array
 function hc_login(string $username,string $password,string $totp=''): array
 {
     $username=trim($username);if($username===''||$password==='')throw new RuntimeException('Введите логин и пароль');
-    $panel=hc_panel_user_by_username($username);
-    if($panel && password_verify($password,(string)($panel['password_hash']??''))){
-        if(hc_panel_2fa_required()){
-            $secret=hc_panel_2fa_secret();if($secret===''||!hc_verify_totp($secret,$totp))throw new RuntimeException('Введите корректный 2FA-код панели');
-        }
-        $u=hc_upsert_panel_cloud_user($panel);$_SESSION['hc_user_id']=(int)$u['id'];session_regenerate_id(true);hc_ensure_user_root($u);add_event('auth','Вход через аккаунт HYPER-HOST');return $u;
+    hc_auth_guard($username);
+    $panel=hc_panel_auth_helper(['action'=>'login','username'=>$username,'password'=>$password,'totp'=>$totp,'ip'=>(string)($_SERVER['REMOTE_ADDR']??'')]);
+    if(!empty($panel['ok'])){
+        $panelUser=['id'=>(int)($panel['id']??0),'username'=>(string)($panel['username']??$username)];
+        $u=hc_upsert_panel_cloud_user($panelUser);$_SESSION['hc_user_id']=(int)$u['id'];session_regenerate_id(true);$_SESSION['hc_started_at']=time();$_SESSION['hc_last_seen']=time();hc_ensure_user_root($u);hc_auth_record($username,true);add_event('auth','Вход администратора');return $u;
     }
     $u=hc_cloud_user_by_username($username);
-    if(!$u || (string)($u['auth_source']??'')!=='cloud' || !password_verify($password,(string)($u['password_hash']??''))) throw new RuntimeException('Неверный логин или пароль');
+    if(!$u || (string)($u['auth_source']??'')!=='cloud' || !password_verify($password,(string)($u['password_hash']??''))){hc_auth_record($username,false);throw new RuntimeException('Неверные данные для входа');}
     hc_db()->prepare("UPDATE cloud_users SET last_login_at=datetime('now','localtime') WHERE id=?")->execute([(int)$u['id']]);
-    $_SESSION['hc_user_id']=(int)$u['id'];session_regenerate_id(true);hc_ensure_user_root($u);add_event('auth','Вход в HYPER CLOUD');return hc_cloud_user_by_id((int)$u['id'])??$u;
+    $_SESSION['hc_user_id']=(int)$u['id'];session_regenerate_id(true);$_SESSION['hc_started_at']=time();$_SESSION['hc_last_seen']=time();hc_ensure_user_root($u);hc_auth_record($username,true);add_event('auth','Вход в HYPER CLOUD');return hc_cloud_user_by_id((int)$u['id'])??$u;
 }
 function hc_register(string $username,string $email,string $password,string $password2): array
 {
     $username=trim($username);$email=trim($email);
     if(!preg_match('/^[A-Za-z0-9_.-]{3,40}$/',$username))throw new RuntimeException('Логин: 3–40 символов, буквы, цифры, . _ -');
     if($email!==''&&!filter_var($email,FILTER_VALIDATE_EMAIL))throw new RuntimeException('Некорректный e-mail');
-    if(strlen($password)<10)throw new RuntimeException('Пароль должен быть не короче 10 символов');
+    if(strlen($password)<12)throw new RuntimeException('Пароль должен быть не короче 12 символов');
     if(!hash_equals($password,$password2))throw new RuntimeException('Пароли не совпадают');
-    if(hc_panel_user_by_username($username))throw new RuntimeException('Этот логин уже используется аккаунтом панели');
+    if(hc_panel_user_exists($username))throw new RuntimeException('Этот логин уже занят');
     if(hc_cloud_user_by_username($username))throw new RuntimeException('Этот логин уже занят');
+    hc_registration_guard();
     $db=hc_db();$hash=password_hash($password,PASSWORD_DEFAULT);
     $db->prepare("INSERT INTO cloud_users(username,email,display_name,password_hash,auth_source,role,storage_key) VALUES(?,?,?,?,'cloud','user','pending')")->execute([$username,$email,$username,$hash]);
-    $id=(int)$db->lastInsertId();$key=hc_storage_key_for_cloud($id);$db->prepare('UPDATE cloud_users SET storage_key=? WHERE id=?')->execute([$key,$id]);
-    $u=hc_cloud_user_by_id($id)??throw new RuntimeException('Не удалось создать аккаунт');$_SESSION['hc_user_id']=$id;session_regenerate_id(true);hc_ensure_user_root($u);add_event('auth','Регистрация аккаунта HYPER CLOUD');return $u;
+    $id=(int)$db->lastInsertId();$key='user-'.$id.'-'.bin2hex(random_bytes(8));$db->prepare('UPDATE cloud_users SET storage_key=? WHERE id=?')->execute([$key,$id]);
+    $u=hc_cloud_user_by_id($id)??throw new RuntimeException('Не удалось создать аккаунт');$_SESSION['hc_user_id']=$id;session_regenerate_id(true);$_SESSION['hc_started_at']=time();$_SESSION['hc_last_seen']=time();hc_ensure_user_root($u);add_event('auth','Регистрация аккаунта HYPER CLOUD');return $u;
 }
 function hc_logout(): never { $_SESSION=[]; if(ini_get('session.use_cookies')){ $p=session_get_cookie_params();setcookie(session_name(),'',time()-42000,$p['path'],$p['domain'],$p['secure'],$p['httponly']); } session_destroy();redirect('/?auth=login'); }
 function hc_is_panel_admin(?array $user=null): bool { $user??=current_user(); return is_array($user)&&(string)($user['auth_source']??'')==='panel'; }
@@ -240,6 +256,18 @@ function hc_shared_repath_tree(string $old,string $new): void
     hc_db()->beginTransaction();try{hc_db()->prepare("DELETE FROM shared_entries WHERE rel_path=? OR rel_path LIKE ?")->execute([$old,$old.'/%']);$ins=hc_db()->prepare('INSERT OR REPLACE INTO shared_entries(rel_path,owner_user_id,entry_type) VALUES(?,?,?)');foreach($all as $r){$p=(string)$r['rel_path'];$np=$p===$old?$new:$new.substr($p,strlen($old));$ins->execute([$np,(int)$r['owner_user_id'],(string)$r['entry_type']]);}hc_db()->commit();}catch(Throwable $e){hc_db()->rollBack();throw $e;}
 }
 function hc_shared_remove_tree(string $rel): void { hc_db()->prepare("DELETE FROM shared_entries WHERE rel_path=? OR rel_path LIKE ?")->execute([$rel,$rel.'/%']); }
+function hc_shared_tree_has_foreign_owner(string $rel,int $ownerId): bool
+{
+    $rel=trim(str_replace('\\','/',$rel),'/');if($rel==='')return true;
+    $st=hc_db()->prepare('SELECT 1 FROM shared_entries WHERE (rel_path=? OR rel_path LIKE ?) AND owner_user_id<>? LIMIT 1');
+    $st->execute([$rel,$rel.'/%',$ownerId]);return (bool)$st->fetchColumn();
+}
+function hc_assert_shared_tree_modify(string $rel): void
+{
+    if(hc_space()!=='shared')return;$u=current_user();if(!$u)throw new RuntimeException('Требуется авторизация');if(hc_is_panel_admin($u))return;
+    if(hc_shared_owner($rel)!==(int)$u['id'])throw new RuntimeException('Изменять эту папку может только её владелец');
+    if(hc_shared_tree_has_foreign_owner($rel,(int)$u['id']))throw new RuntimeException('В папке есть файлы других пользователей');
+}
 function hc_can_modify(string $rel): bool
 {
     if(hc_space()!=='shared')return true;$u=current_user();if(!$u)return false;if(hc_is_panel_admin($u))return true;return hc_shared_owner($rel)===(int)$u['id'];
