@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-/** HYPER CLOUD v103 standalone bootstrap. */
+/** HYPER CLOUD v104 standalone bootstrap. */
 session_name('HYPERCLOUDSESSID');
 session_set_cookie_params([
     'lifetime' => 0,

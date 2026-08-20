@@ -208,7 +208,7 @@ body:not(.hc-public-body){--hc-v99-line:#e6eaf2;--hc-v99-soft:#f7f9fc;--hc-v99-i
 .hc-editor-site{height:36px;padding:0 12px;border:1px solid #31533f;border-radius:10px;color:#8fe0aa;display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:800;background:#173126;white-space:nowrap}.hc-editor-site:hover{background:#1d3e30;color:#b9f3cb;border-color:#3d7252}.hc-archive-actions{display:flex;align-items:center;justify-content:center;gap:6px}.hc-archive-actions .hc-archive-edit-btn:has(.fa-globe){background:#edf8f1;border-color:#d7ecde;color:#278248}.hc-archive-actions .hc-archive-edit-btn:has(.fa-globe):hover{background:#ddf3e5;border-color:#bee2c9;color:#176d35}.hc-file-actions a[title="Редактировать код"]{color:#365fe5;background:#edf2ff}.hc-file-actions a[title="Редактировать код"]:hover{background:#dfe8ff;color:#244bd1}.hc-list-actions a[title="Редактировать код"]{color:#365fe5}.hc-context-menu a .fa-globe{color:#26914c}.hc-context-menu a .fa-code{color:#4168e8}
 @media(max-width:600px){.hc-editor-site{width:40px;padding:0;justify-content:center;font-size:0}.hc-editor-site i{font-size:13px}.hc-archive-actions{gap:3px}}
 
-/* HYPER CLOUD v103 — standalone auth + multi-user polish */
+/* HYPER CLOUD v104 — standalone auth + multi-user polish */
 .hc-auth-body{min-height:100vh;margin:0;background:radial-gradient(circle at 15% 10%,rgba(74,108,255,.16),transparent 30%),radial-gradient(circle at 90% 80%,rgba(121,83,255,.13),transparent 34%),#f5f7fc;color:#172033;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:grid;place-items:center;padding:28px}
 .hc-auth-wrap{width:min(100%,470px)}
 .hc-auth-card{background:rgba(255,255,255,.92);backdrop-filter:blur(22px);border:1px solid rgba(219,226,242,.9);border-radius:28px;padding:32px;box-shadow:0 30px 80px rgba(32,46,86,.16)}
@@ -227,7 +227,7 @@ body:not(.hc-public-body){--hc-v99-line:#e6eaf2;--hc-v99-soft:#f7f9fc;--hc-v99-i
 .hc-file-actions a[title="Открыть сайт"]:hover,.hc-list-actions a[title="Открыть сайт"]:hover{background:#e7e7ff;color:#464bc4}
 @media(max-width:560px){.hc-auth-body{padding:14px}.hc-auth-card{padding:23px;border-radius:22px}.hc-auth-copy h1{font-size:24px}}
 
-/* v103: explicit website launch action for HTML files. */
+/* v104: explicit website launch action for HTML files. */
 .hc-file-actions .hc-site-quick{width:auto;min-width:76px;padding:0 12px;border-radius:12px;gap:7px;background:linear-gradient(135deg,#eef4ff,#f4f0ff);color:#4667ff;border:1px solid #dbe3ff;font-weight:800;font-size:12px;text-decoration:none}
 .hc-file-actions .hc-site-quick:hover{background:linear-gradient(135deg,#4667ff,#6b5cff);color:#fff;border-color:transparent;box-shadow:0 10px 24px rgba(70,103,255,.22)}
 .hc-file-actions .hc-site-quick span{display:inline}

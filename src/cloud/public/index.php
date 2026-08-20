@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 /**
- * HYPER CLOUD v103 — standalone multi-user cloud on cloud.hyper-host.pw.
+ * HYPER CLOUD v104 — standalone multi-user cloud on cloud.hyper-host.pw.
  * Panel administrators can sign in with panel credentials; cloud registrations stay cloud-only.
  */
 require __DIR__ . '/../app/bootstrap.php';
@@ -1019,7 +1019,7 @@ function hc_public_error_page(): never
     http_response_code(404);
     hc_public_headers();
     ?>
-<!doctype html><html lang="ru" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ссылка недоступна — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud.css?v=103"></head><body class="hc-public-body hc-public-error-body">
+<!doctype html><html lang="ru" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ссылка недоступна — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud.css?v=104"></head><body class="hc-public-body hc-public-error-body">
 <main class="hc-public-page"><section class="hc-public-card hc-public-error-card"><div class="hc-public-brand"><span><i class="fa-solid fa-cloud"></i></span><b>HYPER CLOUD</b></div><div class="hc-public-error-icon"><i class="fa-solid fa-link-slash"></i></div><h1>Ссылка недоступна</h1><p>Доступ закрыт или файл больше не существует.</p></section></main></body></html><?php
     exit;
 }
@@ -1037,7 +1037,7 @@ function hc_public_share_page(array $share): never
     http_response_code(200);
     hc_public_headers();
     ?>
-<!doctype html><html lang="ru" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($name) ?> — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud.css?v=103"></head><body class="hc-public-body">
+<!doctype html><html lang="ru" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($name) ?> — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud.css?v=104"></head><body class="hc-public-body">
 <main class="hc-public-page"><section class="hc-public-card"><div class="hc-public-brand"><span><i class="fa-solid fa-cloud"></i></span><b>HYPER CLOUD</b></div>
 <div class="hc-public-file"><div class="hc-public-file-icon <?= e($kind) ?>"><i class="fa-solid <?= e(hc_icon($path)) ?>"></i></div><div><h1><?= e($name) ?></h1><p><?= e(human_bytes($size)) ?> <span>•</span> <?= e(date('d.m.Y H:i', (int)(filemtime($path) ?: time()))) ?></p></div></div>
 <?php if(str_starts_with($mime,'image/')): ?><div class="hc-public-preview image"><img src="<?= e($inline) ?>" alt=""></div>
@@ -1063,7 +1063,7 @@ function hc_render_auth_page(string $mode='login', string $error=''): never
     $register=$mode==='register';$twofa=hc_panel_2fa_required();$flash=flash();if($error===''&&$flash)$error=(string)($flash['message']??'');
     http_response_code(200);header('X-Frame-Options: DENY');header('Cache-Control: no-store');
     ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= $register?'Регистрация':'Вход' ?> — HYPER CLOUD</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud.css?v=103"></head><body class="hc-auth-body">
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= $register?'Регистрация':'Вход' ?> — HYPER CLOUD</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"><link rel="stylesheet" href="/cloud.css?v=104"></head><body class="hc-auth-body">
 <div class="hc-auth-wrap"><section class="hc-auth-card"><div class="hc-auth-brand"><span><i class="fa-solid fa-cloud"></i></span><div><b>HYPER CLOUD</b><small>cloud.hyper-host.pw</small></div></div><div class="hc-auth-copy"><h1><?= $register?'Создать аккаунт':'Вход в облако' ?></h1></div>
 <?php if($error!==''): ?><div class="hc-auth-error"><i class="fa-solid fa-circle-exclamation"></i><?= e($error) ?></div><?php endif; ?>
 <form method="post" action="/?auth=<?= $register?'register':'login' ?>" class="hc-auth-form"><?= '<input type="hidden" name="_csrf" value="'.e(csrf_token()).'">' ?>
@@ -1367,7 +1367,7 @@ $viewTitle = $view==='disk' && hc_space()==='shared' ? 'Общая папка' :
 <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css">
-<link rel="stylesheet" href="/cloud.css?v=103">
+<link rel="stylesheet" href="/cloud.css?v=104">
 </head>
 <body data-share-open="<?= e($shareOpenRel) ?>">
 <div class="hc-app" id="hcApp">
@@ -1563,6 +1563,6 @@ $viewTitle = $view==='disk' && hc_space()==='shared' ? 'Общая папка' :
 <?php endif; ?>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous" defer></script>
-<script src="/cloud.js?v=103" defer></script>
+<script src="/cloud.js?v=104" defer></script>
 </body>
 </html>

@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-/** HYPER CLOUD v103 chunk upload API. Always returns JSON. */
+/** HYPER CLOUD v104 chunk upload API. Always returns JSON. */
 require dirname(__DIR__, 2) . '/app/bootstrap.php';
 
 header('Content-Type: application/json; charset=utf-8');
