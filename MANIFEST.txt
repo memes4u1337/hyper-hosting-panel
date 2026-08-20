@@ -1,9 +1,11 @@
-HYPER CLOUD v103 files
-- apply-v2.1-cloud-domain-multiuser.sh
-- src/cloud/app/bootstrap.php
-- src/cloud/public/index.php
-- src/cloud/public/api/upload.php
-- src/cloud/public/cloud.css
-- src/cloud/public/cloud.js
-- README-INSTALL.txt
-- PATCH-v103-CLOUD-DOMAIN-MULTIUSER.md
+HYPER-HOST-CLOUD-v105-PATCH
+apply-v2.3-cloud-vhost-repair.sh
+scripts/hyper-cloud-nginx-fragment.sh
+src/cloud/app/bootstrap.php
+src/cloud/public/index.php
+src/cloud/public/cloud.css
+src/cloud/public/cloud.js
+src/cloud/public/api/upload.php
+PATCH-v105-CLOUD-VHOST-REPAIR.md
+README-INSTALL.txt
+SHA256SUMS.txt
