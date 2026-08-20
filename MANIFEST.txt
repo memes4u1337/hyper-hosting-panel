@@ -1,8 +1,8 @@
-HYPER-HOST-CLOUD-v99-PATCH
-apply-v1.7-cloud-polish.sh
+HYPER-HOST-CLOUD-v100-PATCH
+apply-v1.8-cloud-editor.sh
 src/public/cloud/index.php
 src/public/cloud/cloud.css
 src/public/cloud/cloud.js
-PATCH-v99-POLISH.md
+PATCH-v100-EDITOR.md
 README-INSTALL.txt
 SHA256SUMS.txt

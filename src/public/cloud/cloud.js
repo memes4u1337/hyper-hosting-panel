@@ -6,6 +6,7 @@
   const uploadDialog = $('#uploadDialog');
   const folderDialog = $('#folderDialog');
   const renameDialog = $('#renameDialog');
+  const deleteDialog = $('#deleteDialog');
   const filesInput = $('#hcFilesInput');
   const uploadZone = $('#hcUploadZone');
   const uploadForm = $('#hcUploadForm');
@@ -171,6 +172,20 @@
     });
   });
 
+  $$('[data-delete-target]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const target = btn.getAttribute('data-delete-target') || '';
+      const name = btn.getAttribute('data-delete-name') || target || 'Файл';
+      const targetInput = $('#hcDeleteTarget');
+      const nameEl = $('#hcDeleteName');
+      if (targetInput) targetInput.value = target;
+      if (nameEl) nameEl.textContent = name;
+      $$('.hc-context-menu.open').forEach(m => m.classList.remove('open'));
+      closeDialogs(deleteDialog);
+      if (deleteDialog && !deleteDialog.open) deleteDialog.showModal();
+    });
+  });
+
   function applyView(mode) {
     const useList = mode === 'list';
     if (grid) grid.hidden = useList;
@@ -280,6 +295,40 @@
     const trigger = $$('[data-share-target]').find(el => (el.getAttribute('data-share-target') || '') === autoShare);
     if (trigger) setTimeout(() => openShareDialog(trigger), 80);
   }
+
+  // Built-in code editor: tabs, live line counter and Ctrl/Cmd+S.
+  $$('.hc-code-editor').forEach(editor => {
+    const form = editor.closest('form[data-editor-form]');
+    const lines = $('#hcEditorLines', form || document);
+    const updateLines = () => {
+      if (!lines) return;
+      const count = (editor.value.match(/\n/g) || []).length + 1;
+      lines.textContent = `${count} ${count % 10 === 1 && count % 100 !== 11 ? 'строка' : (count % 10 >= 2 && count % 10 <= 4 && (count % 100 < 10 || count % 100 >= 20) ? 'строки' : 'строк')}`;
+    };
+    updateLines();
+    editor.addEventListener('input', updateLines);
+    editor.addEventListener('keydown', e => {
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const start = editor.selectionStart;
+        const end = editor.selectionEnd;
+        editor.setRangeText('  ', start, end, 'end');
+        updateLines();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        if (!editor.readOnly && form) form.requestSubmit();
+      }
+    });
+    form?.addEventListener('submit', () => {
+      const save = form.querySelector('button[type="submit"]');
+      if (save) {
+        save.disabled = true;
+        save.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>Сохранение…';
+      }
+    });
+  });
 
   // ESC is intentionally disabled for open Cloud modals.
   document.addEventListener('keydown', e => {
