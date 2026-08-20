@@ -1,7 +1,8 @@
 MANIFEST.txt
-PATCH-v107-EDITOR-SECURITY-UI.md
+PATCH-v108-RUNTIME-PERMISSIONS.md
 README-INSTALL.txt
-apply-v2.5-cloud-security-editor.sh
+SHA256SUMS.txt
+apply-v2.6-cloud-runtime-repair.sh
 scripts/hyper-cloud-nginx-fragment.sh
 scripts/hyper-cloud-panel-auth
 src/cloud/app/bootstrap.php

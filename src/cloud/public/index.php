@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 /**
- * HYPER CLOUD v107 — hardened standalone multi-user cloud on cloud.hyper-host.pw.
+ * HYPER CLOUD v108 — hardened standalone multi-user cloud on cloud.hyper-host.pw.
  * Panel administrators can sign in with panel credentials; cloud registrations stay cloud-only.
  */
 require __DIR__ . '/../app/bootstrap.php';
@@ -1106,7 +1106,7 @@ if($authAction==='login'||$authAction==='register'){
 }
 if(!current_user()) hc_render_auth_page('login');
 $user=require_auth();hc_ensure_user_root($user);
-// v107: editor and website preview are isolated endpoints. Old URLs are redirected
+// v108: editor and website preview are isolated endpoints. Old URLs are redirected
 // before the legacy preview block can execute, preventing editor/HTML HTTP 500s.
 if ((string)($_GET['edit'] ?? '') === '1' && !empty($_GET['preview'])) {
     redirect('/editor.php?'.http_build_query(['space'=>hc_space(),'path'=>hc_clean_rel((string)$_GET['preview'])],'','&',PHP_QUERY_RFC3986));

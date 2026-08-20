@@ -234,7 +234,7 @@ body:not(.hc-public-body){--hc-v99-line:#e6eaf2;--hc-v99-soft:#f7f9fc;--hc-v99-i
 @media(max-width:700px){.hc-file-actions .hc-site-quick{min-width:40px;width:40px;padding:0}.hc-file-actions .hc-site-quick span{display:none}}
 
 /* ========================================================================
-   HYPER CLOUD v107 — premium UI / icon system / security polish
+   HYPER CLOUD v108 — premium UI / icon system / security polish
    ======================================================================== */
 :root{--hc-blue:#4b63ff;--hc-violet:#7157ff;--hc-ink:#141b2d;--hc-sub:#7d879d;--hc-card:#fff;--hc-line:#e7eaf3;--hc-sidebar:#f9faff}
 .hc-sidebar{width:276px;padding:20px 16px 18px;background:linear-gradient(180deg,#fbfcff 0%,#f7f8fd 100%);border-right:1px solid #e6e9f2;box-shadow:14px 0 42px rgba(35,48,84,.035)}
@@ -256,7 +256,7 @@ body:not(.hc-public-body){--hc-v99-line:#e6eaf2;--hc-v99-soft:#f7f9fc;--hc-v99-i
 @media(max-width:1000px){.hc-sidebar{width:276px;transform:translateX(-100%)}.hc-sidebar.open{transform:translateX(0)}.hc-shell{margin-left:0;width:100%}.hc-main{padding:24px 18px}.hc-header{padding:0 18px}.hc-mobile-menu{display:grid;place-items:center}}
 @media(max-width:600px){.hc-main{padding:18px 11px}.hc-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.hc-file-icon{height:100px}.hc-toolbar{padding:3px}.hc-user-copy{display:none}}
 
-/* v107 final visual pass */
+/* v108 final visual pass */
 .hc-ext-chip{position:absolute;left:12px;bottom:10px;min-width:34px;height:21px;padding:0 7px;border-radius:7px;display:grid;place-items:center;background:rgba(255,255,255,.88);border:1px solid rgba(255,255,255,.9);box-shadow:0 5px 14px rgba(36,48,83,.08);font-size:8px;font-weight:900;letter-spacing:.08em;color:#59657a;backdrop-filter:blur(10px)}
 .hc-file-icon{position:relative}.hc-file-icon>i{filter:drop-shadow(0 5px 9px rgba(54,67,103,.08));transition:transform .18s ease}.hc-file-card:hover .hc-file-icon>i{transform:translateY(-2px) scale(1.04)}
 .hc-file-icon.html .hc-ext-chip{color:#d75a20;background:#fff8f3}.hc-file-icon.php .hc-ext-chip{color:#5951b9;background:#f7f5ff}.hc-file-icon.css .hc-ext-chip{color:#2565c0;background:#f3f7ff}.hc-file-icon.js .hc-ext-chip{color:#9d7600;background:#fffae7}.hc-file-icon.data .hc-ext-chip{color:#2d7e74;background:#f1fbf9}.hc-file-icon.code .hc-ext-chip{color:#35777c;background:#f1f9f9}

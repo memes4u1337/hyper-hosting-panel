@@ -2,7 +2,7 @@
 <?php
 declare(strict_types=1);
 
-// HYPER CLOUD v107 — narrow privileged bridge for panel authentication.
+// HYPER CLOUD v108 — narrow privileged bridge for panel authentication.
 // Reads one JSON object from stdin and returns only minimal auth result.
 function out(array $v,int $code=0): never { echo json_encode($v,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES); exit($code); }
 function b32(string $s): string { $a='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';$s=strtoupper(preg_replace('/[^A-Z2-7]/','',$s)??'');$bits='';for($i=0;$i<strlen($s);$i++){$v=strpos($a,$s[$i]);if($v===false)continue;$bits.=str_pad(decbin($v),5,'0',STR_PAD_LEFT);} $o='';for($i=0;$i+8<=strlen($bits);$i+=8)$o.=chr(bindec(substr($bits,$i,8)));return $o; }

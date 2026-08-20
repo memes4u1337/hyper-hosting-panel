@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-/** HYPER CLOUD v107 hardened standalone bootstrap. */
+/** HYPER CLOUD v108 hardened standalone bootstrap. */
 ini_set('session.use_strict_mode', '1');
 ini_set('session.use_only_cookies', '1');
 session_name('HYPERCLOUDSESSID');

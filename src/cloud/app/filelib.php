@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-/** HYPER CLOUD v107 — isolated file/editor/preview helpers. */
+/** HYPER CLOUD v108 — isolated file/editor/preview helpers. */
 
 function hcfl_space(?string $space): string { return $space === 'shared' ? 'shared' : 'private'; }
 function hcfl_clean_rel(string $value): string
