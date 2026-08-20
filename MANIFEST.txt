@@ -1,8 +1,9 @@
-HYPER-HOST-CLOUD-v100-PATCH
-apply-v1.8-cloud-editor.sh
+HYPER-HOST-CLOUD-v101-PATCH
+apply-v1.9-cloud-upload-preview.sh
 src/public/cloud/index.php
 src/public/cloud/cloud.css
 src/public/cloud/cloud.js
-PATCH-v100-EDITOR.md
+PATCH-v101-UPLOAD-HTML-PREVIEW.md
 README-INSTALL.txt
+cloud-v100-to-v101.patch
 SHA256SUMS.txt

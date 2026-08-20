@@ -15,6 +15,12 @@
   const queueCount = $('#hcQueueCount');
   const queueSize = $('#hcQueueSize');
   const uploadSubmit = $('#hcUploadSubmit');
+  const uploadProgress = $('#hcUploadProgress');
+  const uploadProgressBar = $('#hcUploadProgressBar');
+  const uploadPercent = $('#hcUploadPercent');
+  const uploadTransferred = $('#hcUploadTransferred');
+  const uploadSpeed = $('#hcUploadSpeed');
+  const uploadStatus = $('#hcUploadStatus');
   const dropOverlay = $('#hcDropOverlay');
   const main = $('#hcMain');
   const grid = $('#hcFilesGrid');
@@ -89,6 +95,8 @@
     const total = arr.reduce((sum, f) => sum + (f.size || 0), 0);
     queue.hidden = false;
     uploadSubmit.disabled = false;
+    if (!activeUpload && uploadProgress) uploadProgress.hidden = true;
+    if (uploadProgressBar) { uploadProgressBar.style.width = '0%'; uploadProgressBar.classList.remove('is-error','is-done'); }
     queueCount.textContent = `${arr.length} ${arr.length === 1 ? 'файл' : 'файлов'}`;
     queueSize.textContent = humanBytes(total);
     queueFiles.innerHTML = arr.slice(0, 30).map(f => `<div><b>${escapeHtml(f.name)}</b><span>${humanBytes(f.size)}</span></div>`).join('') + (arr.length > 30 ? `<div><b>… ещё ${arr.length - 30}</b><span></span></div>` : '');
@@ -145,10 +153,81 @@
     if (!uploadDialog.open) uploadDialog.showModal();
   });
 
-  uploadForm?.addEventListener('submit', () => {
-    if (!filesInput?.files?.length) return;
+  let activeUpload = null;
+  uploadForm?.addEventListener('submit', e => {
+    if (!filesInput?.files?.length || activeUpload) return;
+    if (!window.XMLHttpRequest || !window.FormData) return;
+    e.preventDefault();
+
+    const files = Array.from(filesInput.files);
+    const fileBytes = files.reduce((sum, f) => sum + Number(f.size || 0), 0);
+    const data = new FormData(uploadForm);
+    data.set('ajax_upload', '1');
+    const xhr = new XMLHttpRequest();
+    activeUpload = xhr;
+    let lastAt = performance.now();
+    let lastLogical = 0;
+
     uploadSubmit.disabled = true;
     uploadSubmit.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>Загрузка…';
+    if (uploadProgress) uploadProgress.hidden = false;
+    if (uploadStatus) uploadStatus.textContent = files.length === 1 ? files[0].name : `Загрузка ${files.length} файлов`;
+    if (uploadPercent) uploadPercent.textContent = '0%';
+    if (uploadProgressBar) uploadProgressBar.style.width = '0%';
+    if (uploadTransferred) uploadTransferred.textContent = `0 B / ${humanBytes(fileBytes)}`;
+    if (uploadSpeed) uploadSpeed.textContent = 'Подготовка…';
+    uploadForm.classList.add('is-uploading');
+
+    xhr.open('POST', uploadForm.action || window.location.href, true);
+    xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+    xhr.timeout = 0;
+
+    xhr.upload.addEventListener('progress', ev => {
+      if (!ev.lengthComputable) return;
+      const ratio = Math.max(0, Math.min(1, ev.loaded / Math.max(1, ev.total)));
+      const logical = Math.min(fileBytes, Math.round(fileBytes * ratio));
+      const percent = Math.min(99, Math.floor(ratio * 100));
+      const now = performance.now();
+      const seconds = Math.max(.001, (now - lastAt) / 1000);
+      const speed = Math.max(0, (logical - lastLogical) / seconds);
+      lastAt = now;
+      lastLogical = logical;
+      if (uploadPercent) uploadPercent.textContent = `${percent}%`;
+      if (uploadProgressBar) uploadProgressBar.style.width = `${percent}%`;
+      if (uploadTransferred) uploadTransferred.textContent = `${humanBytes(logical)} / ${humanBytes(fileBytes)}`;
+      if (uploadSpeed) uploadSpeed.textContent = speed > 0 ? `${humanBytes(speed)}/с` : 'Загрузка…';
+    });
+
+    const fail = message => {
+      activeUpload = null;
+      uploadForm.classList.remove('is-uploading');
+      uploadSubmit.disabled = false;
+      uploadSubmit.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i>Повторить загрузку';
+      if (uploadStatus) uploadStatus.textContent = message || 'Не удалось загрузить';
+      if (uploadPercent) uploadPercent.textContent = 'Ошибка';
+      if (uploadProgressBar) uploadProgressBar.classList.add('is-error');
+      if (uploadSpeed) uploadSpeed.textContent = 'Проверьте соединение и повторите';
+    };
+
+    xhr.addEventListener('error', () => fail('Ошибка соединения'));
+    xhr.addEventListener('abort', () => fail('Загрузка прервана'));
+    xhr.addEventListener('load', () => {
+      let payload = null;
+      try { payload = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
+      if (xhr.status < 200 || xhr.status >= 300 || !payload?.ok) {
+        fail(payload?.error || `Ошибка загрузки (${xhr.status || 0})`);
+        return;
+      }
+      if (uploadPercent) uploadPercent.textContent = '100%';
+      if (uploadProgressBar) { uploadProgressBar.classList.remove('is-error'); uploadProgressBar.style.width = '100%'; uploadProgressBar.classList.add('is-done'); }
+      if (uploadTransferred) uploadTransferred.textContent = `${humanBytes(fileBytes)} / ${humanBytes(fileBytes)}`;
+      if (uploadSpeed) uploadSpeed.textContent = 'Готово';
+      if (uploadStatus) uploadStatus.textContent = payload.uploaded === 1 ? 'Файл загружен' : `Загружено файлов: ${payload.uploaded || files.length}`;
+      uploadSubmit.innerHTML = '<i class="fa-solid fa-check"></i>Готово';
+      setTimeout(() => { window.location.href = payload.redirect || window.location.href; }, 550);
+    });
+
+    xhr.send(data);
   });
 
   $$('[data-menu-for]').forEach(btn => {
@@ -328,6 +407,19 @@
         save.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>Сохранение…';
       }
     });
+  });
+
+  $('[data-html-refresh]')?.addEventListener('click', btnEvent => {
+    const frame = $('#hcHtmlFrame');
+    if (!frame) return;
+    const btn = btnEvent.currentTarget;
+    btn?.classList.add('is-spinning');
+    try {
+      const url = new URL(frame.src, window.location.href);
+      url.searchParams.set('_preview_refresh', Date.now().toString());
+      frame.src = url.href;
+    } catch (_) { frame.src = frame.src; }
+    setTimeout(() => btn?.classList.remove('is-spinning'), 650);
   });
 
   // ESC is intentionally disabled for open Cloud modals.
