@@ -195,6 +195,75 @@
   menuButton?.addEventListener('click', () => setMobileMenu(!sidebar?.classList.contains('open')));
   mobileBackdrop?.addEventListener('click', () => setMobileMenu(false));
 
+
+
+  const shareDialog = $('#shareDialog');
+  const shareName = $('#hcShareName');
+  const sharePrivate = $('#hcSharePrivate');
+  const sharePublic = $('#hcSharePublic');
+  const shareLinkBox = $('#hcShareLinkBox');
+  const shareUrl = $('#hcShareUrl');
+  const shareEnableForm = $('#hcShareEnableForm');
+  const shareDisableForm = $('#hcShareDisableForm');
+  const shareEnableTarget = $('#hcShareEnableTarget');
+  const shareDisableTarget = $('#hcShareDisableTarget');
+  const copyShare = $('#hcCopyShare');
+
+  function absoluteShareUrl(value) {
+    if (!value) return '';
+    try { return new URL(value, window.location.origin).href; } catch (_) { return value; }
+  }
+
+  function openShareDialog(trigger) {
+    if (!shareDialog || !trigger) return;
+    const target = trigger.getAttribute('data-share-target') || '';
+    const name = trigger.getAttribute('data-share-name') || 'Файл';
+    const enabled = trigger.getAttribute('data-share-enabled') === '1';
+    const url = absoluteShareUrl(trigger.getAttribute('data-share-url') || '');
+    if (shareName) shareName.textContent = name;
+    if (shareEnableTarget) shareEnableTarget.value = target;
+    if (shareDisableTarget) shareDisableTarget.value = target;
+    if (sharePrivate) sharePrivate.hidden = enabled;
+    if (sharePublic) sharePublic.hidden = !enabled;
+    if (shareLinkBox) shareLinkBox.hidden = !enabled;
+    if (shareEnableForm) shareEnableForm.hidden = enabled;
+    if (shareDisableForm) shareDisableForm.hidden = !enabled;
+    if (shareUrl) shareUrl.value = url;
+    $$('.hc-context-menu.open').forEach(m => m.classList.remove('open'));
+    closeDialogs(shareDialog);
+    if (!shareDialog.open) shareDialog.showModal();
+    if (enabled) setTimeout(() => shareUrl?.select(), 80);
+  }
+
+  $$('[data-share-target]').forEach(btn => btn.addEventListener('click', () => openShareDialog(btn)));
+
+  async function copyText(value) {
+    if (!value) return false;
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch (_) {
+      if (!shareUrl) return false;
+      shareUrl.focus(); shareUrl.select();
+      try { return document.execCommand('copy'); } catch (__) { return false; }
+    }
+  }
+
+  copyShare?.addEventListener('click', async () => {
+    const text = shareUrl?.value || '';
+    const ok = await copyText(text);
+    const old = copyShare.innerHTML;
+    copyShare.innerHTML = ok ? '<i class="fa-solid fa-check"></i><span>Скопировано</span>' : '<i class="fa-solid fa-triangle-exclamation"></i><span>Не удалось</span>';
+    copyShare.classList.toggle('copied', ok);
+    setTimeout(() => { copyShare.innerHTML = old; copyShare.classList.remove('copied'); }, 1800);
+  });
+
+  const autoShare = document.body?.getAttribute('data-share-open') || '';
+  if (autoShare) {
+    const trigger = $$('[data-share-target]').find(el => (el.getAttribute('data-share-target') || '') === autoShare);
+    if (trigger) setTimeout(() => openShareDialog(trigger), 80);
+  }
+
   // ESC closes context menus first; native dialogs handle themselves.
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') $$('.hc-context-menu.open').forEach(m => m.classList.remove('open'));

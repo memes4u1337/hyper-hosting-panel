@@ -1,23 +1,22 @@
-HYPER CLOUD v96
-===============
+HYPER CLOUD v97 — PRIVATE SHARING
 
-Главное изменение: Cloud больше НЕ открывается внутри HYPER-HOST.
-Новый standalone URL: https://panel.hyper-host.pw/cloud/
+1) Загрузите содержимое GitHub Overlay в корень main вашего репозитория.
 
-Файлы:
-- apply-v1.4-cloud-standalone.sh
-- src/public/cloud/index.php
-- src/public/cloud/cloud.css
-- src/public/cloud/cloud.js
-
-Хранилище:
-/var/www/hyper-host-cloud
-
-Установка после загрузки overlay в GitHub main:
+2) На сервере выполните:
 
 cd /root && \
 rm -rf /root/hyper-hosting-panel && \
 git clone --depth 1 --branch main https://github.com/memes4u1337/hyper-hosting-panel.git /root/hyper-hosting-panel && \
 cd /root/hyper-hosting-panel && \
-chmod +x apply-v1.4-cloud-standalone.sh && \
-sudo ./apply-v1.4-cloud-standalone.sh /root/hyper-hosting-panel
+chmod +x apply-v1.5-cloud-sharing.sh && \
+sudo ./apply-v1.5-cloud-sharing.sh /root/hyper-hosting-panel
+
+Cloud: https://panel.hyper-host.pw/cloud/
+Файлы: /var/www/hyper-host-cloud
+Реестр ссылок: /var/lib/hyper-host-cloud/shares.json
+
+ВАЖНО:
+- все файлы приватны по умолчанию;
+- публичным становится только выбранный файл после "Открыть доступ по ссылке";
+- отключение доступа сразу инвалидирует старую ссылку;
+- SQL не требуется.

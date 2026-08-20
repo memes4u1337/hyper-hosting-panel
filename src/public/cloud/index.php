@@ -2,20 +2,13 @@
 declare(strict_types=1);
 
 /**
- * HYPER CLOUD v96 — standalone private cloud for HYPER-HOST.
+ * HYPER CLOUD v97 — standalone private cloud with per-file public links.
  * This page intentionally does NOT use render_page() and has its own UI shell.
  */
 require __DIR__ . '/../../app/bootstrap.php';
 
-if (!current_user()) {
-    $_SESSION['after_login'] = '/cloud/';
-    redirect('/?page=login');
-}
-$user = require_auth();
-
-header('X-Frame-Options: DENY');
 header('X-Content-Type-Options: nosniff');
-header('Referrer-Policy: same-origin');
+header('Referrer-Policy: no-referrer');
 
 function hc_csrf_field(): string
 {
@@ -342,6 +335,184 @@ function hc_breadcrumb(string $rel): string
     return implode('', $parts);
 }
 
+function hc_meta_dir(): string
+{
+    $dir = rtrim((string)app_config('cloud_meta_dir', '/var/lib/hyper-host-cloud'), '/');
+    return $dir !== '' ? $dir : '/var/lib/hyper-host-cloud';
+}
+
+function hc_share_store_path(): string
+{
+    $dir = hc_meta_dir();
+    if (!is_dir($dir)) {
+        @mkdir($dir, 02770, true);
+        @chown($dir, 'www-data'); @chgrp($dir, 'www-data'); @chmod($dir, 02770);
+    }
+    return $dir . '/shares.json';
+}
+
+function hc_share_store_load(): array
+{
+    $file = hc_share_store_path();
+    if (!is_file($file)) return [];
+    $fh = @fopen($file, 'rb');
+    if ($fh === false) return [];
+    @flock($fh, LOCK_SH);
+    $raw = stream_get_contents($fh);
+    @flock($fh, LOCK_UN); fclose($fh);
+    $data = json_decode(is_string($raw) ? $raw : '', true);
+    return is_array($data) ? $data : [];
+}
+
+function hc_share_store_mutate(callable $callback): mixed
+{
+    $file = hc_share_store_path();
+    $fh = @fopen($file, 'c+');
+    if ($fh === false) throw new RuntimeException('Не удалось открыть реестр общего доступа');
+    if (!@flock($fh, LOCK_EX)) { fclose($fh); throw new RuntimeException('Не удалось заблокировать реестр общего доступа'); }
+    rewind($fh);
+    $raw = stream_get_contents($fh);
+    $shares = json_decode(is_string($raw) ? $raw : '', true);
+    if (!is_array($shares)) $shares = [];
+    $result = $callback($shares);
+    $json = json_encode($shares, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+    if (!is_string($json)) { @flock($fh, LOCK_UN); fclose($fh); throw new RuntimeException('Не удалось сохранить реестр общего доступа'); }
+    rewind($fh); ftruncate($fh, 0);
+    if (fwrite($fh, $json . "\n") === false) { @flock($fh, LOCK_UN); fclose($fh); throw new RuntimeException('Не удалось записать реестр общего доступа'); }
+    fflush($fh); @flock($fh, LOCK_UN); fclose($fh);
+    @chmod($file, 0660); @chown($file, 'www-data'); @chgrp($file, 'www-data');
+    return $result;
+}
+
+function hc_share_index_by_path(?array $shares = null): array
+{
+    $shares ??= hc_share_store_load();
+    $out = [];
+    foreach ($shares as $token => $entry) {
+        if (!is_string($token) || !is_array($entry)) continue;
+        $rel = (string)($entry['path'] ?? '');
+        if ($rel === '') continue;
+        $entry['token'] = $token;
+        $out[$rel] = $entry;
+    }
+    return $out;
+}
+
+function hc_share_enable(string $rel, int $userId): string
+{
+    $rel = hc_clean_rel($rel);
+    if ($rel === '') throw new RuntimeException('Корень нельзя публиковать');
+    [,,$path] = hc_resolve($rel, true);
+    if (!is_file($path) || is_link($path)) throw new RuntimeException('Доступ по ссылке можно открыть только для файла');
+    return (string)hc_share_store_mutate(function(array &$shares) use ($rel,$userId): string {
+        foreach ($shares as $token => $entry) {
+            if (is_array($entry) && (string)($entry['path'] ?? '') === $rel && preg_match('/^[a-f0-9]{48}$/', (string)$token)) return (string)$token;
+        }
+        do { $token = bin2hex(random_bytes(24)); } while (isset($shares[$token]));
+        $shares[$token] = ['path'=>$rel,'created_at'=>date(DATE_ATOM),'created_by'=>$userId];
+        return $token;
+    });
+}
+
+function hc_share_disable(string $rel): void
+{
+    $rel = hc_clean_rel($rel);
+    hc_share_store_mutate(function(array &$shares) use ($rel): void {
+        foreach (array_keys($shares) as $token) {
+            $entry = $shares[$token] ?? null;
+            if (is_array($entry) && (string)($entry['path'] ?? '') === $rel) unset($shares[$token]);
+        }
+    });
+}
+
+function hc_share_repath_tree(string $oldRel, string $newRel): void
+{
+    $oldRel = hc_clean_rel($oldRel); $newRel = hc_clean_rel($newRel);
+    if ($oldRel === '' || $newRel === '') return;
+    hc_share_store_mutate(function(array &$shares) use ($oldRel,$newRel): void {
+        foreach ($shares as &$entry) {
+            if (!is_array($entry)) continue;
+            $path = (string)($entry['path'] ?? '');
+            if ($path === $oldRel) $entry['path'] = $newRel;
+            elseif (str_starts_with($path, $oldRel . '/')) $entry['path'] = $newRel . substr($path, strlen($oldRel));
+        }
+        unset($entry);
+    });
+}
+
+function hc_share_revoke_tree(string $rel): void
+{
+    $rel = hc_clean_rel($rel);
+    if ($rel === '') return;
+    hc_share_store_mutate(function(array &$shares) use ($rel): void {
+        foreach (array_keys($shares) as $token) {
+            $entry = $shares[$token] ?? null;
+            $path = is_array($entry) ? (string)($entry['path'] ?? '') : '';
+            if ($path === $rel || str_starts_with($path, $rel . '/')) unset($shares[$token]);
+        }
+    });
+}
+
+function hc_share_lookup(string $token): ?array
+{
+    if (!preg_match('/^[a-f0-9]{48}$/', $token)) return null;
+    $shares = hc_share_store_load();
+    $entry = $shares[$token] ?? null;
+    if (!is_array($entry)) return null;
+    try {
+        $rel = hc_clean_rel((string)($entry['path'] ?? ''));
+        [,,$path] = hc_resolve($rel, true);
+        if (!is_file($path) || is_link($path)) return null;
+        $entry['token'] = $token; $entry['path'] = $rel; $entry['file'] = $path;
+        return $entry;
+    } catch (Throwable) { return null; }
+}
+
+function hc_public_share_url(string $token): string
+{
+    return '/cloud/?s=' . rawurlencode($token);
+}
+
+function hc_public_share_page(array $share): never
+{
+    $path = (string)$share['file'];
+    $token = (string)$share['token'];
+    $name = basename($path);
+    $size = (float)(filesize($path) ?: 0);
+    $mime = hc_mime($path);
+    $kind = hc_kind($path);
+    $download = hc_public_share_url($token) . '&download=1';
+    $inline = hc_public_share_url($token) . '&inline=1';
+    http_response_code(200);
+    header('X-Frame-Options: DENY');
+    header('X-Robots-Tag: noindex, nofollow, noarchive');
+    header("Content-Security-Policy: default-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; font-src https://cdnjs.cloudflare.com data:; img-src 'self' data:; script-src 'none'; frame-src 'self'; media-src 'self'; base-uri 'none'; form-action 'self'");
+    ?>
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($name) ?> — HYPER CLOUD</title><meta name="robots" content="noindex,nofollow,noarchive"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"><link rel="stylesheet" href="/cloud/cloud.css?v=97"></head><body class="hc-public-body">
+<main class="hc-public-page"><section class="hc-public-card"><div class="hc-public-brand"><span><i class="fa-solid fa-cloud"></i></span><div><b>HYPER CLOUD</b><small>Безопасный общий доступ</small></div></div><div class="hc-public-file"><div class="hc-public-file-icon <?= e($kind) ?>"><i class="fa-solid <?= e(hc_icon($path)) ?>"></i></div><div><span>Вам открыт доступ к одному файлу</span><h1><?= e($name) ?></h1><p><?= e(human_bytes($size)) ?> · <?= e(date('d.m.Y H:i', (int)(filemtime($path) ?: time()))) ?></p></div></div>
+<?php if(str_starts_with($mime,'image/')): ?><div class="hc-public-preview"><img src="<?= e($inline) ?>" alt=""></div><?php endif; ?>
+<div class="hc-public-security"><i class="fa-solid fa-shield-halved"></i><div><b>Ссылка ведёт только на этот файл</b><span>Другие файлы и папки облака недоступны.</span></div></div><a class="hc-public-download" href="<?= e($download) ?>"><i class="fa-solid fa-download"></i><span><b>Скачать файл</b><small><?= e(human_bytes($size)) ?></small></span></a><footer>HYPER CLOUD · private storage</footer></section></main></body></html><?php
+    exit;
+}
+
+// Public token route is intentionally processed BEFORE panel authentication.
+$publicToken = strtolower(trim((string)($_GET['s'] ?? '')));
+if ($publicToken !== '') {
+    $publicShare = hc_share_lookup($publicToken);
+    if (!$publicShare) { http_response_code(404); exit('Ссылка недействительна или доступ отключён.'); }
+    if (isset($_GET['download'])) hc_stream_file((string)$publicShare['file'], false);
+    if (isset($_GET['inline'])) hc_stream_file((string)$publicShare['file'], true);
+    hc_public_share_page($publicShare);
+}
+
+if (!current_user()) {
+    $_SESSION['after_login'] = '/cloud/';
+    redirect('/?page=login');
+}
+$user = require_auth();
+header('X-Frame-Options: DENY');
+header('Referrer-Policy: same-origin');
+
 // Protected downloads / previews.
 $cloudAction = (string)($_GET['cloud_action'] ?? '');
 if ($cloudAction !== '') {
@@ -414,15 +585,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $newPath = dirname($target).'/'.$name;
             if (file_exists($newPath) || is_link($newPath)) throw new RuntimeException('Такое имя уже занято');
             if (!@rename($target,$newPath)) throw new RuntimeException('Не удалось переименовать');
+            $newRel = trim((dirname($targetRel)==='.'?'':dirname($targetRel)).'/'.$name,'/');
+            hc_share_repath_tree($targetRel, $newRel);
             add_event('cloud','Переименовано: '.$targetRel.' → '.$name);
             flash('Переименовано','success');
         } elseif ($action === 'delete') {
             $targetRel = hc_clean_rel((string)($_POST['target'] ?? ''));
             if ($targetRel === '') throw new RuntimeException('Корень удалить нельзя');
             [,,$target] = hc_resolve($targetRel,true);
+            hc_share_revoke_tree($targetRel);
             hc_rrmdir($target);
             add_event('cloud','Удалено: '.$targetRel);
             flash('Удалено','success');
+        } elseif ($action === 'share_enable') {
+            $targetRel = hc_clean_rel((string)($_POST['target'] ?? ''));
+            $token = hc_share_enable($targetRel, (int)($user['id'] ?? 0));
+            add_event('cloud','Открыт доступ по ссылке: '.$targetRel);
+            flash('Доступ по ссылке включён','success');
+            $current = hc_clean_rel((string)($_POST['path'] ?? ''));
+            $returnView = (string)($_POST['return_view'] ?? 'disk');
+            $params = ['share_open'=>$targetRel];
+            if ($returnView !== 'disk' && in_array($returnView,['recent','archives','images','shared'],true)) $params['view']=$returnView;
+            elseif ($current !== '') $params['path']=$current;
+            redirect(hc_url($params));
+        } elseif ($action === 'share_disable') {
+            $targetRel = hc_clean_rel((string)($_POST['target'] ?? ''));
+            hc_share_disable($targetRel);
+            add_event('cloud','Закрыт доступ по ссылке: '.$targetRel);
+            flash('Файл снова приватный','success');
+            $current = hc_clean_rel((string)($_POST['path'] ?? ''));
+            $returnView = (string)($_POST['return_view'] ?? 'disk');
+            $params = ['share_open'=>$targetRel];
+            if ($returnView !== 'disk' && in_array($returnView,['recent','archives','images','shared'],true)) $params['view']=$returnView;
+            elseif ($current !== '') $params['path']=$current;
+            redirect(hc_url($params));
         } else {
             throw new RuntimeException('Неизвестное действие');
         }
@@ -433,7 +629,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $view = (string)($_GET['view'] ?? 'disk');
-if (!in_array($view,['disk','recent','archives','images'],true)) $view = 'disk';
+if (!in_array($view,['disk','recent','archives','images','shared'],true)) $view = 'disk';
 $rel = hc_clean_rel((string)($_GET['path'] ?? ''));
 [$root,,$dir] = hc_resolve($rel, true);
 if (!is_dir($dir)) { $rel=''; [,,$dir]=hc_resolve('',true); }
@@ -447,11 +643,25 @@ if ($view === 'disk') {
         $rows[] = ['name'=>$name,'path'=>$path,'rel'=>$childRel,'mtime'=>(int)(filemtime($path)?:0),'size'=>is_file($path)?(int)(filesize($path)?:0):0,'dir'=>$rel,'is_dir'=>is_dir($path)];
     }
     usort($rows, static function($a,$b){ if($a['is_dir']!==$b['is_dir']) return $a['is_dir']?-1:1; return strnatcasecmp($a['name'],$b['name']); });
+} elseif ($view === 'shared') {
+    $allShares = hc_share_store_load();
+    foreach (hc_share_index_by_path($allShares) as $sharedRel => $shareEntry) {
+        try {
+            [,,$sharedPath] = hc_resolve($sharedRel, true);
+            if (!is_file($sharedPath) || is_link($sharedPath)) continue;
+            $rows[] = ['name'=>basename($sharedPath),'path'=>$sharedPath,'rel'=>$sharedRel,'mtime'=>(int)(filemtime($sharedPath)?:0),'size'=>(int)(filesize($sharedPath)?:0),'dir'=>dirname($sharedRel)==='.'?'':dirname($sharedRel),'is_dir'=>false];
+        } catch (Throwable) {}
+    }
+    usort($rows, static fn($a,$b)=>$b['mtime']<=>$a['mtime']);
 } else {
     $rows = hc_recursive_files($root,$view);
     foreach ($rows as &$r) $r['is_dir']=false;
     unset($r);
 }
+
+$shares = hc_share_store_load();
+$shareByPath = hc_share_index_by_path($shares);
+$shareOpenRel = hc_clean_rel((string)($_GET['share_open'] ?? ''));
 
 $previewRel = hc_clean_rel((string)($_GET['preview'] ?? ''));
 $previewPath = null;
@@ -464,7 +674,7 @@ $diskFree = (float)(@disk_free_space($root) ?: 0);
 $diskUsed = max(0.0,$diskTotal-$diskFree);
 $diskPct = $diskTotal > 0 ? min(100,($diskUsed/$diskTotal)*100) : 0;
 $flash = flash();
-$viewTitle = ['disk'=>'Мой диск','recent'=>'Последние','archives'=>'Архивы','images'=>'Изображения'][$view];
+$viewTitle = ['disk'=>'Мой диск','recent'=>'Последние','archives'=>'Архивы','images'=>'Изображения','shared'=>'Доступ по ссылке'][$view];
 ?>
 <!doctype html>
 <html lang="ru">
@@ -474,9 +684,9 @@ $viewTitle = ['disk'=>'Мой диск','recent'=>'Последние','archives
 <title><?= e($viewTitle) ?> — HYPER CLOUD</title>
 <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
-<link rel="stylesheet" href="/cloud/cloud.css?v=96">
+<link rel="stylesheet" href="/cloud/cloud.css?v=97">
 </head>
-<body>
+<body data-share-open="<?= e($shareOpenRel) ?>">
 <div class="hc-app" id="hcApp">
   <aside class="hc-sidebar" id="hcSidebar">
     <div class="hc-brand"><div class="hc-brand-mark"><i class="fa-solid fa-cloud"></i></div><div><b>HYPER CLOUD</b><span>private storage</span></div></div>
@@ -486,6 +696,7 @@ $viewTitle = ['disk'=>'Мой диск','recent'=>'Последние','archives
       <a class="<?= $view==='recent'?'active':'' ?>" href="<?= e(hc_url(['view'=>'recent'])) ?>"><i class="fa-regular fa-clock"></i><span>Последние</span></a>
       <a class="<?= $view==='archives'?'active':'' ?>" href="<?= e(hc_url(['view'=>'archives'])) ?>"><i class="fa-regular fa-file-zipper"></i><span>Архивы</span></a>
       <a class="<?= $view==='images'?'active':'' ?>" href="<?= e(hc_url(['view'=>'images'])) ?>"><i class="fa-regular fa-image"></i><span>Изображения</span></a>
+      <a class="<?= $view==='shared'?'active':'' ?>" href="<?= e(hc_url(['view'=>'shared'])) ?>"><i class="fa-solid fa-link"></i><span>Доступ по ссылке</span><em><?= count($shareByPath) ?></em></a>
     </nav>
     <div class="hc-side-spacer"></div>
     <div class="hc-storage">
@@ -521,7 +732,7 @@ $viewTitle = ['disk'=>'Мой диск','recent'=>'Последние','archives
 
       <?php if($view==='disk' && $rel===''): ?>
       <section class="hc-welcome">
-        <div><span class="hc-welcome-icon"><i class="fa-solid fa-cloud-arrow-up"></i></span><div><b>Перетащите файлы прямо сюда</b><p>Drag & Drop работает на всей рабочей области. Файлы попадут в выбранную папку.</p></div></div>
+        <div><span class="hc-welcome-icon"><i class="fa-solid fa-shield-halved"></i></span><div><b>Ваше облако приватно по умолчанию</b><p>Перетащите файлы сюда. Доступ извне появится только у конкретного файла, если вы сами включите ссылку.</p></div></div>
         <button class="hc-btn soft" type="button" data-open-dialog="uploadDialog">Выбрать файлы</button>
       </section>
       <?php endif; ?>
@@ -530,18 +741,18 @@ $viewTitle = ['disk'=>'Мой диск','recent'=>'Последние','archives
         <div class="hc-section-head"><div><b><?= $view==='disk' ? e($rel===''?'Файлы и папки':basename($rel)) : e($viewTitle) ?></b><span id="hcItemCount"><?= count($rows) ?> элементов</span></div><?php if($view==='disk'): ?><button class="hc-link-btn" type="button" data-open-dialog="folderDialog"><i class="fa-solid fa-folder-plus"></i>Новая папка</button><?php endif; ?></div>
 
         <div class="hc-grid" id="hcFilesGrid">
-          <?php foreach($rows as $row): $kind=hc_kind($row['path']); $isDir=(bool)$row['is_dir']; $openHref=$isDir?hc_url(['path'=>$row['rel']]):hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel']],static fn($v)=>$v!==null)); ?>
+          <?php foreach($rows as $row): $kind=hc_kind($row['path']); $isDir=(bool)$row['is_dir']; $share=$isDir?null:($shareByPath[$row['rel']]??null); $shareToken=is_array($share)?(string)($share['token']??''):''; $shareUrl=$shareToken!==''?hc_public_share_url($shareToken):''; $openHref=$isDir?hc_url(['path'=>$row['rel']]):hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel']],static fn($v)=>$v!==null)); ?>
           <article class="hc-file-card" data-file-name="<?= e(hc_lower($row['name'])) ?>" data-kind="<?= e($kind) ?>">
             <a class="hc-file-open" href="<?= e($openHref) ?>">
               <div class="hc-file-icon <?= e($kind) ?>"><i class="fa-solid <?= e(hc_icon($row['path'])) ?>"></i><?php if($kind==='image'): ?><img loading="lazy" src="<?= e(hc_url(['cloud_action'=>'raw','path'=>$row['rel']])) ?>" alt=""><?php endif; ?></div>
-              <div class="hc-file-info"><b title="<?= e($row['name']) ?>"><?= e($row['name']) ?></b><span><?= $isDir ? 'Папка' : e(human_bytes((float)$row['size'])) ?> · <?= e(date('d.m.Y H:i',$row['mtime']?:time())) ?></span><?php if(!$isDir && $row['dir']!==''): ?><small>/<?= e($row['dir']) ?></small><?php endif; ?></div>
+              <div class="hc-file-info"><div class="hc-file-name-line"><b title="<?= e($row['name']) ?>"><?= e($row['name']) ?></b><?php if(!$isDir): ?><span class="hc-privacy-pill <?= $shareToken!==''?'shared':'private' ?>" title="<?= $shareToken!==''?'Доступ по ссылке включён':'Приватный файл' ?>"><i class="fa-solid <?= $shareToken!==''?'fa-link':'fa-lock' ?>"></i><?= $shareToken!==''?'По ссылке':'Приватный' ?></span><?php endif; ?></div><span><?= $isDir ? 'Папка' : e(human_bytes((float)$row['size'])) ?> · <?= e(date('d.m.Y H:i',$row['mtime']?:time())) ?></span><?php if(!$isDir && $row['dir']!==''): ?><small>/<?= e($row['dir']) ?></small><?php endif; ?></div>
             </a>
             <div class="hc-file-actions">
               <?php if(!$isDir): ?><a title="Скачать" href="<?= e(hc_url(['cloud_action'=>'download','path'=>$row['rel']])) ?>"><i class="fa-solid fa-download"></i></a><?php endif; ?>
               <button type="button" title="Действия" data-menu-for="menu-<?= md5($row['rel']) ?>"><i class="fa-solid fa-ellipsis-vertical"></i></button>
             </div>
             <div class="hc-context-menu" id="menu-<?= md5($row['rel']) ?>">
-              <?php if($isDir): ?><a href="<?= e(hc_url(['path'=>$row['rel']])) ?>"><i class="fa-regular fa-folder-open"></i>Открыть</a><?php else: ?><a href="<?= e($openHref) ?>"><i class="fa-regular fa-eye"></i>Открыть</a><a href="<?= e(hc_url(['cloud_action'=>'download','path'=>$row['rel']])) ?>"><i class="fa-solid fa-download"></i>Скачать</a><?php endif; ?>
+              <?php if($isDir): ?><a href="<?= e(hc_url(['path'=>$row['rel']])) ?>"><i class="fa-regular fa-folder-open"></i>Открыть</a><?php else: ?><a href="<?= e($openHref) ?>"><i class="fa-regular fa-eye"></i>Открыть</a><a href="<?= e(hc_url(['cloud_action'=>'download','path'=>$row['rel']])) ?>"><i class="fa-solid fa-download"></i>Скачать</a><button type="button" class="hc-share-action <?= $shareToken!==''?'active':'' ?>" data-share-target="<?= e($row['rel']) ?>" data-share-name="<?= e($row['name']) ?>" data-share-url="<?= e($shareUrl) ?>" data-share-enabled="<?= $shareToken!==''?'1':'0' ?>"><i class="fa-solid <?= $shareToken!==''?'fa-link':'fa-lock' ?>"></i>Доступ</button><?php endif; ?>
               <button type="button" data-rename-target="<?= e($row['rel']) ?>" data-rename-name="<?= e($row['name']) ?>"><i class="fa-solid fa-pen"></i>Переименовать</button>
               <form method="post" onsubmit="return confirm('Удалить «<?= e(addslashes($row['name'])) ?>»?')"><?= hc_csrf_field() ?><input type="hidden" name="action" value="delete"><input type="hidden" name="path" value="<?= e($view==='disk'?$rel:'') ?>"><input type="hidden" name="target" value="<?= e($row['rel']) ?>"><button class="danger" type="submit"><i class="fa-regular fa-trash-can"></i>Удалить</button></form>
             </div>
@@ -550,8 +761,8 @@ $viewTitle = ['disk'=>'Мой диск','recent'=>'Последние','archives
         </div>
 
         <div class="hc-list" id="hcFilesList" hidden>
-          <?php foreach($rows as $row): $kind=hc_kind($row['path']); $isDir=(bool)$row['is_dir']; $openHref=$isDir?hc_url(['path'=>$row['rel']]):hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel']],static fn($v)=>$v!==null)); ?>
-          <div class="hc-list-row" data-file-name="<?= e(hc_lower($row['name'])) ?>"><a href="<?= e($openHref) ?>"><span class="hc-mini-icon <?= e($kind) ?>"><i class="fa-solid <?= e(hc_icon($row['path'])) ?>"></i></span><b><?= e($row['name']) ?></b></a><span><?= $isDir?'Папка':e(human_bytes((float)$row['size'])) ?></span><span><?= e(date('d.m.Y H:i',$row['mtime']?:time())) ?></span><div><?php if(!$isDir): ?><a class="hc-icon-btn" href="<?= e(hc_url(['cloud_action'=>'download','path'=>$row['rel']])) ?>"><i class="fa-solid fa-download"></i></a><?php endif; ?></div></div>
+          <?php foreach($rows as $row): $kind=hc_kind($row['path']); $isDir=(bool)$row['is_dir']; $share=$isDir?null:($shareByPath[$row['rel']]??null); $shareToken=is_array($share)?(string)($share['token']??''):''; $shareUrl=$shareToken!==''?hc_public_share_url($shareToken):''; $openHref=$isDir?hc_url(['path'=>$row['rel']]):hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null,'preview'=>$row['rel']],static fn($v)=>$v!==null)); ?>
+          <div class="hc-list-row" data-file-name="<?= e(hc_lower($row['name'])) ?>"><a href="<?= e($openHref) ?>"><span class="hc-mini-icon <?= e($kind) ?>"><i class="fa-solid <?= e(hc_icon($row['path'])) ?>"></i></span><b><?= e($row['name']) ?></b></a><span><?= $isDir?'Папка':e(human_bytes((float)$row['size'])) ?></span><span><?= e(date('d.m.Y H:i',$row['mtime']?:time())) ?></span><div class="hc-list-actions"><?php if(!$isDir): ?><button type="button" class="hc-list-share <?= $shareToken!==''?'active':'' ?>" data-share-target="<?= e($row['rel']) ?>" data-share-name="<?= e($row['name']) ?>" data-share-url="<?= e($shareUrl) ?>" data-share-enabled="<?= $shareToken!==''?'1':'0' ?>" title="Доступ"><i class="fa-solid <?= $shareToken!==''?'fa-link':'fa-lock' ?>"></i></button><a class="hc-icon-btn" href="<?= e(hc_url(['cloud_action'=>'download','path'=>$row['rel']])) ?>" title="Скачать"><i class="fa-solid fa-download"></i></a><?php endif; ?></div></div>
           <?php endforeach; ?>
         </div>
 
@@ -596,10 +807,23 @@ $viewTitle = ['disk'=>'Мой диск','recent'=>'Последние','archives
   <form method="post"><input type="hidden" name="action" value="rename"><?= hc_csrf_field() ?><input type="hidden" name="path" value="<?= e($rel) ?>"><input type="hidden" name="target" id="hcRenameTarget"><div class="hc-dialog-head"><div><span>Переименование</span><b>Новое имя</b></div><button type="button" data-close-dialog><i class="fa-solid fa-xmark"></i></button></div><div class="hc-dialog-body"><label class="hc-field"><span>Имя</span><input name="new_name" id="hcRenameName" maxlength="180" required></label></div><div class="hc-dialog-foot"><button type="button" class="hc-btn ghost" data-close-dialog>Отмена</button><button class="hc-btn primary">Сохранить</button></div></form>
 </dialog>
 
+<dialog class="hc-dialog hc-share-dialog" id="shareDialog">
+  <div class="hc-dialog-head hc-share-head"><div><span>Доступ к файлу</span><b id="hcShareName">Файл</b></div><button type="button" data-close-dialog><i class="fa-solid fa-xmark"></i></button></div>
+  <div class="hc-dialog-body">
+    <div class="hc-share-state" id="hcSharePrivate"><span class="hc-share-state-icon private"><i class="fa-solid fa-lock"></i></span><div><b>Приватный файл</b><p>Сейчас файл доступен только после входа в HYPER-HOST. Это стандартный режим для всех новых файлов.</p></div></div>
+    <div class="hc-share-state" id="hcSharePublic" hidden><span class="hc-share-state-icon public"><i class="fa-solid fa-link"></i></span><div><b>Доступ по ссылке включён</b><p>Любой человек с этой ссылкой сможет скачать только этот файл. Остальное облако останется закрытым.</p></div></div>
+    <div class="hc-share-linkbox" id="hcShareLinkBox" hidden><label>Публичная ссылка</label><div><input type="text" id="hcShareUrl" readonly><button type="button" id="hcCopyShare"><i class="fa-regular fa-copy"></i><span>Копировать</span></button></div><small><i class="fa-solid fa-shield-halved"></i> Ссылка действует, пока вы сами не отключите доступ.</small></div>
+  </div>
+  <div class="hc-dialog-foot hc-share-foot">
+    <form method="post" id="hcShareEnableForm"><input type="hidden" name="action" value="share_enable"><?= hc_csrf_field() ?><input type="hidden" name="path" value="<?= e($view==='disk'?$rel:'') ?>"><input type="hidden" name="return_view" value="<?= e($view) ?>"><input type="hidden" name="target" id="hcShareEnableTarget"><button class="hc-btn primary" type="submit"><i class="fa-solid fa-link"></i>Открыть доступ по ссылке</button></form>
+    <form method="post" id="hcShareDisableForm" hidden><input type="hidden" name="action" value="share_disable"><?= hc_csrf_field() ?><input type="hidden" name="path" value="<?= e($view==='disk'?$rel:'') ?>"><input type="hidden" name="return_view" value="<?= e($view) ?>"><input type="hidden" name="target" id="hcShareDisableTarget"><button class="hc-btn danger-soft" type="submit"><i class="fa-solid fa-link-slash"></i>Закрыть доступ</button></form>
+  </div>
+</dialog>
+
 <?php if($previewPath): $mime=hc_mime($previewPath); ?>
 <div class="hc-preview-backdrop" id="hcPreview" data-preview-open>
   <section class="hc-preview-panel">
-    <header><div><span>Просмотр</span><b><?= e(basename($previewPath)) ?></b><small><?= e(human_bytes((float)(filesize($previewPath)?:0))) ?></small></div><div><a class="hc-btn soft" href="<?= e(hc_url(['cloud_action'=>'download','path'=>$previewRel])) ?>"><i class="fa-solid fa-download"></i>Скачать</a><a class="hc-preview-close" href="<?= e(hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null],static fn($v)=>$v!==null))) ?>"><i class="fa-solid fa-xmark"></i></a></div></header>
+    <header><div><span>Просмотр</span><b><?= e(basename($previewPath)) ?></b><small><?= e(human_bytes((float)(filesize($previewPath)?:0))) ?></small></div><div><?php $previewShare=$shareByPath[$previewRel]??null; $previewShareToken=is_array($previewShare)?(string)($previewShare['token']??''):''; ?><button type="button" class="hc-btn <?= $previewShareToken!==''?'share-on':'soft' ?>" data-share-target="<?= e($previewRel) ?>" data-share-name="<?= e(basename($previewPath)) ?>" data-share-url="<?= e($previewShareToken!==''?hc_public_share_url($previewShareToken):'') ?>" data-share-enabled="<?= $previewShareToken!==''?'1':'0' ?>"><i class="fa-solid <?= $previewShareToken!==''?'fa-link':'fa-lock' ?>"></i>Доступ</button><a class="hc-btn soft" href="<?= e(hc_url(['cloud_action'=>'download','path'=>$previewRel])) ?>"><i class="fa-solid fa-download"></i>Скачать</a><a class="hc-preview-close" href="<?= e(hc_url(array_filter(['path'=>$view==='disk'?$rel:null,'view'=>$view!=='disk'?$view:null],static fn($v)=>$v!==null))) ?>"><i class="fa-solid fa-xmark"></i></a></div></header>
     <div class="hc-preview-body">
       <?php if(hc_is_archive($previewPath)): $archive=hc_archive_entries($previewPath); ?>
         <div class="hc-archive-head"><i class="fa-solid fa-box-archive"></i><div><b>Содержимое архива</b><span><?= e((string)($archive['engine']??'')) ?></span></div></div>
@@ -615,6 +839,6 @@ $viewTitle = ['disk'=>'Мой диск','recent'=>'Последние','archives
 </div>
 <?php endif; ?>
 
-<script src="/cloud/cloud.js?v=96" defer></script>
+<script src="/cloud/cloud.js?v=97" defer></script>
 </body>
 </html>
