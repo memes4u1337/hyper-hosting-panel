@@ -95,3 +95,30 @@
     });
   });
 })();
+
+/* v95 bot deploy UX */
+document.addEventListener('DOMContentLoaded', function () {
+  document.querySelectorAll('[data-file-input]').forEach(function (input) {
+    input.addEventListener('change', function () {
+      var card = input.closest('.cp-upload-card');
+      if (!card) return;
+      card.classList.toggle('has-file', !!(input.files && input.files[0]));
+      var label = card.querySelector('[data-file-label]');
+      if (label && input.files && input.files[0]) label.textContent = input.files[0].name;
+    });
+  });
+  var runtime = document.querySelector('[data-runtime]');
+  if (runtime) {
+    function syncRuntimeHints() {
+      var node = runtime.value === 'node';
+      var main = document.querySelector('[data-main-hint]');
+      var deps = document.querySelector('[data-deps-hint]');
+      var botInput = document.querySelector('input[name="bot_file"]');
+      if (main) main.textContent = node ? 'index.js' : 'bot.py';
+      if (deps) deps.textContent = node ? 'package.json' : 'requirements.txt';
+      if (botInput) botInput.setAttribute('accept', node ? '.js' : '.py');
+    }
+    runtime.addEventListener('change', syncRuntimeHints);
+    syncRuntimeHints();
+  }
+});

@@ -500,10 +500,17 @@ function handle_post(string $action): void
                 $sites=max(0,min(200,(int)($_POST['max_sites']??0)));
                 $bots=max(0,min(200,(int)($_POST['max_bots']??0)));
                 $cpu=max(0,min(400,(int)($_POST['cpu_percent']??0)));
-                $mem=max(0,min(65536,(int)($_POST['memory_mb']??0)));
-                $disk=max(0,min(4194304,(int)($_POST['disk_mb']??0)));
+                $ramPct=max(0,min(100,(int)($_POST['ram_percent']??0)));
+                $diskPct=max(0,min(100,(int)($_POST['disk_percent']??0)));
+                $server=run_ctl_json_live(['stats-json'],8);
+                $memTotalMb=max(0,(int)floor(((float)($server['mem_total']??0))/1048576));
+                $diskTotalMb=max(0,(int)floor(((float)($server['disk_total']??0))/1048576));
+                $mem=$ramPct>0 && $memTotalMb>0 ? max(64,(int)floor($memTotalMb*$ramPct/100)) : 0;
+                $disk=$diskPct>0 && $diskTotalMb>0 ? max(512,(int)floor($diskTotalMb*$diskPct/100)) : 0;
+                $mem=min(65536,$mem);
+                $disk=min(4194304,$disk);
                 cp_admin_grant($uid,$sites,$bots,$cpu,$mem,$disk);
-                flash('Ресурсы выданы. У клиента разделы откроются сразу.','success');
+                flash('Ресурсы выданы. Лимиты рассчитаны автоматически по выбранным процентам.','success');
                 redirect('/?page=clients');
             }
             case 'cp_status': {
@@ -647,7 +654,7 @@ function fm_delete(): void
 function rrmdir(string $path): void { if(is_dir($path)&&!is_link($path)){ foreach(scandir($path)?:[] as $i){ if($i==='.'||$i==='..') continue; rrmdir($path.'/'.$i);} if(!@rmdir($path)){ run_ctl(['repair'],180); @rmdir($path); } } else { if(!@unlink($path)){ run_ctl(['repair'],180); @unlink($path); } } }
 
 
-function hh_app_version(): string { return '1.10-v94'; }
+function hh_app_version(): string { return '1.10-v95'; }
 
 function hh_nav_config(): array
 {
@@ -674,7 +681,7 @@ function nav_item(string $id,string $icon,string $label,string $page): string
 function render_login(): void
 {
     $flash=flash(); $need2fa=setting_get('security_2fa_enabled','0')==='1'; ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=94" rel="stylesheet"></head><body class="login-body">
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=95" rel="stylesheet"></head><body class="login-body">
 <div class="login-orb login-orb-a"></div><div class="login-orb login-orb-b"></div><div class="login-orb login-orb-c"></div>
 <main class="login-clean">
   <section class="login-card card-glass login-clean-card">
@@ -702,7 +709,7 @@ function render_page(string $page, array $user): void
 <link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
-<link href="/assets/style.css?v=94" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
+<link href="/assets/style.css?v=95" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
 <div class="mobile-nav-backdrop" id="mobileNavBackdrop"></div>
 <aside class="sidebar sidebar-v3" id="mainSidebar">
   <div class="sidebar-brand-v3">
@@ -2135,6 +2142,9 @@ function view_clients(): void
     foreach ($db->query('SELECT user_id, COUNT(*) c FROM cp_sites GROUP BY user_id')->fetchAll() as $r) $siteCount[(int)$r['user_id']] = (int)$r['c'];
     $botCount = [];
     foreach ($db->query('SELECT user_id, COUNT(*) c FROM cp_bots GROUP BY user_id')->fetchAll() as $r) $botCount[(int)$r['user_id']] = (int)$r['c'];
+    $serverStats = run_ctl_json_live(['stats-json'], 8);
+    $serverMemMb = max(0, (int)floor(((float)($serverStats['mem_total'] ?? 0)) / 1048576));
+    $serverDiskMb = max(0, (int)floor(((float)($serverStats['disk_total'] ?? 0)) / 1048576));
 
     $pending = 0;
     foreach ($users as $u) if ((string)$u['status'] === 'pending') $pending++;
@@ -2144,8 +2154,7 @@ function view_clients(): void
   <div>
     <div class="eyebrow"><i class="fa-solid fa-users"></i> cp.hyper-host.pw</div>
     <h2>Клиенты портала</h2>
-    <p>Пока клиенту не выданы ресурсы, он видит только заглушку «администратор ещё не выдал права».
-       Выданные проценты CPU и мегабайты памяти применяются к systemd-юнитам его ботов по-настоящему.</p>
+    <p>Управление лимитами клиентов: количество проектов и доля ресурсов сервера. RAM и диск задаются процентами, фактический объём рассчитывается автоматически.</p>
   </div>
   <div class="clients-stat-v94">
     <div><span>Всего</span><b><?= count($users) ?></b></div>
@@ -2161,6 +2170,9 @@ function view_clients(): void
       <?php foreach ($users as $u):
           $uid = (int)$u['id'];
           $q = $quotas[$uid] ?? ['max_sites'=>0,'max_bots'=>0,'cpu_percent'=>0,'memory_mb'=>0,'disk_mb'=>0];
+          $ramPct = $serverMemMb > 0 ? (int)round(((int)$q['memory_mb'] / $serverMemMb) * 100) : 0;
+          $diskPct = $serverDiskMb > 0 ? (int)round(((int)$q['disk_mb'] / $serverDiskMb) * 100) : 0;
+          $ramPct = max(0,min(100,$ramPct)); $diskPct = max(0,min(100,$diskPct));
           $granted = ((int)$q['max_sites'] + (int)$q['max_bots']) > 0;
           $status = (string)$u['status'];
           $badge = $status === 'active' ? 'success' : ($status === 'suspended' ? 'danger' : 'warning');
@@ -2181,24 +2193,30 @@ function view_clients(): void
                   <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body">
-                  <div class="cp-grant-grid-v94">
+                  <div class="cp-grant-grid-v95">
                     <label class="hh-field"><span>Сайтов</span>
                       <input class="form-control" type="number" name="max_sites" min="0" max="200" value="<?= (int)$q['max_sites'] ?>"></label>
                     <label class="hh-field"><span>Ботов</span>
                       <input class="form-control" type="number" name="max_bots" min="0" max="200" value="<?= (int)$q['max_bots'] ?>"></label>
-                    <label class="hh-field"><span>CPU, % ядра</span>
-                      <input class="form-control" type="number" name="cpu_percent" min="0" max="400" step="5" value="<?= (int)$q['cpu_percent'] ?>"></label>
-                    <label class="hh-field"><span>RAM, MB</span>
-                      <input class="form-control" type="number" name="memory_mb" min="0" max="65536" step="64" value="<?= (int)$q['memory_mb'] ?>"></label>
-                    <label class="hh-field"><span>Диск, MB</span>
-                      <input class="form-control" type="number" name="disk_mb" min="0" max="4194304" step="512" value="<?= (int)$q['disk_mb'] ?>"></label>
                   </div>
-                  <div class="cp-grant-note-v94">
-                    <i class="fa-solid fa-circle-info me-2"></i>
-                    CPU и RAM делятся поровну между ботами клиента и прописываются в
-                    <code>CPUQuota=</code> и <code>MemoryMax=</code> его systemd-юнитов.
-                    Работающие боты перезапустятся, чтобы новые лимиты вступили в силу.
+                  <div class="cp-resource-sliders-v95" data-resource-grant data-mem-total="<?= $serverMemMb ?>" data-disk-total="<?= $serverDiskMb ?>">
+                    <div class="cp-resource-slider-v95">
+                      <div class="cp-resource-slider-head-v95"><span><i class="fa-solid fa-microchip"></i> CPU</span><b><span data-cpu-value><?= (int)$q['cpu_percent'] ?></span>%</b></div>
+                      <input type="range" name="cpu_percent" min="0" max="400" step="5" value="<?= (int)$q['cpu_percent'] ?>" data-cpu-range>
+                      <div class="cp-resource-result-v95"><small>Фактически</small><strong data-cpu-result><?= number_format(((int)$q['cpu_percent'])/100,2,'.','') ?> ядра</strong></div>
+                    </div>
+                    <div class="cp-resource-slider-v95">
+                      <div class="cp-resource-slider-head-v95"><span><i class="fa-solid fa-memory"></i> RAM</span><b><span data-ram-value><?= $ramPct ?></span>%</b></div>
+                      <input type="range" name="ram_percent" min="0" max="100" step="1" value="<?= $ramPct ?>" data-ram-range>
+                      <div class="cp-resource-result-v95"><small>Будет выдано</small><strong data-ram-result><?= e(human_bytes((float)((int)$q['memory_mb']*1048576))) ?></strong></div>
+                    </div>
+                    <div class="cp-resource-slider-v95">
+                      <div class="cp-resource-slider-head-v95"><span><i class="fa-solid fa-hard-drive"></i> Диск</span><b><span data-disk-value><?= $diskPct ?></span>%</b></div>
+                      <input type="range" name="disk_percent" min="0" max="100" step="1" value="<?= $diskPct ?>" data-disk-range>
+                      <div class="cp-resource-result-v95"><small>Будет выдано</small><strong data-disk-result><?= e(human_bytes((float)((int)$q['disk_mb']*1048576))) ?></strong></div>
+                    </div>
                   </div>
+                  <div class="cp-grant-note-v94"><i class="fa-solid fa-circle-info me-2"></i>Значения применяются к реальным системным лимитам. Для нескольких ботов CPU и RAM распределяются автоматически.</div>
                 </div>
                 <div class="modal-footer">
                   <button type="button" class="btn btn-soft" data-bs-dismiss="modal">Отмена</button>
@@ -2222,8 +2240,8 @@ function view_clients(): void
           </td>
           <td>
             <?php if ($granted): ?>
-              <div class="small">CPU <b><?= (int)$q['cpu_percent'] ?>%</b> · RAM <b><?= (int)$q['memory_mb'] ?> MB</b></div>
-              <div class="small muted">диск <?= (int)$q['disk_mb'] ?> MB</div>
+              <div class="small">CPU <b><?= (int)$q['cpu_percent'] ?>%</b> · RAM <b><?= $ramPct ?>%</b> <span class="muted">(<?= e(human_bytes((float)((int)$q['memory_mb']*1048576))) ?>)</span></div>
+              <div class="small muted">диск <?= $diskPct ?>% · <?= e(human_bytes((float)((int)$q['disk_mb']*1048576))) ?></div>
             <?php else: ?>
               <span class="badge rounded-pill text-bg-secondary">ничего не выдано</span>
             <?php endif; ?>
@@ -2259,4 +2277,11 @@ function view_clients(): void
   </div>
 </div>
 <?= implode("\n", $modals) ?>
+<script>
+(function(){
+  function humanMb(mb){mb=Math.max(0,Number(mb)||0);if(mb>=1048576)return(mb/1048576).toFixed(2)+' TB';if(mb>=1024)return(mb/1024).toFixed(mb>=10240?1:2)+' GB';return Math.round(mb)+' MB';}
+  function bind(box){if(box.dataset.bound==='1')return;box.dataset.bound='1';var cpu=box.querySelector('[data-cpu-range]'),ram=box.querySelector('[data-ram-range]'),disk=box.querySelector('[data-disk-range]');var memTotal=Number(box.dataset.memTotal||0),diskTotal=Number(box.dataset.diskTotal||0);function sync(){if(cpu){box.querySelector('[data-cpu-value]').textContent=cpu.value;box.querySelector('[data-cpu-result]').textContent=(Number(cpu.value)/100).toFixed(2)+' ядра';}if(ram){box.querySelector('[data-ram-value]').textContent=ram.value;box.querySelector('[data-ram-result]').textContent=humanMb(memTotal*Number(ram.value)/100);}if(disk){box.querySelector('[data-disk-value]').textContent=disk.value;box.querySelector('[data-disk-result]').textContent=humanMb(diskTotal*Number(disk.value)/100);}}[cpu,ram,disk].forEach(function(el){if(el)el.addEventListener('input',sync)});sync();}
+  document.querySelectorAll('[data-resource-grant]').forEach(bind);document.addEventListener('shown.bs.modal',function(e){e.target.querySelectorAll('[data-resource-grant]').forEach(bind)});
+})();
+</script>
 <?php }

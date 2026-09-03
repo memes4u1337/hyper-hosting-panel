@@ -25,6 +25,7 @@ SYSTEMD_DIR = Path("/etc/systemd/system")
 ACME_ROOT = Path("/opt/hyper-host/acme-webroot")
 LE_LIVE = Path("/etc/letsencrypt/live")
 UNIT_PREFIX = "hyper-cp-"
+UPLOAD_ROOT = Path("/tmp/hyper-cp-bot-uploads")
 
 RE_USER = re.compile(r"^[a-z][a-z0-9_-]{2,23}$")
 RE_DOMAIN = re.compile(r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
@@ -487,6 +488,93 @@ WantedBy=multi-user.target
     run(["systemctl", "daemon-reload"])
 
 
+
+def safe_upload_path(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        path = Path(raw).resolve(strict=True)
+        root = UPLOAD_ROOT.resolve(strict=False)
+    except Exception:
+        die("Некорректный временный файл")
+    if path.parent != root or not path.is_file():
+        die("Недопустимый путь загруженного файла")
+    try:
+        if path.stat().st_size > 20 * 1024 * 1024:
+            die("Загруженный файл слишком большой")
+    except OSError:
+        die("Не удалось прочитать загруженный файл")
+    return path
+
+
+def install_bot_dependencies(user, workdir):
+    log = ""
+    req = workdir / "requirements.txt"
+    package = workdir / "package.json"
+    if req.is_file():
+        venv = workdir / "venv"
+        if not (venv / "bin" / "python").is_file():
+            r = run(["runuser", "-u", user, "--", "python3", "-m", "venv", str(venv)], timeout=300, check=False)
+            log += r.stdout + r.stderr
+            if r.returncode != 0:
+                raise RuntimeError((r.stderr or r.stdout or "Не удалось создать venv").strip()[-1200:])
+        r = run(["runuser", "-u", user, "--", str(venv / "bin" / "pip"),
+                 "install", "-r", str(req)], timeout=900, check=False)
+        log += r.stdout + r.stderr
+        if r.returncode != 0:
+            raise RuntimeError((r.stderr or r.stdout or "pip install завершился с ошибкой").strip()[-1800:])
+    elif package.is_file():
+        r = run(["runuser", "-u", user, "--", "npm", "--prefix", str(workdir), "install"],
+                timeout=900, check=False)
+        log += r.stdout + r.stderr
+        if r.returncode != 0:
+            raise RuntimeError((r.stderr or r.stdout or "npm install завершился с ошибкой").strip()[-1800:])
+    return log[-5000:]
+
+
+def action_bot_deploy(p):
+    user = need_user(p)
+    bot = need_bot(p)
+    assert_owned(user)
+    runtime = str(p.get("runtime", "python"))
+    if runtime not in ("python", "node"):
+        die("Поддерживаются только python и node")
+    cpu = max(0, min(400, int(p.get("cpu_percent", 0) or 0)))
+    mem = max(0, min(65536, int(p.get("memory_mb", 0) or 0)))
+
+    bot_file = safe_upload_path(p.get("bot_file"))
+    env_file = safe_upload_path(p.get("env_file"))
+    dep_file = safe_upload_path(p.get("requirements_file"))
+    if bot_file is None:
+        die("Основной файл бота не передан")
+
+    workdir = user_home(user) / "bots" / bot
+    if workdir.exists() and any(workdir.iterdir()):
+        die("Бот с таким именем уже существует")
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    entry = workdir / ("index.js" if runtime == "node" else "bot.py")
+    shutil.copy2(bot_file, entry)
+    if env_file is not None:
+        shutil.copy2(env_file, workdir / ".env")
+    if dep_file is not None:
+        shutil.copy2(dep_file, workdir / ("package.json" if runtime == "node" else "requirements.txt"))
+    run(["chown", "-R", f"{user}:{user}", str(workdir)])
+
+    log = install_bot_dependencies(user, workdir) if dep_file is not None else ""
+    write_bot_unit(user, bot, runtime, cpu, mem)
+    unit = unit_name(user, bot)
+    run(["systemctl", "enable", "--now", unit], check=False)
+    time.sleep(1)
+    status = run(["systemctl", "is-active", unit], check=False).stdout.strip()
+    if status != "active":
+        tail = run(["journalctl", "-u", unit, "-n", "30", "--no-pager"], check=False).stdout
+        if tail:
+            log = (log + "\n" + tail)[-5000:]
+    done(unit=unit, path=str(workdir), status=status, log=log)
+
+
 def action_bot_create(p):
     user = need_user(p)
     bot = need_bot(p)
@@ -561,19 +649,16 @@ def action_bot_install(p):
     workdir = user_home(user) / "bots" / bot
     if not workdir.is_dir():
         die("Каталог бота не найден")
-
-    if (workdir / "requirements.txt").is_file():
-        venv = workdir / "venv"
-        if not (venv / "bin" / "python").is_file():
-            run(["runuser", "-u", user, "--", "python3", "-m", "venv", str(venv)], timeout=300)
-        r = run(["runuser", "-u", user, "--", str(venv / "bin" / "pip"),
-                 "install", "-r", str(workdir / "requirements.txt")], timeout=900, check=False)
-        done(log=(r.stdout + r.stderr)[-4000:])
-    elif (workdir / "package.json").is_file():
-        r = run(["runuser", "-u", user, "--", "npm", "--prefix", str(workdir), "install"],
-                timeout=900, check=False)
-        done(log=(r.stdout + r.stderr)[-4000:])
-    die("Не найден requirements.txt или package.json")
+    if not (workdir / "requirements.txt").is_file() and not (workdir / "package.json").is_file():
+        die("Не найден requirements.txt или package.json")
+    log = install_bot_dependencies(user, workdir)
+    runtime = str(p.get("runtime", "python"))
+    if runtime not in ("python", "node"):
+        runtime = "node" if (workdir / "index.js").is_file() else "python"
+    cpu = max(0, min(400, int(p.get("cpu_percent", 0) or 0)))
+    mem = max(0, min(65536, int(p.get("memory_mb", 0) or 0)))
+    write_bot_unit(user, bot, runtime, cpu, mem)
+    done(log=log)
 
 
 def action_bot_delete(p):
@@ -659,6 +744,7 @@ ACTIONS = {
     "site-ssl-status": action_site_ssl_status,
     "site-logs": action_site_logs,
     "bot-create": action_bot_create,
+    "bot-deploy": action_bot_deploy,
     "bot-limits": action_bot_limits,
     "bot-action": action_bot_action,
     "bot-install": action_bot_install,

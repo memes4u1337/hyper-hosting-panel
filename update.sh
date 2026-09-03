@@ -1,140 +1,92 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# ==============================================================================
-# HYPER-HOST — безопасное обновление уже установленной панели.
-# powered by memes4u1337
-#
-# Заменяет собой все старые apply-v*.sh патчи: обновляет файлы панели,
-# hhctl, nginx-reconcile и (если облако установлено) файлы cloud-приложения.
-# apt/dpkg, PHP, MySQL и FTP не трогаются вообще.
-#
-#   sudo bash update.sh
-# ==============================================================================
+# HYPER-HOST v95 — безопасный sparse-патч CP + клиентов админ-панели.
+# Не требует полного исходного архива панели и меняет только файлы из этого патча.
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PANEL_DIR="${PANEL_DIR:-/var/www/hyper-host}"
-CONTROL_BIN="${CONTROL_BIN:-/usr/local/sbin/hyper-host-ctl}"
-RECONCILE_BIN="${RECONCILE_BIN:-/usr/local/sbin/hyper-host-nginx-reconcile}"
-BASE_DIR="${BASE_DIR:-/opt/hyper-host}"
-CLOUD_APP_ROOT="${CLOUD_APP_ROOT:-/var/www/hyper-host-cloud-app}"
 CP_APP_ROOT="${CP_APP_ROOT:-/var/www/hyper-host-cp}"
+BASE_DIR="${BASE_DIR:-/opt/hyper-host}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP="$BASE_DIR/backups/update-$STAMP"
+BACKUP="$BASE_DIR/backups/v95-cp-$STAMP"
 INSTALLED=0
 
-log(){ printf '\033[1;36m[HYPER-HOST]\033[0m %s\n' "$*"; }
+log(){ printf '\033[1;36m[HYPER-HOST v95]\033[0m %s\n' "$*"; }
 warn(){ printf '\033[1;33m[WARN]\033[0m %s\n' "$*" >&2; }
 fail(){ printf '\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
 
-[[ ${EUID:-$(id -u)} -eq 0 ]] || fail "Запусти от root: sudo bash update.sh"
-[[ -d "$PANEL_DIR/public" ]] || fail "Панель не установлена: $PANEL_DIR. Запусти install.sh"
+[[ ${EUID:-$(id -u)} -eq 0 ]] || fail "Запусти: sudo bash update.sh"
+[[ -d "$PANEL_DIR/public" ]] || fail "Основная панель не найдена: $PANEL_DIR"
 
-# ------------------------------------------------------------------ проверки
-for f in src/public/index.php src/public/assets/style.css src/public/assets/app.js scripts/hhctl; do
-  [[ -f "$SRC_DIR/$f" ]] || fail "В архиве не найден файл: $f"
+for f in src/public/index.php src/public/assets/style.css \
+         src/cp/app/bootstrap.php src/cp/public/index.php \
+         src/cp/public/assets/cp.css src/cp/public/assets/cp.js \
+         scripts/hyper-cp-bridge; do
+  [[ -f "$SRC_DIR/$f" ]] || fail "В патче отсутствует: $f"
 done
 
-log "Синтаксическая проверка перед установкой..."
+log "Проверяю синтаксис патча"
 php -l "$SRC_DIR/src/public/index.php" >/dev/null
-php -l "$SRC_DIR/src/app/bootstrap.php" >/dev/null
-bash -n "$SRC_DIR/scripts/hhctl"
-bash -n "$SRC_DIR/scripts/nginx-reconcile-v89.sh"
-command -v node >/dev/null 2>&1 && node --check "$SRC_DIR/src/public/assets/app.js" >/dev/null || true
-for f in "$SRC_DIR"/src/cp/app/*.php "$SRC_DIR"/src/cp/public/*.php; do
-  [[ -f "$f" ]] && php -l "$f" >/dev/null
-done
+php -l "$SRC_DIR/src/cp/app/bootstrap.php" >/dev/null
+php -l "$SRC_DIR/src/cp/public/index.php" >/dev/null
+python3 -m py_compile "$SRC_DIR/scripts/hyper-cp-bridge" >/dev/null
 
-# ------------------------------------------------------------------ бэкап
-log "Бэкап текущей версии -> $BACKUP"
 mkdir -p "$BACKUP"
-cp -a "$PANEL_DIR" "$BACKUP/panel" 2>/dev/null || true
-[[ -f "$CONTROL_BIN" ]] && cp -a "$CONTROL_BIN" "$BACKUP/hyper-host-ctl" || true
-[[ -f "$RECONCILE_BIN" ]] && cp -a "$RECONCILE_BIN" "$BACKUP/hyper-host-nginx-reconcile" || true
-[[ -d "$CLOUD_APP_ROOT" ]] && cp -a "$CLOUD_APP_ROOT" "$BACKUP/cloud-app" || true
-[[ -d "$CP_APP_ROOT" ]] && cp -a "$CP_APP_ROOT" "$BACKUP/cp-app" || true
+log "Создаю резервную копию: $BACKUP"
+[[ -f "$PANEL_DIR/public/index.php" ]] && cp -a "$PANEL_DIR/public/index.php" "$BACKUP/panel-index.php"
+[[ -f "$PANEL_DIR/public/assets/style.css" ]] && cp -a "$PANEL_DIR/public/assets/style.css" "$BACKUP/panel-style.css"
+if [[ -d "$CP_APP_ROOT" ]]; then
+  mkdir -p "$BACKUP/cp"
+  [[ -f "$CP_APP_ROOT/app/bootstrap.php" ]] && cp -a "$CP_APP_ROOT/app/bootstrap.php" "$BACKUP/cp/bootstrap.php"
+  [[ -f "$CP_APP_ROOT/public/index.php" ]] && cp -a "$CP_APP_ROOT/public/index.php" "$BACKUP/cp/index.php"
+  [[ -f "$CP_APP_ROOT/public/assets/cp.css" ]] && cp -a "$CP_APP_ROOT/public/assets/cp.css" "$BACKUP/cp/cp.css"
+  [[ -f "$CP_APP_ROOT/public/assets/cp.js" ]] && cp -a "$CP_APP_ROOT/public/assets/cp.js" "$BACKUP/cp/cp.js"
+fi
+[[ -f /usr/local/sbin/hyper-cp-bridge ]] && cp -a /usr/local/sbin/hyper-cp-bridge "$BACKUP/hyper-cp-bridge"
 
 rollback(){
-  local code=$?
+  local rc=$?
   if [[ "$INSTALLED" -eq 1 ]]; then
-    warn "Ошибка обновления — откатываю на предыдущую версию"
-    [[ -d "$BACKUP/panel" ]] && rsync -a --delete "$BACKUP/panel/" "$PANEL_DIR/" || true
-    [[ -f "$BACKUP/hyper-host-ctl" ]] && install -m 0755 "$BACKUP/hyper-host-ctl" "$CONTROL_BIN" || true
-    [[ -d "$BACKUP/cloud-app" ]] && rsync -a --delete "$BACKUP/cloud-app/" "$CLOUD_APP_ROOT/" || true
-    [[ -d "$BACKUP/cp-app" ]] && rsync -a --delete "$BACKUP/cp-app/" "$CP_APP_ROOT/" || true
-    nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
+    warn "Ошибка установки — возвращаю резервную копию"
+    [[ -f "$BACKUP/panel-index.php" ]] && install -m 0644 "$BACKUP/panel-index.php" "$PANEL_DIR/public/index.php" || true
+    [[ -f "$BACKUP/panel-style.css" ]] && install -m 0644 "$BACKUP/panel-style.css" "$PANEL_DIR/public/assets/style.css" || true
+    if [[ -d "$CP_APP_ROOT" ]]; then
+      [[ -f "$BACKUP/cp/bootstrap.php" ]] && install -o root -g hypercp -m 0640 "$BACKUP/cp/bootstrap.php" "$CP_APP_ROOT/app/bootstrap.php" || true
+      [[ -f "$BACKUP/cp/index.php" ]] && install -o root -g hypercp -m 0640 "$BACKUP/cp/index.php" "$CP_APP_ROOT/public/index.php" || true
+      [[ -f "$BACKUP/cp/cp.css" ]] && install -m 0644 "$BACKUP/cp/cp.css" "$CP_APP_ROOT/public/assets/cp.css" || true
+      [[ -f "$BACKUP/cp/cp.js" ]] && install -m 0644 "$BACKUP/cp/cp.js" "$CP_APP_ROOT/public/assets/cp.js" || true
+    fi
+    [[ -f "$BACKUP/hyper-cp-bridge" ]] && install -m 0755 "$BACKUP/hyper-cp-bridge" /usr/local/sbin/hyper-cp-bridge || true
+    systemctl reload nginx >/dev/null 2>&1 || true
   fi
-  exit "$code"
+  exit "$rc"
 }
 trap rollback ERR
 INSTALLED=1
 
-# ------------------------------------------------------------------ панель
-log "Обновление файлов панели..."
-CONFIG_BACKUP=""
-if [[ -f "$PANEL_DIR/app/config.php" ]]; then
-  CONFIG_BACKUP="$(mktemp)"
-  cp -a "$PANEL_DIR/app/config.php" "$CONFIG_BACKUP"
-fi
-
-install -m 0644 "$SRC_DIR/src/public/index.php"        "$PANEL_DIR/public/index.php"
+log "Обновляю раздел клиентов основной панели"
+install -m 0644 "$SRC_DIR/src/public/index.php" "$PANEL_DIR/public/index.php"
 install -m 0644 "$SRC_DIR/src/public/assets/style.css" "$PANEL_DIR/public/assets/style.css"
-install -m 0644 "$SRC_DIR/src/public/assets/app.js"    "$PANEL_DIR/public/assets/app.js"
-install -m 0644 "$SRC_DIR/src/app/bootstrap.php"       "$PANEL_DIR/app/bootstrap.php"
-install -m 0644 "$SRC_DIR/src/app/setup_db.php"        "$PANEL_DIR/app/setup_db.php"
-install -m 0644 "$SRC_DIR/src/app/config.example.php"  "$PANEL_DIR/app/config.example.php"
+chown www-data:www-data "$PANEL_DIR/public/index.php" "$PANEL_DIR/public/assets/style.css" 2>/dev/null || true
 
-if [[ -n "$CONFIG_BACKUP" ]]; then
-  cp -a "$CONFIG_BACKUP" "$PANEL_DIR/app/config.php"
-  rm -f "$CONFIG_BACKUP"
-fi
-chown -R www-data:www-data "$PANEL_DIR/public" "$PANEL_DIR/app" 2>/dev/null || true
-
-# ------------------------------------------------------------------ hhctl
-log "Обновление управляющих скриптов..."
-install -m 0755 "$SRC_DIR/scripts/hhctl" "$CONTROL_BIN"
-install -m 0755 "$SRC_DIR/scripts/nginx-reconcile-v89.sh" "$RECONCILE_BIN"
-install -m 0755 "$SRC_DIR/scripts/nginx_recover_v89.py" "$BASE_DIR/nginx_recover_v89.py"
-install -m 0755 "$SRC_DIR/scripts/ssl_truth.py" "$BASE_DIR/ssl-truth.py"
-mkdir -p "$BASE_DIR/bin" "$BASE_DIR/deploy-center"
-install -m 0755 "$SRC_DIR/scripts/hyper_nginx_runtime.sh" "$BASE_DIR/bin/hyper-host-nginx-runtime"
-install -m 0755 "$SRC_DIR/scripts/hyper_sql_import.py" "$BASE_DIR/bin/hyper_sql_import.py"
-install -m 0755 "$SRC_DIR/scripts/proftpd_auth_sync.py" "$BASE_DIR/bin/proftpd_auth_sync.py"
-install -m 0755 "$SRC_DIR/scripts/deploy_center.py" "$BASE_DIR/deploy-center/deploy_center.py"
-install -m 0755 "$SRC_DIR/scripts/hyper" /usr/local/sbin/hyper
-[[ -f "$SRC_DIR/scripts/hyper_ftp_server.py" ]] && install -m 0755 "$SRC_DIR/scripts/hyper_ftp_server.py" "$BASE_DIR/bin/hyper-ftp-server" || true
-
-# ------------------------------------------------------------------ облако
-if [[ -d "$CLOUD_APP_ROOT/app" ]]; then
-  log "Обновление HYPER CLOUD..."
-  install -o root -g hypercloud -m 0640 "$SRC_DIR/src/cloud/app/bootstrap.php" "$CLOUD_APP_ROOT/app/bootstrap.php"
-  install -o root -g hypercloud -m 0640 "$SRC_DIR/src/cloud/app/filelib.php"  "$CLOUD_APP_ROOT/app/filelib.php"
-  for f in index.php editor.php site.php site-resource.php; do
-    install -o root -g hypercloud -m 0640 "$SRC_DIR/src/cloud/public/$f" "$CLOUD_APP_ROOT/public/$f"
-  done
-  install -o root -g hypercloud -m 0640 "$SRC_DIR/src/cloud/public/api/upload.php" "$CLOUD_APP_ROOT/public/api/upload.php"
-  install -m 0644 "$SRC_DIR/src/cloud/public/cloud.css" "$CLOUD_APP_ROOT/public/cloud.css"
-  install -m 0644 "$SRC_DIR/src/cloud/public/cloud.js"  "$CLOUD_APP_ROOT/public/cloud.js"
-  install -m 0755 "$SRC_DIR/scripts/hyper-cloud-nginx-fragment.sh" "$BASE_DIR/bin/hyper-cloud-nginx-fragment.sh"
-  install -m 0755 "$SRC_DIR/scripts/hyper-cloud-panel-auth" /usr/local/sbin/hyper-cloud-panel-auth
-fi
-
-# ------------------------------------------------------------------ портал клиентов
 if [[ -d "$CP_APP_ROOT/app" ]]; then
-  log "Обновление клиентского портала..."
+  log "Обновляю клиентскую CP"
   install -o root -g hypercp -m 0640 "$SRC_DIR/src/cp/app/bootstrap.php" "$CP_APP_ROOT/app/bootstrap.php"
-  install -o root -g hypercp -m 0640 "$SRC_DIR/src/cp/public/index.php"  "$CP_APP_ROOT/public/index.php"
+  install -o root -g hypercp -m 0640 "$SRC_DIR/src/cp/public/index.php" "$CP_APP_ROOT/public/index.php"
   install -m 0644 "$SRC_DIR/src/cp/public/assets/cp.css" "$CP_APP_ROOT/public/assets/cp.css"
-  install -m 0644 "$SRC_DIR/src/cp/public/assets/cp.js"  "$CP_APP_ROOT/public/assets/cp.js"
+  install -m 0644 "$SRC_DIR/src/cp/public/assets/cp.js" "$CP_APP_ROOT/public/assets/cp.js"
   install -m 0755 "$SRC_DIR/scripts/hyper-cp-bridge" /usr/local/sbin/hyper-cp-bridge
-  install -m 0755 "$SRC_DIR/scripts/hyper-cp-nginx-fragment.sh" "$BASE_DIR/bin/hyper-cp-nginx-fragment.sh"
-  python3 -m py_compile /usr/local/sbin/hyper-cp-bridge >/dev/null || fail "Мост портала не компилируется"
+else
+  warn "CP ещё не установлена. Основная панель обновлена; для CP выполни: sudo bash install-cp.sh"
 fi
 
-# ------------------------------------------------------------------ проверки после
-log "Проверка установленных файлов..."
+log "Финальная проверка"
 php -l "$PANEL_DIR/public/index.php" >/dev/null
-bash -n "$CONTROL_BIN"
+if [[ -f "$CP_APP_ROOT/public/index.php" ]]; then
+  php -l "$CP_APP_ROOT/public/index.php" >/dev/null
+  python3 -m py_compile /usr/local/sbin/hyper-cp-bridge >/dev/null
+fi
 nginx -t >/dev/null
 
 rm -rf "$BASE_DIR/cache"/* 2>/dev/null || true
@@ -146,4 +98,4 @@ systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&
 
 INSTALLED=0
 trap - ERR
-log "Обновление завершено. Backup: $BACKUP"
+log "Готово. Резервная копия: $BACKUP"

@@ -71,7 +71,7 @@ function handle_action(array $user, array $quota): void
     $db = cp_db();
 
     if (!cp_has_resources($quota) && $act !== 'change_password') {
-        throw new RuntimeException('Администратор ещё не выдал ресурсы для вашего аккаунта');
+        throw new RuntimeException('Администратор ещё не выдал ресурсы для аккаунта');
     }
 
     switch ($act) {
@@ -134,25 +134,39 @@ function handle_action(array $user, array $quota): void
             $name = strtolower(trim((string)($_POST['name'] ?? '')));
             $runtime = (string)($_POST['runtime'] ?? 'python');
             if (!cp_valid_bot_name($name)) throw new RuntimeException('Имя бота: латиница, цифры, _ и -');
+            if (!in_array($runtime, ['python','node'], true)) throw new RuntimeException('Поддерживаются Python и Node.js');
 
             $bots = cp_bots($uid);
             if (count($bots) >= (int)$quota['max_bots']) {
                 throw new RuntimeException('Достигнут лимит ботов: ' . (int)$quota['max_bots']);
             }
-            // Квота делится поровну между ботами, чтобы клиент не мог выйти за выданное.
             $slots = max(1, (int)$quota['max_bots']);
             $cpu = (int)floor((int)$quota['cpu_percent'] / $slots);
             $mem = (int)floor((int)$quota['memory_mb'] / $slots);
 
-            $r = cp_bridge(['action' => 'bot-create', 'user' => $username, 'bot' => $name,
-                            'runtime' => $runtime, 'cpu_percent' => $cpu, 'memory_mb' => $mem], 180);
-            if (empty($r['ok'])) throw new RuntimeException((string)($r['error'] ?? 'Не удалось создать бота'));
+            $botTmp = $envTmp = $depTmp = '';
+            try {
+                $botTmp = cp_bot_uploaded_tmp('bot_file');
+                $envTmp = cp_bot_uploaded_tmp('env_file');
+                $depTmp = cp_bot_uploaded_tmp('requirements_file');
+                if ($botTmp === '') throw new RuntimeException('Выберите основной файл бота');
+
+                $r = cp_bridge([
+                    'action' => 'bot-deploy', 'user' => $username, 'bot' => $name,
+                    'runtime' => $runtime, 'cpu_percent' => $cpu, 'memory_mb' => $mem,
+                    'bot_file' => $botTmp, 'env_file' => $envTmp, 'requirements_file' => $depTmp,
+                ], 1000);
+                if (empty($r['ok'])) throw new RuntimeException((string)($r['error'] ?? 'Не удалось развернуть бота'));
+            } finally {
+                foreach ([$botTmp,$envTmp,$depTmp] as $tmp) if ($tmp !== '' && is_file($tmp)) @unlink($tmp);
+            }
 
             $db->prepare('INSERT INTO cp_bots(user_id,name,runtime,unit_name,path,start_command,cpu_percent,memory_mb) VALUES(?,?,?,?,?,?,?,?)')
                ->execute([$uid, $name, $runtime, (string)($r['unit'] ?? ''), (string)($r['path'] ?? ''),
                           $runtime === 'node' ? 'node index.js' : 'python bot.py', $cpu, $mem]);
-            cp_event('bot', 'Создан бот ' . $name);
-            flash('Бот создан. Загрузите код по FTP в bots/' . $name . ', затем нажмите «Установить зависимости» и «Запустить».', 'success');
+            cp_event('bot', 'Развёрнут и запущен бот ' . $name);
+            $_SESSION['cp_install_log'] = (string)($r['log'] ?? '');
+            flash('Бот загружен, зависимости обработаны и запуск выполнен автоматически.', 'success');
             redirect('/?page=bots');
         }
 
@@ -169,7 +183,7 @@ function handle_action(array $user, array $quota): void
 
         case 'bot_install': {
             $bot = owned_bot($uid, (int)($_POST['id'] ?? 0));
-            $r = cp_bridge(['action' => 'bot-install', 'user' => $username, 'bot' => (string)$bot['name']], 900);
+            $r = cp_bridge(['action' => 'bot-install', 'user' => $username, 'bot' => (string)$bot['name'], 'runtime' => (string)$bot['runtime'], 'cpu_percent' => (int)$bot['cpu_percent'], 'memory_mb' => (int)$bot['memory_mb']], 900);
             if (empty($r['ok'])) throw new RuntimeException((string)($r['error'] ?? 'Не удалось установить зависимости'));
             $_SESSION['cp_install_log'] = (string)($r['log'] ?? '');
             flash('Зависимости установлены', 'success');
@@ -202,6 +216,28 @@ function handle_action(array $user, array $quota): void
     throw new RuntimeException('Неизвестное действие');
 }
 
+
+function cp_bot_uploaded_tmp(string $field): string
+{
+    if (!isset($_FILES[$field]) || !is_array($_FILES[$field])) return '';
+    $f = $_FILES[$field];
+    $err = (int)($f['error'] ?? UPLOAD_ERR_NO_FILE);
+    if ($err === UPLOAD_ERR_NO_FILE) return '';
+    if ($err !== UPLOAD_ERR_OK) throw new RuntimeException('Не удалось загрузить файл: ' . $field);
+    $size = (int)($f['size'] ?? 0);
+    if ($size < 1 || $size > 20 * 1024 * 1024) throw new RuntimeException('Файл слишком большой. Максимум 20 MB');
+    $src = (string)($f['tmp_name'] ?? '');
+    if ($src === '' || !is_uploaded_file($src)) throw new RuntimeException('Некорректный загруженный файл');
+    $dir = '/tmp/hyper-cp-bot-uploads';
+    if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) throw new RuntimeException('Не удалось подготовить загрузку');
+    @chmod($dir, 0700);
+    $dst = $dir . '/cp-' . bin2hex(random_bytes(12));
+    if (!move_uploaded_file($src, $dst)) throw new RuntimeException('Не удалось сохранить загруженный файл');
+    @chmod($dst, 0600);
+    return $dst;
+}
+
+
 function owned_site(int $uid, int $id): array
 {
     $st = cp_db()->prepare('SELECT * FROM cp_sites WHERE id=? AND user_id=?');
@@ -230,16 +266,18 @@ function render_auth(string $mode): void
 <html lang="ru"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>HYPER-HOST — <?= $mode === 'register' ? 'Регистрация' : 'Вход' ?></title>
-<link href="/assets/cp.css?v=1" rel="stylesheet">
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" rel="stylesheet">
+<link href="/assets/cp.css?v=95" rel="stylesheet">
 </head><body class="cp-auth-body">
 <div class="cp-orb cp-orb-a"></div><div class="cp-orb cp-orb-b"></div>
 <main class="cp-auth">
   <div class="cp-auth-card">
-    <div class="cp-brand"><span class="cp-brand-mark">⚡</span><b>HYPER-HOST</b></div>
+    <div class="cp-brand"><span class="cp-brand-mark"><i class="fa-solid fa-bolt"></i></span><div><b>HYPER-HOST</b><small>CONTROL PANEL</small></div></div>
     <h1><?= $mode === 'register' ? 'Создать аккаунт' : 'Вход в панель' ?></h1>
     <p class="cp-muted"><?= $mode === 'register'
-        ? 'Логин станет именем вашей папки на сервере и FTP-логином — выбирайте осознанно.'
-        : 'Панель управления вашими сайтами и ботами.' ?></p>
+        ? 'Логин станет именем папки на сервере и FTP-логином — выбирайте осознанно.'
+        : 'Панель управления сайтами и ботами.' ?></p>
 
     <?php if ($f): ?><div class="cp-alert cp-alert-<?= e($f['type']) ?>"><?= e($f['message']) ?></div><?php endif; ?>
 
@@ -283,24 +321,26 @@ function render_shell(array $user, array $quota, string $page): void
     if (!in_array($page, $allowed, true)) $page = 'dashboard';
 
     $nav = [
-        'dashboard' => ['◈', 'Обзор'],
-        'sites'     => ['◍', 'Сайты'],
-        'bots'      => ['⬢', 'Боты'],
-        'ssl'       => ['⛨', 'SSL'],
-        'logs'      => ['≡', 'Логи'],
-        'ftp'       => ['⇅', 'FTP и доступ'],
+        'dashboard' => ['fa-grid-2', 'Обзор'],
+        'sites'     => ['fa-globe', 'Сайты'],
+        'bots'      => ['fa-robot', 'Боты'],
+        'ssl'       => ['fa-shield-halved', 'SSL'],
+        'logs'      => ['fa-terminal', 'Логи'],
+        'ftp'       => ['fa-folder-tree', 'FTP и доступ'],
     ];
     $f = flash();
     ?><!doctype html>
 <html lang="ru"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>HYPER-HOST — панель клиента</title>
-<link href="/assets/cp.css?v=1" rel="stylesheet">
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" rel="stylesheet">
+<link href="/assets/cp.css?v=95" rel="stylesheet">
 </head><body>
 <div class="cp-shell">
 
   <aside class="cp-sidebar" id="cpSidebar">
-    <div class="cp-brand"><span class="cp-brand-mark">⚡</span><b>HYPER-HOST</b></div>
+    <div class="cp-brand"><span class="cp-brand-mark"><i class="fa-solid fa-bolt"></i></span><div><b>HYPER-HOST</b><small>CONTROL PANEL</small></div></div>
     <div class="cp-user-chip">
       <span class="cp-avatar"><?= e(mb_strtoupper(mb_substr((string)$user['username'], 0, 1))) ?></span>
       <div><b><?= e((string)$user['username']) ?></b>
@@ -311,17 +351,17 @@ function render_shell(array $user, array $quota, string $page): void
       <?php foreach ($nav as $id => [$icon, $label]): ?>
         <a class="cp-nav-link<?= $id === $page ? ' is-active' : '' ?><?= (!$granted && $id !== 'dashboard' && $id !== 'ftp') ? ' is-locked' : '' ?>"
            href="/?page=<?= e($id) ?>">
-          <span class="cp-nav-icon"><?= $icon ?></span><span><?= e($label) ?></span>
+          <span class="cp-nav-icon"><i class="fa-solid <?= e($icon) ?>"></i></span><span><?= e($label) ?></span>
         </a>
       <?php endforeach; ?>
     </nav>
-    <a class="cp-nav-link cp-logout" href="/?page=logout"><span class="cp-nav-icon">⏻</span><span>Выйти</span></a>
+    <a class="cp-nav-link cp-logout" href="/?page=logout"><span class="cp-nav-icon"><i class="fa-solid fa-power-off"></i></span><span>Выйти</span></a>
   </aside>
 
   <main class="cp-main">
     <header class="cp-topbar">
-      <button class="cp-burger" id="cpBurger" aria-label="Меню">☰</button>
-      <h1><?= e($nav[$page][1]) ?></h1>
+      <button class="cp-burger" id="cpBurger" aria-label="Меню"><i class="fa-solid fa-bars"></i></button>
+      <div class="cp-topbar-title"><span>Панель управления</span><h1><?= e($nav[$page][1]) ?></h1></div><div class="cp-topbar-status"><i class="fa-solid fa-circle"></i> online</div>
     </header>
 
     <div class="cp-content">
@@ -345,7 +385,7 @@ function render_shell(array $user, array $quota, string $page): void
   </main>
 </div>
 <div class="cp-backdrop" id="cpBackdrop"></div>
-<script src="/assets/cp.js?v=1" defer></script>
+<script src="/assets/cp.js?v=95" defer></script>
 </body></html><?php
 }
 
@@ -367,7 +407,7 @@ function view_pending(array $user): void
     <div class="is-current"><span>2</span>Ожидание выдачи ресурсов</div>
     <div><span>3</span>Полный доступ к панели</div>
   </div>
-  <p class="cp-muted cp-pending-note">FTP-доступ к вашей папке уже работает — можно заранее загрузить файлы.
+  <p class="cp-muted cp-pending-note">FTP-доступ уже работает — файлы можно загрузить заранее.
      Реквизиты в разделе «FTP и доступ».</p>
 </section>
 <?php }
@@ -422,7 +462,7 @@ function view_dashboard(array $user, array $quota, bool $granted): void
       <div><span>Диск</span><b><?= (int)$quota['disk_mb'] ?> MB</b></div>
       <div><span>Ботов запущено</span><b><?= $running ?></b></div>
     </div>
-    <p class="cp-muted cp-note">Процессор и память делятся поровну между вашими ботами и
+    <p class="cp-muted cp-note">Процессор и память делятся поровну между ботами и
        ограничиваются на уровне системы — превысить выданное не получится.</p>
   </section>
 
@@ -538,91 +578,88 @@ function view_bots(array $user, array $quota): void
     $log = $_SESSION['cp_install_log'] ?? '';
     unset($_SESSION['cp_install_log']);
     ?>
-<section class="cp-card">
-  <div class="cp-card-head">
-    <h2>Новый бот</h2>
-    <span class="cp-pill <?= $left > 0 ? 'is-ok' : 'is-warn' ?>">Свободно: <?= max(0, $left) ?></span>
-  </div>
-  <?php if ($left > 0): ?>
-    <form method="post" class="cp-form-inline">
-      <?= csrf_field() ?>
-      <input type="hidden" name="action" value="create_bot">
-      <input type="hidden" name="back" value="bots">
-      <div class="cp-row">
-        <label><span>Имя бота</span><input name="name" placeholder="myshopbot" required pattern="[a-z0-9][a-z0-9_-]{1,31}"></label>
-        <label><span>Среда</span>
-          <select name="runtime">
-            <option value="python">Python — bot.py</option>
-            <option value="node">Node.js — index.js</option>
-          </select>
-        </label>
-      </div>
-      <button class="cp-btn cp-btn-primary">Создать бота</button>
-    </form>
-    <p class="cp-muted cp-note">После создания загрузите код по FTP в <code>bots/имя_бота</code>,
-       затем «Установить зависимости» и «Запустить». Бот поднимается автоматически после
-       перезагрузки сервера и перезапускается при падении.</p>
-  <?php else: ?>
-    <div class="cp-empty">Лимит ботов исчерпан</div>
-  <?php endif; ?>
+<section class="cp-bot-hero">
+  <div class="cp-bot-hero-icon"><i class="fa-solid fa-robot"></i></div>
+  <div><span class="cp-eyebrow">AUTO DEPLOY</span><h2>Развёртывание бота</h2><p>Загрузите код и конфигурацию — панель подготовит окружение, установит зависимости и запустит процесс автоматически.</p></div>
+  <span class="cp-pill <?= $left > 0 ? 'is-ok' : 'is-warn' ?>"><i class="fa-solid fa-layer-group"></i> Свободно: <?= max(0, $left) ?></span>
 </section>
 
+<?php if ($left > 0): ?>
+<section class="cp-card cp-deploy-card">
+  <form method="post" enctype="multipart/form-data" class="cp-form-inline" data-deploy-form>
+    <?= csrf_field() ?>
+    <input type="hidden" name="action" value="create_bot">
+    <input type="hidden" name="back" value="bots">
+    <div class="cp-row">
+      <label><span>Имя бота</span><input name="name" placeholder="myshopbot" required pattern="[a-z0-9][a-z0-9_-]{1,31}"></label>
+      <label><span>Среда</span>
+        <select name="runtime" data-runtime>
+          <option value="python">Python</option>
+          <option value="node">Node.js</option>
+        </select>
+      </label>
+    </div>
+    <div class="cp-upload-grid">
+      <label class="cp-upload-card is-required">
+        <input type="file" name="bot_file" required data-file-input accept=".py,.js">
+        <i class="fa-solid fa-file-code"></i><b data-file-label>Основной файл</b><small data-main-hint>bot.py</small><em>обязательно</em>
+      </label>
+      <label class="cp-upload-card">
+        <input type="file" name="env_file" data-file-input accept=".env,.txt">
+        <i class="fa-solid fa-key"></i><b data-file-label>.env</b><small>переменные окружения</small><em>необязательно</em>
+      </label>
+      <label class="cp-upload-card">
+        <input type="file" name="requirements_file" data-file-input accept=".txt,.json">
+        <i class="fa-solid fa-boxes-stacked"></i><b data-file-label>Зависимости</b><small data-deps-hint>requirements.txt</small><em>необязательно</em>
+      </label>
+    </div>
+    <div class="cp-deploy-bottom">
+      <div class="cp-deploy-info"><i class="fa-solid fa-wand-magic-sparkles"></i><span>После отправки панель сама создаст окружение, установит пакеты, включит автозапуск и поднимет бот.</span></div>
+      <button class="cp-btn cp-btn-primary cp-btn-lg" type="submit"><i class="fa-solid fa-rocket"></i> Развернуть и запустить</button>
+    </div>
+  </form>
+</section>
+<?php else: ?>
+<section class="cp-card"><div class="cp-empty"><i class="fa-solid fa-circle-exclamation"></i> Лимит ботов исчерпан</div></section>
+<?php endif; ?>
+
 <?php if ($log): ?>
-  <section class="cp-card"><h2>Установка зависимостей</h2><pre class="cp-log"><?= e((string)$log) ?></pre></section>
+  <section class="cp-card"><div class="cp-card-head"><h2><i class="fa-solid fa-terminal"></i> Результат установки</h2></div><pre class="cp-log"><?= e((string)$log) ?></pre></section>
 <?php endif; ?>
 
 <section class="cp-card">
-  <h2>Мои боты</h2>
+  <div class="cp-card-head"><div><span class="cp-eyebrow">RUNTIME</span><h2>Запущенные процессы</h2></div><span class="cp-pill is-muted"><?= count($bots) ?> всего</span></div>
   <?php if ($bots): ?>
-    <div class="cp-list">
+    <div class="cp-bot-grid">
       <?php foreach ($bots as $b):
         $live = $byName[(string)$b['name']] ?? [];
         $status = (string)($live['status'] ?? 'inactive');
         $isRun = $status === 'active';
       ?>
-        <div class="cp-item cp-item-bot">
-          <div class="cp-item-main">
-            <b><span class="cp-dot <?= $isRun ? 'is-on' : 'is-off' ?>"></span><?= e((string)$b['name']) ?></b>
-            <code>bots/<?= e((string)$b['name']) ?> · <?= e((string)$b['runtime']) ?></code>
-            <div class="cp-bot-meta">
-              <span>CPU лимит <b><?= (int)$b['cpu_percent'] ?>%</b></span>
-              <span>RAM лимит <b><?= (int)$b['memory_mb'] ?> MB</b></span>
-              <span>Сейчас <b><?= e(human_bytes((float)($live['memory_bytes'] ?? 0))) ?></b></span>
-            </div>
+        <article class="cp-bot-card <?= $isRun ? 'is-running' : '' ?>">
+          <div class="cp-bot-card-head">
+            <div class="cp-bot-logo"><i class="fa-brands <?= $b['runtime']==='node' ? 'fa-node-js' : 'fa-python' ?>"></i></div>
+            <div class="cp-bot-name"><b><?= e((string)$b['name']) ?></b><code><?= e((string)$b['runtime']) ?> · bots/<?= e((string)$b['name']) ?></code></div>
+            <span class="cp-pill <?= $isRun ? 'is-ok' : 'is-muted' ?>"><i class="fa-solid fa-circle"></i><?= $isRun ? 'работает' : e($status) ?></span>
           </div>
-          <div class="cp-item-side">
-            <span class="cp-pill <?= $isRun ? 'is-ok' : 'is-muted' ?>"><?= $isRun ? 'работает' : e($status) ?></span>
-            <?php foreach ([['start','Запустить'],['restart','Перезапуск'],['stop','Остановить']] as [$a,$title]): ?>
-              <form method="post">
-                <?= csrf_field() ?>
-                <input type="hidden" name="action" value="bot_action">
-                <input type="hidden" name="back" value="bots">
-                <input type="hidden" name="id" value="<?= (int)$b['id'] ?>">
-                <input type="hidden" name="act" value="<?= e($a) ?>">
-                <button class="cp-btn cp-btn-soft"><?= e($title) ?></button>
-              </form>
+          <div class="cp-bot-resources">
+            <div><span>CPU лимит</span><b><?= (int)$b['cpu_percent'] ?>%</b></div>
+            <div><span>RAM лимит</span><b><?= (int)$b['memory_mb'] ?> MB</b></div>
+            <div><span>RAM сейчас</span><b><?= e(human_bytes((float)($live['memory_bytes'] ?? 0))) ?></b></div>
+          </div>
+          <div class="cp-bot-actions">
+            <?php foreach ([['start','fa-play','Запустить'],['restart','fa-rotate','Перезапуск'],['stop','fa-stop','Остановить']] as [$a,$icon,$title]): ?>
+              <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="bot_action"><input type="hidden" name="back" value="bots"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><input type="hidden" name="act" value="<?= e($a) ?>"><button class="cp-btn cp-btn-soft"><i class="fa-solid <?= e($icon) ?>"></i> <?= e($title) ?></button></form>
             <?php endforeach; ?>
-            <form method="post">
-              <?= csrf_field() ?>
-              <input type="hidden" name="action" value="bot_install">
-              <input type="hidden" name="back" value="bots">
-              <input type="hidden" name="id" value="<?= (int)$b['id'] ?>">
-              <button class="cp-btn cp-btn-soft">Зависимости</button>
-            </form>
-            <a class="cp-btn cp-btn-soft" href="/?page=logs&amp;bot=<?= (int)$b['id'] ?>">Логи</a>
-            <form method="post" onsubmit="return confirm('Удалить бота <?= e((string)$b['name']) ?>?')">
-              <?= csrf_field() ?>
-              <input type="hidden" name="action" value="delete_bot">
-              <input type="hidden" name="back" value="bots">
-              <input type="hidden" name="id" value="<?= (int)$b['id'] ?>">
-              <button class="cp-btn cp-btn-danger">Удалить</button>
-            </form>
+            <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="bot_install"><input type="hidden" name="back" value="bots"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><button class="cp-btn cp-btn-soft"><i class="fa-solid fa-box-open"></i> Зависимости</button></form>
+            <a class="cp-btn cp-btn-soft" href="/?page=logs&amp;bot=<?= (int)$b['id'] ?>"><i class="fa-solid fa-terminal"></i> Логи</a>
+            <form method="post" onsubmit="return confirm('Удалить бота <?= e((string)$b['name']) ?>?')"><?= csrf_field() ?><input type="hidden" name="action" value="delete_bot"><input type="hidden" name="back" value="bots"><input type="hidden" name="id" value="<?= (int)$b['id'] ?>"><button class="cp-btn cp-btn-danger"><i class="fa-solid fa-trash"></i></button></form>
           </div>
-        </div>
+        </article>
       <?php endforeach; ?>
     </div>
   <?php else: ?>
-    <div class="cp-empty">Ботов пока нет</div>
+    <div class="cp-empty"><i class="fa-solid fa-robot"></i> Ботов пока нет</div>
   <?php endif; ?>
 </section>
 <?php }
@@ -670,7 +707,7 @@ function view_ssl(array $user): void
               <input type="hidden" name="action" value="issue_ssl">
               <input type="hidden" name="back" value="ssl">
               <input type="hidden" name="id" value="<?= (int)$s['id'] ?>">
-              <input name="email" type="email" placeholder="ваш@email" required value="<?= e((string)$user['email']) ?>">
+              <input name="email" type="email" placeholder="mail@example.com" required value="<?= e((string)$user['email']) ?>">
               <button class="cp-btn cp-btn-primary"><?= $has ? 'Перевыпустить' : 'Выпустить SSL' ?></button>
             </form>
           </div>
