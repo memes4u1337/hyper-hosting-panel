@@ -96,7 +96,7 @@
   });
 })();
 
-/* v95 bot deploy UX */
+/* v96 bot deploy UX */
 document.addEventListener('DOMContentLoaded', function () {
   document.querySelectorAll('[data-file-input]').forEach(function (input) {
     input.addEventListener('change', function () {

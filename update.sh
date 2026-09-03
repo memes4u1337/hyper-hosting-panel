@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# HYPER-HOST v95 — безопасный sparse-патч CP + клиентов админ-панели.
+# HYPER-HOST v96 — безопасный sparse-патч CP + клиентов админ-панели.
 # Не требует полного исходного архива панели и меняет только файлы из этого патча.
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,10 +9,10 @@ PANEL_DIR="${PANEL_DIR:-/var/www/hyper-host}"
 CP_APP_ROOT="${CP_APP_ROOT:-/var/www/hyper-host-cp}"
 BASE_DIR="${BASE_DIR:-/opt/hyper-host}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP="$BASE_DIR/backups/v95-cp-$STAMP"
+BACKUP="$BASE_DIR/backups/v96-cp-$STAMP"
 INSTALLED=0
 
-log(){ printf '\033[1;36m[HYPER-HOST v95]\033[0m %s\n' "$*"; }
+log(){ printf '\033[1;36m[HYPER-HOST v96]\033[0m %s\n' "$*"; }
 warn(){ printf '\033[1;33m[WARN]\033[0m %s\n' "$*" >&2; }
 fail(){ printf '\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
 

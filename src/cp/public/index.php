@@ -268,7 +268,7 @@ function render_auth(string $mode): void
 <title>HYPER-HOST — <?= $mode === 'register' ? 'Регистрация' : 'Вход' ?></title>
 <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" rel="stylesheet">
-<link href="/assets/cp.css?v=95" rel="stylesheet">
+<link href="/assets/cp.css?v=96" rel="stylesheet">
 </head><body class="cp-auth-body">
 <div class="cp-orb cp-orb-a"></div><div class="cp-orb cp-orb-b"></div>
 <main class="cp-auth">
@@ -335,23 +335,27 @@ function render_shell(array $user, array $quota, string $page): void
 <title>HYPER-HOST — панель клиента</title>
 <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" rel="stylesheet">
-<link href="/assets/cp.css?v=95" rel="stylesheet">
+<link href="/assets/cp.css?v=96" rel="stylesheet">
 </head><body>
 <div class="cp-shell">
 
   <aside class="cp-sidebar" id="cpSidebar">
     <div class="cp-brand"><span class="cp-brand-mark"><i class="fa-solid fa-bolt"></i></span><div><b>HYPER-HOST</b><small>CONTROL PANEL</small></div></div>
     <div class="cp-user-chip">
-      <span class="cp-avatar"><?= e(mb_strtoupper(mb_substr((string)$user['username'], 0, 1))) ?></span>
-      <div><b><?= e((string)$user['username']) ?></b>
-        <small><?= $granted ? 'аккаунт активен' : 'ожидает выдачи ресурсов' ?></small>
+      <span class="cp-avatar"><?= e(mb_strtoupper(mb_substr((string)$user['username'], 0, 1))) ?><i></i></span>
+      <div class="cp-user-meta"><b><?= e((string)$user['username']) ?></b>
+        <small><?= $granted ? 'Аккаунт активен' : 'Настройка аккаунта' ?></small>
       </div>
+      <span class="cp-user-chevron"><i class="fa-solid fa-chevron-right"></i></span>
     </div>
     <nav class="cp-nav">
+      <span class="cp-nav-caption">Управление</span>
       <?php foreach ($nav as $id => [$icon, $label]): ?>
+        <?php if ($id === 'ssl'): ?><span class="cp-nav-caption cp-nav-caption-system">Система</span><?php endif; ?>
         <a class="cp-nav-link<?= $id === $page ? ' is-active' : '' ?><?= (!$granted && $id !== 'dashboard' && $id !== 'ftp') ? ' is-locked' : '' ?>"
            href="/?page=<?= e($id) ?>">
           <span class="cp-nav-icon"><i class="fa-solid <?= e($icon) ?>"></i></span><span><?= e($label) ?></span>
+          <?php if ($id === $page): ?><span class="cp-nav-current"><i class="fa-solid fa-chevron-right"></i></span><?php endif; ?>
         </a>
       <?php endforeach; ?>
     </nav>
@@ -361,7 +365,11 @@ function render_shell(array $user, array $quota, string $page): void
   <main class="cp-main">
     <header class="cp-topbar">
       <button class="cp-burger" id="cpBurger" aria-label="Меню"><i class="fa-solid fa-bars"></i></button>
-      <div class="cp-topbar-title"><span>Панель управления</span><h1><?= e($nav[$page][1]) ?></h1></div><div class="cp-topbar-status"><i class="fa-solid fa-circle"></i> online</div>
+      <div class="cp-topbar-title"><span>HYPER-HOST <i class="fa-solid fa-chevron-right"></i> Панель</span><h1><?= e($nav[$page][1]) ?></h1></div>
+      <div class="cp-topbar-actions">
+        <div class="cp-topbar-status"><span class="cp-status-pulse"></span><div><b>Все системы работают</b><small>Сервер online</small></div></div>
+        <div class="cp-top-avatar"><?= e(mb_strtoupper(mb_substr((string)$user['username'], 0, 1))) ?></div>
+      </div>
     </header>
 
     <div class="cp-content">
@@ -385,7 +393,7 @@ function render_shell(array $user, array $quota, string $page): void
   </main>
 </div>
 <div class="cp-backdrop" id="cpBackdrop"></div>
-<script src="/assets/cp.js?v=95" defer></script>
+<script src="/assets/cp.js?v=96" defer></script>
 </body></html><?php
 }
 
@@ -398,10 +406,9 @@ function view_pending(array $user): void
 <section class="cp-pending">
   <div class="cp-pending-glow"></div>
   <div class="cp-pending-icon">⏳</div>
-  <h2>Администратор ещё не выдал ресурсы сервера</h2>
-  <p>Ваш аккаунт <b><?= e((string)$user['username']) ?></b> создан и уже ждёт настройки.
-     Как только администратор выделит место под сайты и ботов, все разделы откроются
-     автоматически — эту страницу достаточно будет обновить.</p>
+  <h2>Подготовка ресурсов сервера</h2>
+  <p>Аккаунт <b><?= e((string)$user['username']) ?></b> создан. После выдачи ресурсов
+     разделы сайтов и ботов откроются автоматически.</p>
   <div class="cp-pending-steps">
     <div><span>1</span>Аккаунт зарегистрирован</div>
     <div class="is-current"><span>2</span>Ожидание выдачи ресурсов</div>
@@ -427,63 +434,135 @@ function view_dashboard(array $user, array $quota, bool $granted): void
     foreach (($usage['units'] ?? []) as $u) $memUsed += (int)($u['memory_bytes'] ?? 0);
 
     if (!$granted) { view_pending($user); return; }
+
+    $sitePct = percent((float)count($sites), (float)$quota['max_sites']);
+    $botPct = percent((float)count($bots), (float)$quota['max_bots']);
+    $memUsedMb = $memUsed / 1048576;
+    $diskUsedMb = ((float)($usage['disk_bytes'] ?? 0)) / 1048576;
+    $memPct = percent($memUsedMb, (float)$quota['memory_mb']);
+    $diskPct = percent($diskUsedMb, (float)$quota['disk_mb']);
+    $events = cp_events((int)$user['id'], 7);
     ?>
-<div class="cp-grid-4">
-  <div class="cp-stat">
-    <span>Сайты</span>
-    <b><?= count($sites) ?><i>/ <?= (int)$quota['max_sites'] ?></i></b>
-    <div class="cp-meter"><i style="width:<?= percent((float)count($sites), (float)$quota['max_sites']) ?>%"></i></div>
+<section class="cp-dashboard-hero">
+  <div class="cp-dashboard-hero-copy">
+    <span class="cp-hero-kicker"><i class="fa-solid fa-sparkles"></i> Центр управления</span>
+    <h2>Добро пожаловать, <?= e((string)$user['username']) ?></h2>
+    <p>Сайты, боты, SSL и доступы собраны в одной панели. Основные ресурсы и состояние инфраструктуры видны сразу.</p>
+    <div class="cp-hero-actions">
+      <a href="/?page=sites" class="cp-btn cp-btn-primary cp-btn-lg"><i class="fa-solid fa-plus"></i> Создать сайт</a>
+      <a href="/?page=bots" class="cp-btn cp-btn-light cp-btn-lg"><i class="fa-solid fa-robot"></i> Развернуть бота</a>
+    </div>
   </div>
-  <div class="cp-stat">
-    <span>Боты</span>
-    <b><?= count($bots) ?><i>/ <?= (int)$quota['max_bots'] ?></i></b>
-    <div class="cp-meter"><i style="width:<?= percent((float)count($bots), (float)$quota['max_bots']) ?>%"></i></div>
+  <div class="cp-dashboard-hero-visual">
+    <div class="cp-server-orbit cp-orbit-one"></div>
+    <div class="cp-server-orbit cp-orbit-two"></div>
+    <div class="cp-server-core"><i class="fa-solid fa-server"></i><span></span></div>
+    <div class="cp-server-badge cp-server-badge-a"><i class="fa-solid fa-globe"></i><b><?= count($sites) ?></b><small>сайтов</small></div>
+    <div class="cp-server-badge cp-server-badge-b"><i class="fa-solid fa-robot"></i><b><?= $running ?></b><small>ботов online</small></div>
   </div>
-  <div class="cp-stat">
-    <span>Память ботов</span>
-    <b><?= e(human_bytes((float)$memUsed)) ?><i>/ <?= (int)$quota['memory_mb'] ?> MB</i></b>
-    <div class="cp-meter"><i style="width:<?= percent($memUsed / 1048576, (float)$quota['memory_mb']) ?>%"></i></div>
+</section>
+
+<div class="cp-grid-4 cp-dashboard-stats">
+  <div class="cp-stat cp-stat-sites">
+    <div class="cp-stat-head"><span class="cp-stat-icon"><i class="fa-solid fa-globe"></i></span><span class="cp-stat-percent"><?= (int)$sitePct ?>%</span></div>
+    <span class="cp-stat-label">Сайты</span>
+    <b><?= count($sites) ?><i>из <?= (int)$quota['max_sites'] ?></i></b>
+    <div class="cp-meter"><i style="width:<?= $sitePct ?>%"></i></div>
+    <small><?= max(0, (int)$quota['max_sites'] - count($sites)) ?> доступно</small>
   </div>
-  <div class="cp-stat">
-    <span>Диск</span>
-    <b><?= e(human_bytes((float)($usage['disk_bytes'] ?? 0))) ?><i>/ <?= (int)$quota['disk_mb'] ?> MB</i></b>
-    <div class="cp-meter"><i style="width:<?= percent(((float)($usage['disk_bytes'] ?? 0)) / 1048576, (float)$quota['disk_mb']) ?>%"></i></div>
+  <div class="cp-stat cp-stat-bots">
+    <div class="cp-stat-head"><span class="cp-stat-icon"><i class="fa-solid fa-robot"></i></span><span class="cp-stat-percent"><?= (int)$botPct ?>%</span></div>
+    <span class="cp-stat-label">Боты</span>
+    <b><?= count($bots) ?><i>из <?= (int)$quota['max_bots'] ?></i></b>
+    <div class="cp-meter"><i style="width:<?= $botPct ?>%"></i></div>
+    <small><?= $running ?> запущено сейчас</small>
+  </div>
+  <div class="cp-stat cp-stat-memory">
+    <div class="cp-stat-head"><span class="cp-stat-icon"><i class="fa-solid fa-memory"></i></span><span class="cp-stat-percent"><?= (int)$memPct ?>%</span></div>
+    <span class="cp-stat-label">Память ботов</span>
+    <b><?= e(number_format($memUsedMb, $memUsedMb >= 10 ? 0 : 1, '.', ' ')) ?> MB<i>из <?= (int)$quota['memory_mb'] ?> MB</i></b>
+    <div class="cp-meter"><i style="width:<?= $memPct ?>%"></i></div>
+    <small>Оперативная память</small>
+  </div>
+  <div class="cp-stat cp-stat-disk">
+    <div class="cp-stat-head"><span class="cp-stat-icon"><i class="fa-solid fa-hard-drive"></i></span><span class="cp-stat-percent"><?= (int)$diskPct ?>%</span></div>
+    <span class="cp-stat-label">Диск</span>
+    <b><?= e(number_format($diskUsedMb, $diskUsedMb >= 10 ? 0 : 1, '.', ' ')) ?> MB<i>из <?= (int)$quota['disk_mb'] ?> MB</i></b>
+    <div class="cp-meter"><i style="width:<?= $diskPct ?>%"></i></div>
+    <small>Файлы сайтов и ботов</small>
   </div>
 </div>
 
-<div class="cp-grid-2">
-  <section class="cp-card">
-    <h2>Выданные ресурсы</h2>
-    <div class="cp-kv">
-      <div><span>Сайтов</span><b><?= (int)$quota['max_sites'] ?></b></div>
-      <div><span>Ботов</span><b><?= (int)$quota['max_bots'] ?></b></div>
-      <div><span>Процессор</span><b><?= (int)$quota['cpu_percent'] ?>% ядра</b></div>
-      <div><span>Память</span><b><?= (int)$quota['memory_mb'] ?> MB</b></div>
-      <div><span>Диск</span><b><?= (int)$quota['disk_mb'] ?> MB</b></div>
-      <div><span>Ботов запущено</span><b><?= $running ?></b></div>
+<div class="cp-dashboard-main-grid">
+  <section class="cp-card cp-resource-panel">
+    <div class="cp-card-head cp-card-head-rich">
+      <div><span class="cp-eyebrow">РЕСУРСЫ</span><h2>Лимиты аккаунта</h2><p>Текущая конфигурация окружения</p></div>
+      <span class="cp-icon-box cp-icon-box-blue"><i class="fa-solid fa-gauge-high"></i></span>
     </div>
-    <p class="cp-muted cp-note">Процессор и память делятся поровну между ботами и
-       ограничиваются на уровне системы — превысить выданное не получится.</p>
+
+    <div class="cp-resource-list">
+      <div class="cp-resource-row">
+        <span class="cp-resource-icon is-cpu"><i class="fa-solid fa-microchip"></i></span>
+        <div class="cp-resource-info"><div><b>Процессор</b><span><?= (int)$quota['cpu_percent'] ?>% ядра</span></div><div class="cp-resource-track"><i style="width:<?= min(100, (int)$quota['cpu_percent']) ?>%"></i></div></div>
+      </div>
+      <div class="cp-resource-row">
+        <span class="cp-resource-icon is-ram"><i class="fa-solid fa-memory"></i></span>
+        <div class="cp-resource-info"><div><b>Оперативная память</b><span><?= (int)$quota['memory_mb'] ?> MB</span></div><div class="cp-resource-track"><i style="width:<?= $memPct ?>%"></i></div></div>
+      </div>
+      <div class="cp-resource-row">
+        <span class="cp-resource-icon is-disk"><i class="fa-solid fa-hard-drive"></i></span>
+        <div class="cp-resource-info"><div><b>Дисковое пространство</b><span><?= (int)$quota['disk_mb'] ?> MB</span></div><div class="cp-resource-track"><i style="width:<?= $diskPct ?>%"></i></div></div>
+      </div>
+    </div>
+
+    <div class="cp-resource-summary">
+      <div><span>Лимит сайтов</span><b><?= (int)$quota['max_sites'] ?></b></div>
+      <div><span>Лимит ботов</span><b><?= (int)$quota['max_bots'] ?></b></div>
+      <div><span>Online ботов</span><b><?= $running ?></b></div>
+    </div>
   </section>
 
-  <section class="cp-card">
-    <h2>Последние события</h2>
-    <?php $events = cp_events((int)$user['id'], 12); ?>
+  <section class="cp-card cp-events-panel">
+    <div class="cp-card-head cp-card-head-rich">
+      <div><span class="cp-eyebrow">АКТИВНОСТЬ</span><h2>Последние события</h2><p>История действий в панели</p></div>
+      <a class="cp-icon-link" href="/?page=logs" title="Открыть логи"><i class="fa-solid fa-arrow-up-right-from-square"></i></a>
+    </div>
     <?php if ($events): ?>
       <div class="cp-events">
         <?php foreach ($events as $ev): ?>
           <div class="cp-event">
-            <span class="cp-event-type cp-t-<?= e((string)$ev['type']) ?>"><?= e((string)$ev['type']) ?></span>
-            <div><b><?= e((string)$ev['message']) ?></b><small><?= e((string)$ev['created_at']) ?></small></div>
+            <span class="cp-event-icon cp-t-<?= e((string)$ev['type']) ?>">
+              <i class="fa-solid <?= match((string)$ev['type']) { 'site' => 'fa-globe', 'bot' => 'fa-robot', 'ssl' => 'fa-shield-halved', 'warn' => 'fa-triangle-exclamation', default => 'fa-fingerprint' } ?>"></i>
+            </span>
+            <div class="cp-event-copy"><b><?= e((string)$ev['message']) ?></b><small><?= e((string)$ev['created_at']) ?></small></div>
           </div>
         <?php endforeach; ?>
       </div>
     <?php else: ?>
-      <div class="cp-empty">Событий пока нет</div>
+      <div class="cp-empty"><i class="fa-regular fa-clock"></i> Событий пока нет</div>
     <?php endif; ?>
   </section>
 </div>
-<?php }
+
+<section class="cp-service-grid">
+  <a href="/?page=sites" class="cp-service-card">
+    <span class="cp-service-icon is-sites"><i class="fa-solid fa-earth-europe"></i></span>
+    <div><small>WEB</small><b>Сайты и домены</b><p>Создание сайтов и управление размещением.</p></div>
+    <i class="fa-solid fa-arrow-right cp-service-arrow"></i>
+  </a>
+  <a href="/?page=bots" class="cp-service-card">
+    <span class="cp-service-icon is-bots"><i class="fa-solid fa-code"></i></span>
+    <div><small>AUTOMATION</small><b>Telegram / Node боты</b><p>Автодеплой, управление процессами и логами.</p></div>
+    <i class="fa-solid fa-arrow-right cp-service-arrow"></i>
+  </a>
+  <a href="/?page=ftp" class="cp-service-card">
+    <span class="cp-service-icon is-ftp"><i class="fa-solid fa-folder-open"></i></span>
+    <div><small>FILES</small><b>FTP и доступ</b><p>Подключения и реквизиты для работы с файлами.</p></div>
+    <i class="fa-solid fa-arrow-right cp-service-arrow"></i>
+  </a>
+</section>
+<?php
+}
 
 
 // ============================================================ сайты
@@ -796,7 +875,7 @@ function view_ftp(array $user): void
     <div><span>Порт</span><b data-copy="21">21</b></div>
     <div><span>Логин</span><b data-copy="<?= e((string)$user['username']) ?>"><?= e((string)$user['username']) ?></b></div>
     <div><span>Пароль</span><b data-copy="<?= e((string)$user['ftp_password']) ?>"><?= e((string)$user['ftp_password']) ?></b></div>
-    <div class="cp-creds-wide"><span>Ваша папка</span><b><?= e($home) ?></b></div>
+    <div class="cp-creds-wide"><span>Корневая папка</span><b><?= e($home) ?></b></div>
   </div>
   <p class="cp-muted cp-note">Нажмите на значение, чтобы скопировать. Подходит любой FTP-клиент — например FileZilla.</p>
 </section>
