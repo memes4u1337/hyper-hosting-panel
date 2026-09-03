@@ -17,9 +17,8 @@ if [[ -f /etc/hyper-host/hyper-host.conf ]]; then
   rm -rf "$TARGET"
   mv "$TMP" "$TARGET"
   cd "$TARGET"
-  chmod +x apply-v1.2-network-ssl-repair.sh setup.sh install.sh
-  ./apply-v1.2-network-ssl-repair.sh "$TARGET"
-  exec hyper-host-installer
+  chmod +x setup.sh install.sh update.sh
+  exec bash update.sh
 else
   rm -rf "$TARGET"
   mv "$TMP" "$TARGET"

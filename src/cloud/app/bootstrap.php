@@ -5,11 +5,16 @@ declare(strict_types=1);
 ini_set('session.use_strict_mode', '1');
 ini_set('session.use_only_cookies', '1');
 session_name('HYPERCLOUDSESSID');
+// v110: жёсткий secure=true ломал вход, пока на домене ещё нет сертификата —
+// браузер просто не сохранял cookie и логин уходил в бесконечный редирект.
+$hcSecureCookie = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+    || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https')
+    || ((int)($_SERVER['SERVER_PORT'] ?? 0) === 443);
 session_set_cookie_params([
     'lifetime' => 0,
     'path' => '/',
     'domain' => '',
-    'secure' => true,
+    'secure' => $hcSecureCookie,
     'httponly' => true,
     'samesite' => 'Lax',
 ]);
@@ -23,6 +28,39 @@ if ((time() - (int)$_SESSION['hc_last_seen']) > 28800 || (time() - (int)$_SESSIO
 }
 $_SESSION['hc_last_seen'] = time();
 date_default_timezone_set('Europe/Moscow');
+
+/**
+ * HYPER CLOUD v110: раньше любое необработанное исключение (чаще всего PDO,
+ * когда /var/lib/hyper-host-cloud недоступен процессу hypercloud) отдавало
+ * пустой HTTP 500 без единой подсказки. Теперь ошибка пишется в лог, а
+ * пользователь видит понятную страницу вместо белого экрана.
+ */
+set_exception_handler(static function (Throwable $e): void {
+    error_log('HYPER CLOUD fatal: ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine());
+    if (!headers_sent()) {
+        http_response_code(500);
+        header('Content-Type: text/html; charset=utf-8');
+    }
+    $isDb = $e instanceof PDOException;
+    echo '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
+       . '<meta name="viewport" content="width=device-width,initial-scale=1">'
+       . '<title>HYPER CLOUD — временная ошибка</title><style>'
+       . 'body{margin:0;min-height:100vh;display:grid;place-items:center;background:#060912;color:#eaf0ff;'
+       . 'font:15px/1.6 system-ui,Segoe UI,Roboto,sans-serif;padding:24px}'
+       . '.b{max-width:560px;background:#0d1322;border:1px solid rgba(150,170,220,.18);border-radius:18px;padding:32px}'
+       . 'h1{font-size:20px;margin:0 0 12px}p{color:#8b98bd;margin:0 0 10px}'
+       . 'code{background:rgba(0,0,0,.4);padding:2px 7px;border-radius:6px;color:#2ee6ff}'
+       . '</style></head><body><div class="b">'
+       . '<h1>Облако временно недоступно</h1>'
+       . '<p>' . ($isDb
+            ? 'Не удалось открыть базу данных облака. Обычно это права на каталоге хранилища.'
+            : 'Внутренняя ошибка приложения. Подробности записаны в лог.') . '</p>'
+       . '<p>Администратору: <code>sudo bash doctor.sh --fix</code></p>'
+       . '<p>Лог: <code>/var/log/hyper-cloud/php-error.log</code></p>'
+       . '</div></body></html>';
+    exit;
+});
+
 
 $hcConfig = [
     'storage_root' => '/var/www/hyper-host-cloud',

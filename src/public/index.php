@@ -495,6 +495,30 @@ function handle_post(string $action): void
             case 'delete_cron': { $id=(int)($_POST['id']??0); $st=db()->prepare('SELECT * FROM cron_tasks WHERE id=?'); $st->execute([$id]); $c=$st->fetch(); if($c){ run_ctl(['cron-delete',$c['name']],60); db()->prepare('DELETE FROM cron_tasks WHERE id=?')->execute([$id]); } redirect('/?page=cron'); }
             case 'save_security': { setting_set('security_ip_allowlist', trim((string)($_POST['ip_allowlist']??''))); $enabled=!empty($_POST['enable_2fa'])?'1':'0'; if($enabled==='1' && setting_get('security_2fa_secret','')==='') setting_set('security_2fa_secret',base32_random()); setting_set('security_2fa_enabled',$enabled); flash('Безопасность сохранена','success'); redirect('/?page=security'); }
             case 'reset_2fa_secret': { setting_set('security_2fa_secret',base32_random()); flash('2FA secret обновлён','success'); redirect('/?page=security'); }
+            case 'cp_grant': {
+                $uid=(int)($_POST['user_id']??0);
+                $sites=max(0,min(200,(int)($_POST['max_sites']??0)));
+                $bots=max(0,min(200,(int)($_POST['max_bots']??0)));
+                $cpu=max(0,min(400,(int)($_POST['cpu_percent']??0)));
+                $mem=max(0,min(65536,(int)($_POST['memory_mb']??0)));
+                $disk=max(0,min(4194304,(int)($_POST['disk_mb']??0)));
+                cp_admin_grant($uid,$sites,$bots,$cpu,$mem,$disk);
+                flash('Ресурсы выданы. У клиента разделы откроются сразу.','success');
+                redirect('/?page=clients');
+            }
+            case 'cp_status': {
+                $uid=(int)($_POST['user_id']??0);
+                $status=(string)($_POST['status']??'');
+                cp_admin_status($uid,$status);
+                flash($status==='suspended'?'Клиент заблокирован, его боты остановлены':'Клиент разблокирован','success');
+                redirect('/?page=clients');
+            }
+            case 'cp_delete': {
+                $uid=(int)($_POST['user_id']??0);
+                cp_admin_delete($uid);
+                flash('Клиент удалён вместе с сайтами, ботами и файлами','success');
+                redirect('/?page=clients');
+            }
             case 'repair_panel':
                 hh_clear_cache(); { $res=run_ctl(['repair'],240); if($res['code']!==0) throw new RuntimeException($res['output']); flash('Ремонт выполнен: права, ACL, FTP, сервисы проверены','success'); redirect('/?page=settings'); }
             case 'sync_resources':
@@ -623,13 +647,13 @@ function fm_delete(): void
 function rrmdir(string $path): void { if(is_dir($path)&&!is_link($path)){ foreach(scandir($path)?:[] as $i){ if($i==='.'||$i==='..') continue; rrmdir($path.'/'.$i);} if(!@rmdir($path)){ run_ctl(['repair'],180); @rmdir($path); } } else { if(!@unlink($path)){ run_ctl(['repair'],180); @unlink($path); } } }
 
 
-function hh_app_version(): string { return '1.9-v93'; }
+function hh_app_version(): string { return '1.10-v94'; }
 
 function hh_nav_config(): array
 {
     return [
         'main'    => ['label'=>'Сервер','icon'=>'fa-gauge-high','accent'=>'#4f7dff','items'=>['dashboard'=>['fa-chart-line','Дашборд'],'files'=>['fa-folder-open','Файлы'],'disk'=>['fa-hard-drive','Диск'],'settings'=>['fa-sliders','Настройки']]],
-        'hosting' => ['label'=>'Хостинг','icon'=>'fa-server','accent'=>'#22d3ee','items'=>['sites'=>['fa-globe','Сайты'],'ftp'=>['fa-network-wired','FTP'],'databases'=>['fa-database','Базы'],'php'=>['fa-code','PHP']]],
+        'hosting' => ['label'=>'Хостинг','icon'=>'fa-server','accent'=>'#22d3ee','items'=>['sites'=>['fa-globe','Сайты'],'ftp'=>['fa-network-wired','FTP'],'databases'=>['fa-database','Базы'],'php'=>['fa-code','PHP'],'clients'=>['fa-users','Клиенты']]],
         'auto'    => ['label'=>'Боты','icon'=>'fa-robot','accent'=>'#a855f7','items'=>['bots'=>['fa-robot','PM2 боты'],'deploy_center'=>['fa-diagram-project','Deploy Manager'],'backups'=>['fa-box-archive','Backup'],'cron'=>['fa-clock','Cron'],'logs'=>['fa-file-lines','Логи']]],
         'secure'  => ['label'=>'Доступ','icon'=>'fa-shield-halved','accent'=>'#f472b6','items'=>['access'=>['fa-plug-circle-bolt','Внешний доступ'],'dns'=>['fa-diagram-project','DNS'],'network'=>['fa-tower-broadcast','Сеть'],'ssl'=>['fa-shield-halved','SSL'],'security'=>['fa-lock','Безопасность']]],
     ];
@@ -650,7 +674,7 @@ function nav_item(string $id,string $icon,string $label,string $page): string
 function render_login(): void
 {
     $flash=flash(); $need2fa=setting_get('security_2fa_enabled','0')==='1'; ?>
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=93" rel="stylesheet"></head><body class="login-body">
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYPER-HOST</title><link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet"><link href="/assets/style.css?v=94" rel="stylesheet"></head><body class="login-body">
 <div class="login-orb login-orb-a"></div><div class="login-orb login-orb-b"></div><div class="login-orb login-orb-c"></div>
 <main class="login-clean">
   <section class="login-card card-glass login-clean-card">
@@ -671,14 +695,14 @@ function render_login(): void
 
 function render_page(string $page, array $user): void
 {
-    $titles=['dashboard'=>'Панель управления','files'=>'Файловый менеджер','sites'=>'Сайты и папки','ftp'=>'FTP','databases'=>'Базы данных','bots'=>'Боты PM2 24/7','deploy_center'=>'MyStock Deploy Manager','bot_logs'=>'Логи бота','deploy_logs'=>'Логи проекта','backups'=>'Backup','dns'=>'DNS','network'=>'Сеть и доступ','ssl'=>'SSL','php'=>'PHP-версии','cron'=>'Cron','logs'=>'Логи сайтов','security'=>'Безопасность','settings'=>'Настройки','access'=>'Внешний доступ','disk'=>'Диск и LVM']; $title=$titles[$page]??'Дашборд'; $flash=flash();
+    $titles=['dashboard'=>'Панель управления','files'=>'Файловый менеджер','sites'=>'Сайты и папки','ftp'=>'FTP','databases'=>'Базы данных','bots'=>'Боты PM2 24/7','deploy_center'=>'MyStock Deploy Manager','bot_logs'=>'Логи бота','deploy_logs'=>'Логи проекта','backups'=>'Backup','dns'=>'DNS','network'=>'Сеть и доступ','ssl'=>'SSL','php'=>'PHP-версии','cron'=>'Cron','logs'=>'Логи сайтов','security'=>'Безопасность','settings'=>'Настройки','access'=>'Внешний доступ','disk'=>'Диск и LVM','clients'=>'Клиенты портала']; $title=$titles[$page]??'Дашборд'; $flash=flash();
     $nav=hh_nav_config(); $activeCat=hh_active_category($page);
     ?>
 <!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?= e($title) ?> — HYPER-HOST</title>
 <link rel="preconnect" href="https://cdn.jsdelivr.net"><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
-<link href="/assets/style.css?v=93" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
+<link href="/assets/style.css?v=94" rel="stylesheet"></head><body class="hh-v17"><div class="app-shell" id="appShell">
 <div class="mobile-nav-backdrop" id="mobileNavBackdrop"></div>
 <aside class="sidebar sidebar-v3" id="mainSidebar">
   <div class="sidebar-brand-v3">
@@ -736,9 +760,9 @@ function render_page(string $page, array $user): void
   <section class="page-stage-v3"><?php route_view($page); ?></section>
 </main></div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script>
-<script src="/assets/app.js?v=93" defer></script></body></html><?php
+<script src="/assets/app.js?v=94" defer></script></body></html><?php
 }
-function route_view(string $page): void { match($page){ 'files'=>view_files(), 'sites'=>view_sites(), 'ftp'=>view_ftp(), 'databases'=>view_databases(), 'pma_login'=>view_pma_login(), 'bots'=>view_bots(), 'deploy_center'=>view_deploy_center(), 'bot_logs'=>view_bot_logs(), 'deploy_logs'=>view_deploy_logs(), 'backups'=>view_backups(), 'dns'=>view_dns(), 'network'=>view_network(), 'ssl'=>view_ssl(), 'php'=>view_php(), 'cron'=>view_cron(), 'logs'=>view_logs(), 'security'=>view_security(), 'settings'=>view_settings(), 'access'=>view_access(), 'disk'=>view_disk(), default=>view_dashboard(), }; }
+function route_view(string $page): void { match($page){ 'files'=>view_files(), 'sites'=>view_sites(), 'ftp'=>view_ftp(), 'databases'=>view_databases(), 'pma_login'=>view_pma_login(), 'bots'=>view_bots(), 'deploy_center'=>view_deploy_center(), 'bot_logs'=>view_bot_logs(), 'deploy_logs'=>view_deploy_logs(), 'backups'=>view_backups(), 'dns'=>view_dns(), 'network'=>view_network(), 'ssl'=>view_ssl(), 'php'=>view_php(), 'cron'=>view_cron(), 'logs'=>view_logs(), 'security'=>view_security(), 'settings'=>view_settings(), 'access'=>view_access(), 'disk'=>view_disk(), 'clients'=>view_clients(), default=>view_dashboard(), }; }
 function stat_card(string $icon,string $label,string $value,string $sub=''): void { ?><div class="stat-card"><div class="stat-icon"><i class="fa-solid <?= e($icon) ?>"></i></div><div><span><?= e($label) ?></span><b><?= e($value) ?></b><?php if($sub): ?><em><?= e($sub) ?></em><?php endif; ?></div></div><?php }
 function progress_block(string $label,float $used,float $total): string { $p=percent($used,$total); return '<div class="usage"><div class="d-flex justify-content-between"><span>'.e($label).'</span><b>'.e(human_bytes($used).' / '.human_bytes($total)).'</b></div><div class="progress"><div class="progress-bar" style="width:'.$p.'%"></div></div></div>'; }
 
@@ -1879,11 +1903,93 @@ function view_security(): void { $secret=setting_get('security_2fa_secret',''); 
 
 
 function view_access(): void
-{ $j=run_ctl_json_cached(['access-doctor-json'],3,90); $pub=(string)($j['public_ip']??''); $server=(string)($j['server_ip']??host_name()); $ports=$j['listen_ports']??[]; ?>
-<div class="row g-4 access-page-v40">
-  <div class="col-xxl-4"><div class="panel-card"><h2><i class="fa-solid fa-plug-circle-bolt me-2"></i>Внешний доступ</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="access_fix"><button class="btn btn-primary btn-lg"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Открыть порты</button></form><div class="dns-mini-note mt-3"><b>Сервер</b><span><?= e($server) ?> · <?= e($pub) ?></span></div></div></div>
-  <div class="col-xxl-8"><div class="panel-card"><h2><i class="fa-solid fa-router me-2"></i>Порты</h2><div class="network-check-grid mb-3"><div class="network-check"><span>Сервер</span><b><?= e($server) ?></b></div><div class="network-check"><span>Публичный IP</span><b><?= e($pub) ?></b></div><div class="network-check"><span>UFW</span><b><?= e((string)($j['ufw_status']??'')) ?></b></div></div><div class="table-responsive"><table class="table table-dark-soft"><thead><tr><th>Сервис</th><th>Проброс на роутере</th></tr></thead><tbody><?php foreach(($j['router_forwarding_needed']??[]) as $r): ?><tr><td><?= e((string)$r['service']) ?></td><td><code><?= e((string)$r['rule']) ?></code></td></tr><?php endforeach; ?></tbody></table></div><h2 class="mt-4">Ubuntu</h2><div class="service-row"><?php foreach($ports as $k=>$ok): ?><span class="badge rounded-pill text-bg-<?= $ok?'success':'danger' ?>"><?= e((string)$k) ?>: <?= $ok?'open':'closed' ?></span><?php endforeach; ?></div></div></div>
-</div><?php }
+{
+    $j=run_ctl_json_cached(['access-doctor-json'],3,90);
+    $pub=(string)($j['public_ip']??'');
+    $server=(string)($j['server_ip']??host_name());
+    $ports=$j['listen_ports']??[];
+    $forwarding=$j['router_forwarding_needed']??[];
+    $ufw=(string)($j['ufw_status']??'unknown');
+    $openCount=0; $totalPorts=0;
+    foreach($ports as $ok){ $totalPorts++; if($ok) $openCount++; }
+    ?>
+<div class="access-page-v94">
+
+  <section class="access-hero-v94">
+    <div>
+      <div class="eyebrow"><i class="fa-solid fa-plug-circle-bolt"></i> Внешний доступ</div>
+      <h2>Доступ снаружи</h2>
+      <p>Панель открывает нужные порты на самом Ubuntu (UFW + nginx + FTP). Проброс на роутере
+         остаётся ручным шагом — правила для него перечислены ниже.</p>
+    </div>
+    <div class="access-actions-v94">
+      <form method="post" data-async-submit>
+        <?= csrf_field() ?><input type="hidden" name="action" value="access_fix">
+        <button class="btn btn-primary btn-lg" data-loading-text="Открываю порты...">
+          <i class="fa-solid fa-wand-magic-sparkles me-2"></i>Открыть порты на сервере
+        </button>
+      </form>
+    </div>
+  </section>
+
+  <div class="access-grid-v94">
+
+    <section class="panel-card">
+      <h2 class="mb-3"><i class="fa-solid fa-server me-2"></i>Состояние сервера</h2>
+      <div class="access-stat-grid-v94">
+        <div class="access-stat-v94"><span>Локальный IP</span><b><?= e($server ?: '—') ?></b></div>
+        <div class="access-stat-v94"><span>Публичный IP</span><b><?= e($pub ?: 'не задан') ?></b></div>
+        <div class="access-stat-v94"><span>UFW</span><b class="<?= $ufw==='active'?'hh-ok':'hh-warn' ?>"><?= e($ufw) ?></b></div>
+        <div class="access-stat-v94"><span>Порты открыты</span><b><?= (int)$openCount ?> / <?= (int)$totalPorts ?></b></div>
+      </div>
+
+      <h2 class="mt-4 mb-3"><i class="fa-solid fa-shield-halved me-2"></i>Порты Ubuntu</h2>
+      <?php if($ports): ?>
+        <div class="access-ports-v94">
+          <?php foreach($ports as $name=>$ok): ?>
+            <span class="access-port-v94 <?= $ok?'is-open':'is-closed' ?>">
+              <i class="fa-solid fa-circle"></i><?= e((string)$name) ?> · <?= $ok?'открыт':'закрыт' ?>
+            </span>
+          <?php endforeach; ?>
+        </div>
+      <?php else: ?>
+        <div class="access-empty-v94">Данные о портах пока не получены</div>
+      <?php endif; ?>
+
+      <?php if($openCount < $totalPorts): ?>
+        <div class="access-note-v94">
+          <i class="fa-solid fa-triangle-exclamation me-2"></i>
+          Часть портов закрыта. Нажми «Открыть порты на сервере» — панель починит UFW и правила nginx/FTP.
+        </div>
+      <?php endif; ?>
+    </section>
+
+    <section class="panel-card">
+      <h2 class="mb-3"><i class="fa-solid fa-router me-2"></i>Проброс на роутере</h2>
+      <p class="muted mb-3">Эти правила нужно один раз добавить в роутере вручную — сервер сделать это за тебя не может.</p>
+      <?php if($forwarding): ?>
+        <div class="access-fwd-v94">
+          <?php foreach($forwarding as $r): ?>
+            <div class="access-fwd-row-v94">
+              <b><?= e((string)($r['service']??'')) ?></b>
+              <code data-copy="<?= e((string)($r['rule']??'')) ?>" title="Нажми, чтобы скопировать"><?= e((string)($r['rule']??'')) ?></code>
+            </div>
+          <?php endforeach; ?>
+        </div>
+      <?php else: ?>
+        <div class="access-empty-v94">Дополнительный проброс не требуется</div>
+      <?php endif; ?>
+
+      <div class="access-note-v94">
+        <i class="fa-solid fa-circle-info me-2"></i>
+        Если сайт открывается внутри сети, но не снаружи — почти всегда дело именно в этих правилах
+        роутера или в том, что провайдер выдаёт серый IP.
+      </div>
+    </section>
+
+  </div>
+</div>
+<?php }
 
 function view_disk(): void
 { $j=run_ctl_json_cached(['disk-doctor-json'],3,90); ?>
@@ -1892,3 +1998,265 @@ function view_disk(): void
 function view_settings(): void { $dbStatus=db_writable_status(); ?>
 <div class="row g-4"><div class="col-lg-6"><div class="panel-card"><h2>Ремонт панели</h2><form method="post" class="d-inline"><?= csrf_field() ?><input type="hidden" name="action" value="repair_panel"><button class="btn btn-primary">Починить права и сервисы</button></form><form method="post" class="d-inline ms-2"><?= csrf_field() ?><input type="hidden" name="action" value="sync_resources"><button class="btn btn-soft">Синхронизировать</button></form><hr><form method="post" class="row g-2"><?= csrf_field() ?><input type="hidden" name="action" value="save_public_ip"><div class="col-8"><input class="form-control" name="public_ip" value="<?= e(setting_get('public_ip_override', (string)app_config('public_ip',''))) ?>" placeholder="Публичный IP"></div><div class="col-4"><button class="btn btn-soft w-100">Сохранить IP</button></div></form></div></div><div class="col-lg-6"><div class="panel-card"><h2>Сменить пароль</h2><form method="post" class="vstack gap-3"><?= csrf_field() ?><input type="hidden" name="action" value="change_password"><input class="form-control" type="password" name="current_password" placeholder="Текущий пароль" required><input class="form-control" type="password" name="new_password" placeholder="Новый пароль" minlength="10" required><button class="btn btn-primary">Сменить пароль</button></form></div></div><div class="col-12"><div class="panel-card"><h2>Системные пути</h2><div class="hardware-grid"><div><span>SQLite</span><b><?= e($dbStatus['file_writable']?'writable':'not writable') ?></b></div><div><span>Панель</span><b><?= e((string)app_config('panel_dir')) ?></b></div><div><span>Сайты</span><b><?= e((string)app_config('sites_dir')) ?></b></div><div><span>FTP</span><b><?= e((string)app_config('ftp_dir','/var/www/hyper-host-ftp')) ?></b></div><div><span>Боты</span><b><?= e((string)app_config('bots_dir')) ?></b></div></div></div></div></div><?php }
 
+
+/* ============================================================================
+   HYPER-HOST v94 — управление клиентами портала cp.hyper-host.pw
+   powered by memes4u1337
+
+   Панель работает с базой портала напрямую (общая группа hypercp), а всё
+   привилегированное — создание/удаление аккаунтов, остановка ботов, перевыдача
+   лимитов CPU/RAM — делает через тот же root-мост, что и сам портал.
+   ========================================================================== */
+
+function cp_admin_db(): PDO
+{
+    static $pdo = null;
+    if ($pdo instanceof PDO) return $pdo;
+    $path = '/var/lib/hyper-host-cp/cp.sqlite';
+    if (!is_file($path)) throw new RuntimeException('Клиентский портал не установлен. Запусти: sudo bash install-cp.sh');
+    $pdo = new PDO('sqlite:' . $path);
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+    $pdo->exec('PRAGMA busy_timeout=10000');
+    return $pdo;
+}
+
+function cp_admin_bridge(array $payload, int $timeout = 180): array
+{
+    $bin = '/usr/local/sbin/hyper-cp-bridge';
+    if (!is_executable($bin)) return ['ok' => false, 'error' => 'Мост портала не установлен'];
+    $spec = [0 => ['pipe','r'], 1 => ['pipe','w'], 2 => ['pipe','w']];
+    $proc = @proc_open(['/usr/bin/sudo','-n',$bin], $spec, $pipes, null, ['PATH' => '/usr/sbin:/usr/bin:/sbin:/bin']);
+    if (!is_resource($proc)) return ['ok' => false, 'error' => 'Не удалось запустить мост портала'];
+    fwrite($pipes[0], json_encode($payload, JSON_UNESCAPED_UNICODE));
+    fclose($pipes[0]);
+    $out = ''; $start = time();
+    stream_set_blocking($pipes[1], false);
+    stream_set_blocking($pipes[2], false);
+    while (true) {
+        $out .= (string)stream_get_contents($pipes[1]);
+        stream_get_contents($pipes[2]);
+        $st = proc_get_status($proc);
+        if (!$st['running']) break;
+        if (time() - $start > $timeout) { proc_terminate($proc, 9); break; }
+        usleep(80000);
+    }
+    $out .= (string)stream_get_contents($pipes[1]);
+    fclose($pipes[1]); fclose($pipes[2]); proc_close($proc);
+    $data = json_decode(trim($out), true);
+    return is_array($data) ? $data : ['ok' => false, 'error' => 'Некорректный ответ моста'];
+}
+
+function cp_admin_user(int $id): array
+{
+    $st = cp_admin_db()->prepare('SELECT * FROM cp_users WHERE id=?');
+    $st->execute([$id]);
+    $u = $st->fetch();
+    if (!is_array($u)) throw new RuntimeException('Клиент не найден');
+    return $u;
+}
+
+function cp_admin_grant(int $uid, int $sites, int $bots, int $cpu, int $mem, int $disk): void
+{
+    $u = cp_admin_user($uid);
+    $db = cp_admin_db();
+    $db->prepare("INSERT INTO cp_quotas(user_id,max_sites,max_bots,cpu_percent,memory_mb,disk_mb,updated_at)
+                  VALUES(?,?,?,?,?,?,datetime('now','localtime'))
+                  ON CONFLICT(user_id) DO UPDATE SET max_sites=excluded.max_sites,max_bots=excluded.max_bots,
+                  cpu_percent=excluded.cpu_percent,memory_mb=excluded.memory_mb,disk_mb=excluded.disk_mb,
+                  updated_at=excluded.updated_at")
+       ->execute([$uid, $sites, $bots, $cpu, $mem, $disk]);
+
+    if ((string)$u['status'] === 'pending' && ($sites + $bots) > 0) {
+        $db->prepare("UPDATE cp_users SET status='active' WHERE id=?")->execute([$uid]);
+    }
+
+    // Лимиты — не цифра в интерфейсе: юниты ботов переписываются и перезапускаются,
+    // чтобы CPUQuota/MemoryMax реально соответствовали выданному.
+    $slots = max(1, $bots);
+    $st = $db->prepare('SELECT name, runtime FROM cp_bots WHERE user_id=?');
+    $st->execute([$uid]);
+    $list = [];
+    foreach ($st->fetchAll() as $b) {
+        $list[] = ['name' => (string)$b['name'], 'runtime' => (string)$b['runtime'],
+                   'cpu_percent' => intdiv($cpu, $slots), 'memory_mb' => intdiv($mem, $slots)];
+    }
+    if ($list) {
+        cp_admin_bridge(['action' => 'bot-limits', 'user' => (string)$u['username'], 'bots' => $list], 180);
+        $db->prepare('UPDATE cp_bots SET cpu_percent=?, memory_mb=? WHERE user_id=?')
+           ->execute([intdiv($cpu, $slots), intdiv($mem, $slots), $uid]);
+    }
+
+    $db->prepare("INSERT INTO cp_events(user_id,type,message,created_at) VALUES(?,'admin',?,datetime('now','localtime'))")
+       ->execute([$uid, "Администратор выдал ресурсы: сайтов $sites, ботов $bots, CPU $cpu%, RAM $mem MB, диск $disk MB"]);
+    add_event('clients', 'Выданы ресурсы клиенту ' . $u['username']);
+}
+
+function cp_admin_status(int $uid, string $status): void
+{
+    if (!in_array($status, ['active','suspended'], true)) throw new RuntimeException('Некорректный статус');
+    $u = cp_admin_user($uid);
+    $r = cp_admin_bridge(['action' => 'user-set-status', 'user' => (string)$u['username'], 'status' => $status], 120);
+    if (empty($r['ok'])) throw new RuntimeException((string)($r['error'] ?? 'Не удалось изменить статус'));
+    cp_admin_db()->prepare('UPDATE cp_users SET status=? WHERE id=?')->execute([$status, $uid]);
+    add_event('clients', 'Клиент ' . $u['username'] . ': ' . $status);
+}
+
+function cp_admin_delete(int $uid): void
+{
+    $u = cp_admin_user($uid);
+    $r = cp_admin_bridge(['action' => 'user-delete', 'user' => (string)$u['username']], 300);
+    if (empty($r['ok'])) throw new RuntimeException((string)($r['error'] ?? 'Не удалось удалить клиента'));
+    $db = cp_admin_db();
+    foreach (['cp_sites','cp_bots','cp_events','cp_quotas'] as $t) {
+        $db->prepare("DELETE FROM {$t} WHERE user_id=?")->execute([$uid]);
+    }
+    $db->prepare('DELETE FROM cp_users WHERE id=?')->execute([$uid]);
+    add_event('clients', 'Удалён клиент ' . $u['username']);
+}
+
+function view_clients(): void
+{
+    try {
+        $db = cp_admin_db();
+    } catch (Throwable $e) {
+        ?>
+<div class="panel-card">
+  <h2><i class="fa-solid fa-users me-2"></i>Клиенты портала</h2>
+  <div class="alert alert-warning mb-0"><?= e($e->getMessage()) ?></div>
+</div>
+<?php   return;
+    }
+
+    $users = $db->query('SELECT * FROM cp_users ORDER BY (status="pending") DESC, id DESC')->fetchAll();
+    $quotas = [];
+    foreach ($db->query('SELECT * FROM cp_quotas')->fetchAll() as $q) $quotas[(int)$q['user_id']] = $q;
+    $siteCount = [];
+    foreach ($db->query('SELECT user_id, COUNT(*) c FROM cp_sites GROUP BY user_id')->fetchAll() as $r) $siteCount[(int)$r['user_id']] = (int)$r['c'];
+    $botCount = [];
+    foreach ($db->query('SELECT user_id, COUNT(*) c FROM cp_bots GROUP BY user_id')->fetchAll() as $r) $botCount[(int)$r['user_id']] = (int)$r['c'];
+
+    $pending = 0;
+    foreach ($users as $u) if ((string)$u['status'] === 'pending') $pending++;
+    $modals = [];
+    ?>
+<section class="clients-hero-v94">
+  <div>
+    <div class="eyebrow"><i class="fa-solid fa-users"></i> cp.hyper-host.pw</div>
+    <h2>Клиенты портала</h2>
+    <p>Пока клиенту не выданы ресурсы, он видит только заглушку «администратор ещё не выдал права».
+       Выданные проценты CPU и мегабайты памяти применяются к systemd-юнитам его ботов по-настоящему.</p>
+  </div>
+  <div class="clients-stat-v94">
+    <div><span>Всего</span><b><?= count($users) ?></b></div>
+    <div><span>Ждут выдачи</span><b class="<?= $pending ? 'hh-warn' : '' ?>"><?= $pending ?></b></div>
+  </div>
+</section>
+
+<div class="panel-card">
+  <div class="table-responsive">
+    <table class="table table-dark-soft align-middle mb-0">
+      <thead><tr><th>Клиент</th><th>Статус</th><th>Использует</th><th>Выдано</th><th class="text-end">Действия</th></tr></thead>
+      <tbody>
+      <?php foreach ($users as $u):
+          $uid = (int)$u['id'];
+          $q = $quotas[$uid] ?? ['max_sites'=>0,'max_bots'=>0,'cpu_percent'=>0,'memory_mb'=>0,'disk_mb'=>0];
+          $granted = ((int)$q['max_sites'] + (int)$q['max_bots']) > 0;
+          $status = (string)$u['status'];
+          $badge = $status === 'active' ? 'success' : ($status === 'suspended' ? 'danger' : 'warning');
+          $label = $status === 'active' ? 'активен' : ($status === 'suspended' ? 'заблокирован' : 'ждёт выдачи');
+          ob_start(); ?>
+        <div class="modal fade hh-modal" id="cpGrant<?= $uid ?>" tabindex="-1" aria-hidden="true">
+          <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+              <form method="post">
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="cp_grant">
+                <input type="hidden" name="user_id" value="<?= $uid ?>">
+                <div class="modal-header">
+                  <div>
+                    <div class="eyebrow mb-1"><i class="fa-solid fa-sliders"></i> Ресурсы</div>
+                    <h5 class="modal-title mb-0"><?= e((string)$u['username']) ?></h5>
+                  </div>
+                  <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                  <div class="cp-grant-grid-v94">
+                    <label class="hh-field"><span>Сайтов</span>
+                      <input class="form-control" type="number" name="max_sites" min="0" max="200" value="<?= (int)$q['max_sites'] ?>"></label>
+                    <label class="hh-field"><span>Ботов</span>
+                      <input class="form-control" type="number" name="max_bots" min="0" max="200" value="<?= (int)$q['max_bots'] ?>"></label>
+                    <label class="hh-field"><span>CPU, % ядра</span>
+                      <input class="form-control" type="number" name="cpu_percent" min="0" max="400" step="5" value="<?= (int)$q['cpu_percent'] ?>"></label>
+                    <label class="hh-field"><span>RAM, MB</span>
+                      <input class="form-control" type="number" name="memory_mb" min="0" max="65536" step="64" value="<?= (int)$q['memory_mb'] ?>"></label>
+                    <label class="hh-field"><span>Диск, MB</span>
+                      <input class="form-control" type="number" name="disk_mb" min="0" max="4194304" step="512" value="<?= (int)$q['disk_mb'] ?>"></label>
+                  </div>
+                  <div class="cp-grant-note-v94">
+                    <i class="fa-solid fa-circle-info me-2"></i>
+                    CPU и RAM делятся поровну между ботами клиента и прописываются в
+                    <code>CPUQuota=</code> и <code>MemoryMax=</code> его systemd-юнитов.
+                    Работающие боты перезапустятся, чтобы новые лимиты вступили в силу.
+                  </div>
+                </div>
+                <div class="modal-footer">
+                  <button type="button" class="btn btn-soft" data-bs-dismiss="modal">Отмена</button>
+                  <button class="btn btn-primary">Выдать</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      <?php $modals[] = ob_get_clean(); ?>
+        <tr>
+          <td>
+            <b><?= e((string)$u['username']) ?></b>
+            <div class="small muted"><?= e((string)($u['email'] ?: '—')) ?></div>
+            <div class="small muted">с <?= e(substr((string)$u['created_at'], 0, 10)) ?></div>
+          </td>
+          <td><span class="badge rounded-pill text-bg-<?= $badge ?>"><?= e($label) ?></span></td>
+          <td>
+            <div class="small">сайтов: <b><?= (int)($siteCount[$uid] ?? 0) ?></b> из <?= (int)$q['max_sites'] ?></div>
+            <div class="small">ботов: <b><?= (int)($botCount[$uid] ?? 0) ?></b> из <?= (int)$q['max_bots'] ?></div>
+          </td>
+          <td>
+            <?php if ($granted): ?>
+              <div class="small">CPU <b><?= (int)$q['cpu_percent'] ?>%</b> · RAM <b><?= (int)$q['memory_mb'] ?> MB</b></div>
+              <div class="small muted">диск <?= (int)$q['disk_mb'] ?> MB</div>
+            <?php else: ?>
+              <span class="badge rounded-pill text-bg-secondary">ничего не выдано</span>
+            <?php endif; ?>
+          </td>
+          <td class="text-end">
+            <div class="d-inline-flex gap-2 flex-wrap justify-content-end">
+              <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#cpGrant<?= $uid ?>">
+                <i class="fa-solid fa-sliders me-1"></i>Ресурсы
+              </button>
+              <form method="post">
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="cp_status">
+                <input type="hidden" name="user_id" value="<?= $uid ?>">
+                <input type="hidden" name="status" value="<?= $status === 'suspended' ? 'active' : 'suspended' ?>">
+                <button class="btn btn-sm btn-outline-<?= $status === 'suspended' ? 'success' : 'warning' ?>">
+                  <?= $status === 'suspended' ? 'Разблокировать' : 'Заблокировать' ?>
+                </button>
+              </form>
+              <form method="post" onsubmit="return confirm('Удалить клиента <?= e((string)$u['username']) ?> вместе со всеми сайтами, ботами и файлами? Отменить нельзя.')">
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="cp_delete">
+                <input type="hidden" name="user_id" value="<?= $uid ?>">
+                <button class="btn btn-sm btn-outline-danger"><i class="fa-solid fa-trash"></i></button>
+              </form>
+            </div>
+          </td>
+        </tr>
+      <?php endforeach; if (!$users): ?>
+        <tr><td colspan="5" class="empty">Клиентов пока нет. Регистрация — на cp.hyper-host.pw</td></tr>
+      <?php endif; ?>
+      </tbody>
+    </table>
+  </div>
+</div>
+<?= implode("\n", $modals) ?>
+<?php }

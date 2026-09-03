@@ -619,22 +619,7 @@ input[type="file"]::file-selector-button{
 .logs{background:var(--bg-2);border:1px solid var(--line);border-radius:var(--r-sm);padding:16px;font-family:var(--mono);font-size:12px;line-height:1.6;color:#b9c6e6;max-height:520px;overflow:auto;white-space:pre-wrap;word-break:break-word}
 
 /* ==================== MODALS (модульные окна) ==================== */
-.modal{position:fixed;inset:0;z-index:1055}
-.modal-dialog{margin:clamp(18px,5vh,54px) auto;max-width:560px;pointer-events:none;padding:0 12px}
-.modal-dialog.modal-lg{max-width:680px}
-
-.modal.show .modal-dialog{animation:modalIn .34s var(--ease)}
-@keyframes modalIn{from{opacity:0;transform:translateY(18px) scale(.97)}to{opacity:1;transform:none}}
-.modal-content,.hh-modal .modal-content{
-  pointer-events:auto;background:linear-gradient(180deg,var(--surface-2),var(--surface));
-  border:1px solid var(--line-strong);border-radius:var(--r-lg);position:relative;
-  box-shadow:var(--sh-3),0 0 0 1px rgba(255,255,255,.02) inset;overflow:hidden;
-}
-.modal-content::before{content:"";position:absolute;inset:0 0 auto 0;height:2px;background:var(--grad-brand)}
-.modal-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px 22px;border-bottom:1px solid var(--line-2)}
-.modal-title{font-family:var(--display);font-size:17px;font-weight:600;margin:0}
-.modal-body{padding:22px;max-height:min(68vh,680px);overflow:auto}
-.modal-footer{padding:16px 22px;border-top:1px solid var(--line-2);display:flex;justify-content:flex-end;gap:10px}
+/* Модальные окна перенесены в UI FIX PACK v94 в конце файла. */
 .btn-close{width:34px;height:34px;border-radius:10px;border:1px solid var(--line);background:rgba(255,255,255,.04) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' fill='none' stroke='%238b98bd' stroke-width='2' viewBox='0 0 24 24'%3E%3Cpath d='M6 6l12 12M18 6L6 18'/%3E%3C/svg%3E") center/14px no-repeat;cursor:pointer;opacity:1;transition:.2s;flex:0 0 auto}
 .btn-close:hover{background-color:rgba(255,255,255,.1)}
 .modal-backdrop{background:rgba(4,7,15,.72);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
@@ -722,11 +707,6 @@ hr{border-color:var(--line);opacity:1}
   .dash-action-v33{width:auto}
   .dash-counts-v33{grid-template-columns:1fr 1fr}
   .panel-card{padding:17px}
-  .modal-dialog{padding:0 8px;margin:12px auto}
-  .modal-body{padding:17px;max-height:72vh}
-  .modal-header,.modal-footer{padding:14px 17px}
-  .modal-footer{flex-wrap:wrap}
-  .modal-footer .btn{flex:1 1 auto}
   .ssl-hero{padding:20px}
   .ssl-hero-actions,.ssl-hero-actions form{width:100%}
   .ssl-hero-actions .form-control{flex:1 1 170px}
@@ -1112,3 +1092,224 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
   .db-access-pills{grid-template-columns:1fr}
   .db-fields-v93,.db-job-meta-v93{grid-template-columns:1fr}
 }
+
+/* ============================================================================
+   HYPER-HOST v94 — UI FIX PACK
+   powered by memes4u1337
+
+   Исправляет реальные визуальные баги, а не «красит сверху»:
+
+   1) Модальные окна. Старые правила задавали .modal-dialog{margin:clamp(...) auto}
+      и свою анимацию modalIn. Это конфликтовало с бутстраповскими
+      .modal.fade .modal-dialog{transform:translate(0,-50px)} и с флекс-центровкой
+      .modal-dialog-centered{min-height:calc(100% - margin*2)}. Итог — окно
+      прыгало, уезжало вверх/вбок и обрезалось. Ниже центровка и анимация
+      сделаны одним согласованным набором правил.
+   2) Длинные модалки больше не вылезают за экран: скроллится тело, шапка и
+      футер закреплены.
+   3) Таблицы перестают «ломать» карточку на узких экранах.
+   4) Полировка разделов «Базы» и «Внешний доступ».
+   ========================================================================== */
+
+/* ---------- 1. Модальные окна: корректная центровка и анимация ---------- */
+.modal{
+  position:fixed;inset:0;z-index:1055;
+  display:none;width:100%;height:100%;
+  overflow-x:hidden;overflow-y:auto;
+  outline:0;
+}
+.modal.show{display:block}
+
+.modal-dialog{
+  position:relative;
+  width:auto;
+  max-width:560px;
+  margin:1.5rem auto;
+  padding:0 12px;
+  pointer-events:none;
+  /* только transform — без собственной keyframe-анимации, иначе конфликт */
+  transition:transform .28s var(--ease),opacity .28s var(--ease);
+}
+.modal-dialog.modal-lg{max-width:720px}
+.modal-dialog.modal-xl{max-width:960px}
+
+.modal.fade .modal-dialog{transform:translateY(18px) scale(.98);opacity:0}
+.modal.show .modal-dialog{transform:none;opacity:1}
+@media (prefers-reduced-motion:reduce){
+  .modal-dialog{transition:none}
+  .modal.fade .modal-dialog{transform:none;opacity:1}
+}
+
+/* Центрирование по вертикали без обрезки высоких окон */
+.modal-dialog-centered{
+  display:flex;align-items:center;
+  min-height:calc(100% - 3rem);
+}
+.modal-dialog-centered > .modal-content{width:100%}
+
+.modal-content,.hh-modal .modal-content{
+  position:relative;display:flex;flex-direction:column;width:100%;
+  pointer-events:auto;
+  background:linear-gradient(180deg,var(--surface-2),var(--surface));
+  border:1px solid var(--line-strong);border-radius:var(--r-lg);
+  box-shadow:var(--sh-3),0 0 0 1px rgba(255,255,255,.02) inset;
+  overflow:hidden;
+  max-height:calc(100vh - 3rem);
+}
+.modal-content::before{content:"";position:absolute;inset:0 0 auto 0;height:2px;background:var(--grad-brand);z-index:2}
+
+/* Форма внутри .modal-content тоже должна быть флекс-колонкой,
+   иначе шапка/футер разъезжаются, а тело не скроллится. */
+.modal-content > form{display:flex;flex-direction:column;min-height:0;flex:1 1 auto}
+
+.modal-header{
+  flex:0 0 auto;
+  display:flex;align-items:flex-start;justify-content:space-between;gap:12px;
+  padding:18px 22px;border-bottom:1px solid var(--line-2);
+}
+.modal-header > div{min-width:0}
+.modal-title{font-family:var(--display);font-size:17px;font-weight:600;margin:0;overflow-wrap:anywhere}
+.modal-body{flex:1 1 auto;min-height:0;padding:22px;overflow-y:auto;overflow-x:hidden}
+.modal-footer{
+  flex:0 0 auto;
+  padding:16px 22px;border-top:1px solid var(--line-2);
+  display:flex;justify-content:flex-end;align-items:center;gap:10px;flex-wrap:wrap;
+}
+.modal-backdrop{background:rgba(4,7,15,.72);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+.modal-backdrop.show{opacity:1}
+body.modal-open{overflow:hidden;padding-right:0!important}
+
+/* Содержимое модалки не должно распирать окно по ширине */
+.modal-body pre,.modal-body code,.modal-body .ssl-job-error{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:100%}
+.modal-body .form-control,.modal-body .form-select,.modal-body textarea{max-width:100%}
+.modal-body .table-responsive{margin-bottom:0}
+
+@media (max-width:640px){
+  .modal-dialog{margin:.75rem auto;padding:0 8px;max-width:none}
+  .modal-dialog-centered{min-height:calc(100% - 1.5rem)}
+  .modal-content{max-height:calc(100vh - 1.5rem)}
+  .modal-body{padding:16px}
+  .modal-header,.modal-footer{padding:14px 16px}
+  .modal-footer .btn{flex:1 1 auto;justify-content:center}
+}
+
+/* ---------- 2. Таблицы и карточки: без разъезжающейся вёрстки ---------- */
+.panel-card{min-width:0;overflow-wrap:anywhere}
+.table-responsive{width:100%;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.table-responsive > .table{margin-bottom:0}
+.table-dark-soft td,.table-dark-soft th{vertical-align:middle}
+.table-dark-soft td code{overflow-wrap:anywhere;word-break:break-all}
+.table-dark-soft td .btn,.table-dark-soft td .badge{white-space:nowrap}
+.table-dark-soft td .d-inline-flex{max-width:100%}
+.row{min-width:0}
+.row > [class^="col"],.row > [class*=" col"]{min-width:0}
+
+/* Одинаковая высота кнопок в тулбарах разделов */
+.db-hero-actions-v93,.ssl-hero-actions,.access-actions-v94{
+  display:flex;flex-wrap:wrap;gap:10px;align-items:center;
+}
+.db-hero-actions-v93 form,.ssl-hero-actions form,.access-actions-v94 form{margin:0}
+.db-hero-actions-v93 .btn,.ssl-hero-actions .btn,.access-actions-v94 .btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap;
+}
+
+/* ---------- 3. Базы данных: полировка ---------- */
+.db-page-v93 .db-status-v93{
+  display:grid;gap:12px;
+  grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+}
+.db-page-v93 .db-status-item-v93{
+  display:flex;flex-direction:column;gap:4px;
+  padding:14px 16px;border-radius:var(--r-md,14px);
+  background:rgba(255,255,255,.02);border:1px solid var(--line-2);
+  min-width:0;
+}
+.db-page-v93 .db-status-item-v93 span{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+.db-page-v93 .db-status-item-v93 b{font-size:15px;overflow-wrap:anywhere}
+.db-page-v93 .hh-ok{color:#34d399}
+.db-page-v93 .hh-warn{color:#fbbf24}
+.db-page-v93 .hh-bad{color:#f87171}
+.db-page-v93 .db-hero-v93{
+  padding:26px;border-radius:var(--r-lg);
+  background:linear-gradient(140deg,rgba(46,230,255,.08),rgba(123,107,255,.06) 55%,transparent);
+  border:1px solid var(--line-strong);margin-bottom:22px;
+}
+.db-page-v93 .db-hero-top-v93{
+  display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start;justify-content:space-between;margin-bottom:20px;
+}
+.db-page-v93 .db-hero-title-v93 p{color:var(--muted);margin:6px 0 0;max-width:56ch}
+.db-page-v93 .db-fields-v93{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.db-page-v93 .db-access-pills{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+
+/* ---------- 4. Внешний доступ (v94) ---------- */
+.access-page-v94{display:grid;gap:22px}
+.access-hero-v94{
+  padding:26px;border-radius:var(--r-lg);
+  background:linear-gradient(140deg,rgba(244,114,182,.10),rgba(79,125,255,.06) 55%,transparent);
+  border:1px solid var(--line-strong);
+  display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start;justify-content:space-between;
+}
+.access-hero-v94 h2{margin:6px 0 0}
+.access-hero-v94 p{color:var(--muted);margin:8px 0 0;max-width:60ch}
+.access-grid-v94{display:grid;gap:22px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));align-items:start}
+.access-stat-grid-v94{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:18px}
+.access-stat-v94{
+  display:flex;flex-direction:column;gap:4px;padding:14px 16px;min-width:0;
+  border-radius:var(--r-md,14px);background:rgba(255,255,255,.02);border:1px solid var(--line-2);
+}
+.access-stat-v94 span{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+.access-stat-v94 b{font-size:15px;overflow-wrap:anywhere}
+.access-ports-v94{display:flex;flex-wrap:wrap;gap:8px}
+.access-port-v94{
+  display:inline-flex;align-items:center;gap:7px;padding:7px 13px;border-radius:999px;
+  font-size:12.5px;font-weight:600;border:1px solid transparent;white-space:nowrap;
+}
+.access-port-v94 i{font-size:9px}
+.access-port-v94.is-open{background:rgba(52,211,153,.12);border-color:rgba(52,211,153,.32);color:#6ee7b7}
+.access-port-v94.is-closed{background:rgba(248,113,113,.12);border-color:rgba(248,113,113,.32);color:#fca5a5}
+.access-fwd-v94{display:grid;gap:10px}
+.access-fwd-row-v94{
+  display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between;
+  padding:13px 16px;border-radius:var(--r-md,14px);
+  background:rgba(255,255,255,.02);border:1px solid var(--line-2);min-width:0;
+}
+.access-fwd-row-v94 b{font-size:14px}
+.access-fwd-row-v94 code{
+  font-size:12.5px;padding:5px 10px;border-radius:8px;
+  background:rgba(0,0,0,.35);border:1px solid var(--line-2);color:var(--brand-a);
+  overflow-wrap:anywhere;
+}
+.access-empty-v94{padding:18px;text-align:center;color:var(--faint);border:1px dashed var(--line);border-radius:var(--r-md,14px)}
+.access-note-v94{
+  margin-top:16px;padding:14px 16px;border-radius:var(--r-md,14px);
+  background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.22);color:#fcd34d;font-size:13.5px;line-height:1.6;
+}
+@media (max-width:640px){
+  .access-hero-v94,.db-page-v93 .db-hero-v93{padding:20px}
+  .access-fwd-row-v94{flex-direction:column;align-items:flex-start}
+}
+
+/* ---------- 5. Клиенты портала (v94) ---------- */
+.clients-hero-v94{
+  padding:26px;border-radius:var(--r-lg);margin-bottom:22px;
+  background:linear-gradient(140deg,rgba(168,85,247,.10),rgba(79,125,255,.06) 55%,transparent);
+  border:1px solid var(--line-strong);
+  display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start;justify-content:space-between;
+}
+.clients-hero-v94 h2{margin:6px 0 0}
+.clients-hero-v94 p{color:var(--muted);margin:8px 0 0;max-width:64ch}
+.clients-stat-v94{display:flex;gap:12px;flex-wrap:wrap}
+.clients-stat-v94>div{
+  display:flex;flex-direction:column;gap:4px;padding:14px 20px;min-width:120px;
+  border-radius:var(--r-md,14px);background:rgba(255,255,255,.03);border:1px solid var(--line-2);
+}
+.clients-stat-v94 span{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+.clients-stat-v94 b{font-size:22px}
+.clients-stat-v94 b.hh-warn{color:#fbbf24}
+.cp-grant-grid-v94{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.cp-grant-note-v94{
+  margin-top:18px;padding:14px 16px;border-radius:var(--r-md,14px);font-size:13px;line-height:1.6;
+  background:rgba(46,230,255,.06);border:1px solid rgba(46,230,255,.20);color:#9fe8ff;
+}
+.cp-grant-note-v94 code{background:rgba(0,0,0,.35);padding:2px 6px;border-radius:6px;color:var(--brand-a)}
+@media (max-width:640px){ .clients-hero-v94{padding:20px} .clients-stat-v94>div{flex:1 1 auto} }

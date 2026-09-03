@@ -1,0 +1,695 @@
+#!/usr/bin/env python3
+"""
+HYPER-HOST CP bridge — единственная привилегированная точка клиентского портала.
+powered by memes4u1337
+
+Читает один JSON-объект из stdin, выполняет строго ограниченное действие,
+печатает один JSON-объект в stdout. Портал (пользователь hypercp) не может
+выполнить ничего, кроме перечисленных здесь действий, и не может подсунуть
+произвольную shell-строку: все аргументы валидируются и передаются списками.
+"""
+
+import json
+import os
+import pwd
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+CLIENTS_ROOT = Path("/var/www/hyper-host-clients")
+NGINX_MANAGED = Path("/etc/nginx/hyper-host-managed")
+SYSTEMD_DIR = Path("/etc/systemd/system")
+ACME_ROOT = Path("/opt/hyper-host/acme-webroot")
+LE_LIVE = Path("/etc/letsencrypt/live")
+UNIT_PREFIX = "hyper-cp-"
+
+RE_USER = re.compile(r"^[a-z][a-z0-9_-]{2,23}$")
+RE_DOMAIN = re.compile(r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+RE_BOT = re.compile(r"^[a-z0-9][a-z0-9_-]{1,31}$")
+
+RESERVED = {
+    "root", "admin", "www", "www-data", "ftp", "mysql", "nginx", "daemon",
+    "hypercp", "hypercloud", "panel", "cloud", "cp", "bin", "sys", "sync",
+}
+
+
+# --------------------------------------------------------------------- утилиты
+
+def die(msg):
+    print(json.dumps({"ok": False, "error": str(msg)}, ensure_ascii=False))
+    sys.exit(0)
+
+
+def done(**kw):
+    kw.setdefault("ok", True)
+    print(json.dumps(kw, ensure_ascii=False))
+    sys.exit(0)
+
+
+def run(args, timeout=300, check=True):
+    p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    if check and p.returncode != 0:
+        raise RuntimeError((p.stderr or p.stdout or "").strip()[:600])
+    return p
+
+
+def need_user(payload):
+    u = str(payload.get("user", "")).strip().lower()
+    if not RE_USER.match(u) or u in RESERVED:
+        die("Некорректный логин клиента")
+    return u
+
+
+def need_domain(payload, key="domain"):
+    d = str(payload.get(key, "")).strip().lower().rstrip(".")
+    if not RE_DOMAIN.match(d) or len(d) > 200:
+        die("Некорректное доменное имя")
+    return d
+
+
+def need_bot(payload):
+    b = str(payload.get("bot", "")).strip().lower()
+    if not RE_BOT.match(b):
+        die("Некорректное имя бота")
+    return b
+
+
+def user_home(user):
+    return CLIENTS_ROOT / user
+
+
+def system_user_exists(user):
+    try:
+        pwd.getpwnam(user)
+        return True
+    except KeyError:
+        return False
+
+
+def assert_owned(user):
+    """Клиент должен существовать в системе — иначе действие не для него."""
+    if not system_user_exists(user):
+        die("Аккаунт ещё не инициализирован")
+    if not user_home(user).is_dir():
+        die("Каталог клиента не найден")
+
+
+def php_fpm_socket():
+    candidates = sorted(Path("/run/php").glob("php*-fpm.sock")) if Path("/run/php").is_dir() else []
+    if not candidates:
+        raise RuntimeError("Не найден PHP-FPM сокет")
+    return str(candidates[-1])
+
+
+def dir_size(path):
+    total = 0
+    for root, dirs, files in os.walk(path, onerror=lambda e: None):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def nginx_reload():
+    run(["nginx", "-t"])
+    run(["systemctl", "reload", "nginx"], check=False)
+
+
+# ------------------------------------------------------------- инициализация
+
+def action_user_available(p):
+    user = need_user(p)
+    if system_user_exists(user):
+        die("Этот логин уже занят на сервере")
+    if user_home(user).exists():
+        die("Этот логин уже занят")
+    done(available=True)
+
+
+def action_user_init(p):
+    user = need_user(p)
+    ftp_password = str(p.get("ftp_password", ""))
+    if len(ftp_password) < 10:
+        die("Слишком короткий FTP-пароль")
+
+    home = user_home(user)
+    CLIENTS_ROOT.mkdir(parents=True, exist_ok=True)
+    os.chmod(CLIENTS_ROOT, 0o755)
+
+    if not system_user_exists(user):
+        run(["useradd", "--no-create-home", "--home-dir", str(home),
+             "--shell", "/usr/sbin/nologin", user])
+
+    for sub in ("", "sites", "bots", "logs"):
+        d = home / sub if sub else home
+        d.mkdir(parents=True, exist_ok=True)
+
+    run(["chown", "-R", f"{user}:{user}", str(home)])
+    os.chmod(home, 0o750)
+
+    # nginx (www-data) должен читать сайты клиента, но не более того.
+    run(["setfacl", "-m", f"u:www-data:--x", str(home)], check=False)
+    run(["setfacl", "-R", "-m", "u:www-data:r-X", str(home / "sites")], check=False)
+    run(["setfacl", "-R", "-d", "-m", "u:www-data:r-X", str(home / "sites")], check=False)
+
+    # FTP-пароль = пароль системного аккаунта. proftpd с DefaultRoot ~
+    # запирает клиента в его собственной папке.
+    proc = subprocess.run(["chpasswd"], input=f"{user}:{ftp_password}\n",
+                          capture_output=True, text=True, timeout=30)
+    if proc.returncode != 0:
+        die("Не удалось задать FTP-пароль: " + (proc.stderr or "").strip()[:200])
+
+    ensure_proftpd_chroot()
+    done(home=str(home))
+
+
+def ensure_proftpd_chroot():
+    """Гарантирует, что FTP-клиент видит только свою папку."""
+    cfg = Path("/etc/proftpd/conf.d/hyper-cp.conf")
+    if cfg.exists():
+        return
+    if not Path("/etc/proftpd").is_dir():
+        return
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(
+        "# HYPER-HOST CP: каждый клиент заперт в своей директории\n"
+        "DefaultRoot ~\n"
+        "RequireValidShell off\n"
+        "AllowOverwrite on\n"
+    )
+    os.chmod(cfg, 0o644)
+    subprocess.run(["systemctl", "reload", "proftpd"], capture_output=True, timeout=60)
+
+
+def action_user_set_status(p):
+    user = need_user(p)
+    assert_owned(user)
+    status = str(p.get("status", ""))
+    if status not in ("suspended", "active"):
+        die("Некорректный статус")
+    if status == "suspended":
+        run(["usermod", "-L", user], check=False)
+        for unit in user_units(user):
+            run(["systemctl", "stop", unit], check=False)
+    else:
+        run(["usermod", "-U", user], check=False)
+    done(status=status)
+
+
+def action_user_delete(p):
+    user = need_user(p)
+    assert_owned(user)
+    for unit in user_units(user):
+        run(["systemctl", "disable", "--now", unit], check=False)
+        f = SYSTEMD_DIR / unit
+        if f.exists():
+            f.unlink()
+    run(["systemctl", "daemon-reload"], check=False)
+
+    for conf in NGINX_MANAGED.glob(f"30-cp-{user}--*.conf"):
+        conf.unlink()
+    nginx_reload()
+
+    home = user_home(user)
+    if home.is_dir():
+        shutil.rmtree(home, ignore_errors=True)
+    run(["userdel", user], check=False)
+    done(deleted=True)
+
+
+# -------------------------------------------------------------------- сайты
+
+def site_conf_path(user, domain):
+    return NGINX_MANAGED / f"30-cp-{user}--{domain}.conf"
+
+
+def site_root(user, domain):
+    return user_home(user) / "sites" / domain / "public_html"
+
+
+def write_site_vhost(user, domain, ssl=False):
+    root = site_root(user, domain)
+    sock = php_fpm_socket()
+    logs = user_home(user) / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    run(["chown", f"{user}:{user}", str(logs)], check=False)
+
+    cert = LE_LIVE / domain / "fullchain.pem"
+    key = LE_LIVE / domain / "privkey.pem"
+    has_cert = ssl and cert.is_file() and key.is_file()
+
+    body = f"""    root {root};
+    index index.php index.html;
+    charset utf-8;
+    client_max_body_size 256m;
+    access_log {logs}/{domain}-access.log;
+    error_log {logs}/{domain}-error.log;
+
+    location ^~ /.well-known/acme-challenge/ {{
+        root {ACME_ROOT};
+        default_type text/plain;
+        try_files $uri =404;
+        allow all;
+    }}
+
+    location / {{
+        try_files $uri $uri/ /index.php?$query_string;
+    }}
+
+    location ~ \\.php$ {{
+        try_files $uri =404;
+        include /etc/nginx/fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param DOCUMENT_ROOT $document_root;
+        fastcgi_param HTTPS $https if_not_empty;
+        fastcgi_pass unix:{sock};
+        fastcgi_read_timeout 120s;
+    }}
+
+    location ~ /\\.(?!well-known) {{ deny all; }}
+"""
+
+    if has_cert:
+        conf = f"""# HYPER-HOST CP — сайт клиента {user}
+server {{
+    listen 80;
+    listen [::]:80;
+    server_name {domain} www.{domain};
+    location ^~ /.well-known/acme-challenge/ {{
+        root {ACME_ROOT};
+        default_type text/plain;
+        try_files $uri =404;
+    }}
+    location / {{ return 301 https://$host$request_uri; }}
+}}
+server {{
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name {domain} www.{domain};
+    ssl_certificate {cert};
+    ssl_certificate_key {key};
+    ssl_protocols TLSv1.2 TLSv1.3;
+{body}}}
+"""
+    else:
+        conf = f"""# HYPER-HOST CP — сайт клиента {user}
+server {{
+    listen 80;
+    listen [::]:80;
+    server_name {domain} www.{domain};
+{body}}}
+"""
+
+    NGINX_MANAGED.mkdir(parents=True, exist_ok=True)
+    site_conf_path(user, domain).write_text(conf)
+    os.chmod(site_conf_path(user, domain), 0o644)
+
+
+def action_site_create(p):
+    user = need_user(p)
+    domain = need_domain(p)
+    assert_owned(user)
+
+    # Домен не должен уже обслуживаться другим vhost'ом.
+    for conf in NGINX_MANAGED.glob("*.conf"):
+        if conf == site_conf_path(user, domain):
+            continue
+        try:
+            text = conf.read_text()
+        except OSError:
+            continue
+        if re.search(r"server_name[^;]*\b" + re.escape(domain) + r"\b", text):
+            die(f"Домен {domain} уже используется на этом сервере")
+
+    root = site_root(user, domain)
+    root.mkdir(parents=True, exist_ok=True)
+    index = root / "index.html"
+    if not index.exists():
+        index.write_text(
+            f"<!doctype html><meta charset=\"utf-8\"><title>{domain}</title>"
+            f"<body style=\"font:16px/1.6 system-ui;display:grid;place-items:center;"
+            f"min-height:100vh;margin:0;background:#0d1322;color:#eaf0ff\">"
+            f"<div><h1>{domain}</h1><p style=\"color:#8b98bd\">Сайт создан. "
+            f"Загрузите файлы по FTP в папку sites/{domain}/public_html</p></div>"
+        )
+    run(["chown", "-R", f"{user}:{user}", str(user_home(user) / "sites" / domain)])
+    run(["setfacl", "-R", "-m", "u:www-data:r-X", str(user_home(user) / "sites" / domain)], check=False)
+    run(["setfacl", "-R", "-d", "-m", "u:www-data:r-X", str(user_home(user) / "sites" / domain)], check=False)
+
+    write_site_vhost(user, domain, ssl=False)
+    nginx_reload()
+    done(domain=domain, root=str(root))
+
+
+def action_site_delete(p):
+    user = need_user(p)
+    domain = need_domain(p)
+    assert_owned(user)
+    conf = site_conf_path(user, domain)
+    if conf.exists():
+        conf.unlink()
+    nginx_reload()
+    if str(p.get("wipe", "")) == "1":
+        shutil.rmtree(user_home(user) / "sites" / domain, ignore_errors=True)
+    done(domain=domain)
+
+
+def action_site_ssl(p):
+    user = need_user(p)
+    domain = need_domain(p)
+    email = str(p.get("email", "")).strip()
+    assert_owned(user)
+    if not site_conf_path(user, domain).exists():
+        die("Сайт не найден")
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$", email, re.I):
+        die("Укажите корректный e-mail для Let's Encrypt")
+
+    (ACME_ROOT / ".well-known" / "acme-challenge").mkdir(parents=True, exist_ok=True)
+    run(["chown", "-R", "www-data:www-data", str(ACME_ROOT)], check=False)
+
+    args = ["certbot", "certonly", "--webroot", "-w", str(ACME_ROOT),
+            "-d", domain, "--email", email, "--agree-tos",
+            "--non-interactive", "--keep-until-expiring"]
+    try:
+        run(args, timeout=300)
+    except Exception as exc:
+        die("Let's Encrypt отказал: " + str(exc)[:400])
+
+    write_site_vhost(user, domain, ssl=True)
+    nginx_reload()
+    done(**cert_info(domain))
+
+
+def cert_info(domain):
+    cert = LE_LIVE / domain / "fullchain.pem"
+    if not cert.is_file():
+        return {"ssl": False, "expires": "", "days_left": 0}
+    try:
+        out = run(["openssl", "x509", "-in", str(cert), "-noout", "-enddate"]).stdout
+        raw = out.split("=", 1)[1].strip()
+        ts = time.mktime(time.strptime(raw, "%b %d %H:%M:%S %Y %Z"))
+        return {
+            "ssl": True,
+            "expires": time.strftime("%Y-%m-%d", time.localtime(ts)),
+            "days_left": max(0, int((ts - time.time()) // 86400)),
+        }
+    except Exception:
+        return {"ssl": True, "expires": "", "days_left": 0}
+
+
+def action_site_ssl_status(p):
+    need_user(p)
+    domain = need_domain(p)
+    done(**cert_info(domain))
+
+
+def action_site_logs(p):
+    user = need_user(p)
+    domain = need_domain(p)
+    assert_owned(user)
+    kind = "error" if str(p.get("kind", "error")) == "error" else "access"
+    log = user_home(user) / "logs" / f"{domain}-{kind}.log"
+    if not log.is_file():
+        done(lines=[])
+    out = run(["tail", "-n", "200", str(log)], check=False).stdout
+    done(lines=out.splitlines()[-200:])
+
+
+# --------------------------------------------------------------------- боты
+
+def unit_name(user, bot):
+    return f"{UNIT_PREFIX}{user}-{bot}.service"
+
+
+def user_units(user):
+    return [f.name for f in SYSTEMD_DIR.glob(f"{UNIT_PREFIX}{user}-*.service")]
+
+
+def write_bot_unit(user, bot, runtime, cpu_percent, memory_mb):
+    workdir = user_home(user) / "bots" / bot
+    if runtime == "node":
+        entry = "index.js"
+        exec_start = f"/usr/bin/node {workdir}/{entry}"
+    else:
+        entry = "bot.py"
+        venv_python = workdir / "venv" / "bin" / "python"
+        python = str(venv_python) if venv_python.is_file() else "/usr/bin/python3"
+        exec_start = f"{python} {workdir}/{entry}"
+
+    limits = ""
+    if cpu_percent > 0:
+        limits += f"CPUQuota={cpu_percent}%\n"
+    if memory_mb > 0:
+        limits += f"MemoryMax={memory_mb}M\nMemoryHigh={max(16, int(memory_mb * 0.9))}M\n"
+
+    unit = f"""[Unit]
+Description=HYPER-HOST CP bot {bot} ({user})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={user}
+Group={user}
+WorkingDirectory={workdir}
+ExecStart={exec_start}
+Restart=always
+RestartSec=5
+StandardOutput=append:{user_home(user)}/logs/bot-{bot}.log
+StandardError=append:{user_home(user)}/logs/bot-{bot}.log
+
+# Реальные лимиты ресурсов, выданные администратором
+{limits}
+# Изоляция
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths={workdir} {user_home(user)}/logs
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
+"""
+    path = SYSTEMD_DIR / unit_name(user, bot)
+    path.write_text(unit)
+    os.chmod(path, 0o644)
+    run(["systemctl", "daemon-reload"])
+
+
+def action_bot_create(p):
+    user = need_user(p)
+    bot = need_bot(p)
+    assert_owned(user)
+    runtime = str(p.get("runtime", "python"))
+    if runtime not in ("python", "node"):
+        die("Поддерживаются только python и node")
+    cpu = max(0, min(400, int(p.get("cpu_percent", 0) or 0)))
+    mem = max(0, min(65536, int(p.get("memory_mb", 0) or 0)))
+
+    workdir = user_home(user) / "bots" / bot
+    workdir.mkdir(parents=True, exist_ok=True)
+    entry = workdir / ("index.js" if runtime == "node" else "bot.py")
+    if not entry.exists():
+        entry.write_text(
+            "# Загрузите свой код по FTP в папку bots/%s\n" % bot
+            if runtime == "python" else
+            "// Загрузите свой код по FTP в папку bots/%s\n" % bot
+        )
+    run(["chown", "-R", f"{user}:{user}", str(workdir)])
+
+    write_bot_unit(user, bot, runtime, cpu, mem)
+    done(unit=unit_name(user, bot), path=str(workdir))
+
+
+def action_bot_limits(p):
+    """Перевыдача лимитов: администратор изменил квоту — юниты переписываются."""
+    user = need_user(p)
+    assert_owned(user)
+    bots = p.get("bots") or []
+    updated = []
+    for b in bots:
+        name = str(b.get("name", "")).lower()
+        if not RE_BOT.match(name):
+            continue
+        if not (SYSTEMD_DIR / unit_name(user, name)).exists():
+            continue
+        write_bot_unit(user, name, str(b.get("runtime", "python")),
+                       max(0, min(400, int(b.get("cpu_percent", 0) or 0))),
+                       max(0, min(65536, int(b.get("memory_mb", 0) or 0))))
+        if run(["systemctl", "is-active", unit_name(user, name)], check=False).stdout.strip() == "active":
+            run(["systemctl", "restart", unit_name(user, name)], check=False)
+        updated.append(name)
+    done(updated=updated)
+
+
+def action_bot_action(p):
+    user = need_user(p)
+    bot = need_bot(p)
+    assert_owned(user)
+    act = str(p.get("act", ""))
+    if act not in ("start", "stop", "restart"):
+        die("Недопустимое действие")
+    unit = unit_name(user, bot)
+    if not (SYSTEMD_DIR / unit).exists():
+        die("Бот не найден")
+    if act == "start":
+        run(["systemctl", "enable", "--now", unit], check=False)
+    elif act == "stop":
+        run(["systemctl", "disable", "--now", unit], check=False)
+    else:
+        run(["systemctl", "restart", unit], check=False)
+    time.sleep(1)
+    done(status=run(["systemctl", "is-active", unit], check=False).stdout.strip())
+
+
+def action_bot_install(p):
+    """Установка зависимостей из requirements.txt / package.json от имени клиента."""
+    user = need_user(p)
+    bot = need_bot(p)
+    assert_owned(user)
+    workdir = user_home(user) / "bots" / bot
+    if not workdir.is_dir():
+        die("Каталог бота не найден")
+
+    if (workdir / "requirements.txt").is_file():
+        venv = workdir / "venv"
+        if not (venv / "bin" / "python").is_file():
+            run(["runuser", "-u", user, "--", "python3", "-m", "venv", str(venv)], timeout=300)
+        r = run(["runuser", "-u", user, "--", str(venv / "bin" / "pip"),
+                 "install", "-r", str(workdir / "requirements.txt")], timeout=900, check=False)
+        done(log=(r.stdout + r.stderr)[-4000:])
+    elif (workdir / "package.json").is_file():
+        r = run(["runuser", "-u", user, "--", "npm", "--prefix", str(workdir), "install"],
+                timeout=900, check=False)
+        done(log=(r.stdout + r.stderr)[-4000:])
+    die("Не найден requirements.txt или package.json")
+
+
+def action_bot_delete(p):
+    user = need_user(p)
+    bot = need_bot(p)
+    assert_owned(user)
+    unit = unit_name(user, bot)
+    run(["systemctl", "disable", "--now", unit], check=False)
+    f = SYSTEMD_DIR / unit
+    if f.exists():
+        f.unlink()
+    run(["systemctl", "daemon-reload"], check=False)
+    if str(p.get("wipe", "")) == "1":
+        shutil.rmtree(user_home(user) / "bots" / bot, ignore_errors=True)
+    done(deleted=bot)
+
+
+def action_bot_logs(p):
+    user = need_user(p)
+    bot = need_bot(p)
+    assert_owned(user)
+    log = user_home(user) / "logs" / f"bot-{bot}.log"
+    lines = []
+    if log.is_file():
+        lines = run(["tail", "-n", "300", str(log)], check=False).stdout.splitlines()
+    if not lines:
+        out = run(["journalctl", "-u", unit_name(user, bot), "-n", "300", "--no-pager"],
+                  check=False).stdout
+        lines = out.splitlines()
+    done(lines=lines[-300:])
+
+
+# ------------------------------------------------------------------ телеметрия
+
+def action_usage(p):
+    user = need_user(p)
+    if not user_home(user).is_dir():
+        done(disk_bytes=0, units=[])
+
+    units = []
+    for unit in sorted(user_units(user)):
+        name = unit[len(UNIT_PREFIX) + len(user) + 1:-len(".service")]
+        state = run(["systemctl", "is-active", unit], check=False).stdout.strip()
+        mem = 0
+        cpu_ns = 0
+        show = run(["systemctl", "show", unit, "-p", "MemoryCurrent", "-p", "CPUUsageNSec",
+                    "-p", "MemoryMax", "-p", "CPUQuotaPerSecUSec"], check=False).stdout
+        props = {}
+        for line in show.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                props[k] = v
+        try:
+            mem = int(props.get("MemoryCurrent", "0"))
+        except ValueError:
+            mem = 0
+        try:
+            cpu_ns = int(props.get("CPUUsageNSec", "0"))
+        except ValueError:
+            cpu_ns = 0
+        units.append({
+            "name": name,
+            "unit": unit,
+            "status": state,
+            "memory_bytes": max(0, mem),
+            "cpu_seconds": round(cpu_ns / 1e9, 1) if cpu_ns > 0 else 0,
+            "memory_max": props.get("MemoryMax", ""),
+        })
+
+    done(disk_bytes=dir_size(user_home(user)), units=units)
+
+
+# ---------------------------------------------------------------------- вход
+
+ACTIONS = {
+    "user-available": action_user_available,
+    "user-init": action_user_init,
+    "user-set-status": action_user_set_status,
+    "user-delete": action_user_delete,
+    "site-create": action_site_create,
+    "site-delete": action_site_delete,
+    "site-ssl": action_site_ssl,
+    "site-ssl-status": action_site_ssl_status,
+    "site-logs": action_site_logs,
+    "bot-create": action_bot_create,
+    "bot-limits": action_bot_limits,
+    "bot-action": action_bot_action,
+    "bot-install": action_bot_install,
+    "bot-delete": action_bot_delete,
+    "bot-logs": action_bot_logs,
+    "usage": action_usage,
+}
+
+
+def main():
+    if os.geteuid() != 0:
+        die("Мост должен запускаться от root")
+    try:
+        raw = sys.stdin.read(262144)
+        payload = json.loads(raw or "{}")
+        if not isinstance(payload, dict):
+            die("Некорректный запрос")
+    except Exception:
+        die("Некорректный JSON")
+
+    handler = ACTIONS.get(str(payload.get("action", "")))
+    if handler is None:
+        die("Неизвестное действие")
+
+    try:
+        handler(payload)
+    except subprocess.TimeoutExpired:
+        die("Операция выполнялась слишком долго и была прервана")
+    except Exception as exc:
+        die(str(exc)[:600])
+
+
+if __name__ == "__main__":
+    main()

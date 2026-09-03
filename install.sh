@@ -78,18 +78,11 @@ show_install_banner
 # HYPER_HOST_FORCE_FULL_INSTALL=1.
 if [[ "${HYPER_HOST_FORCE_FULL_INSTALL:-0}" != "1"    && -f "$CONF_DIR/hyper-host.conf"    && -f "$PANEL_DIR/public/index.php" ]]; then
   log "Обнаружена установленная HYPER-HOST — полный install.sh не запускаю"
-  UPDATE_PATCH=""
-  for candidate in     "$PROJECT_DIR/apply-v77-final-ui-ssl-safe.sh"     "$PROJECT_DIR/hyper-hosting-panel-v77-patch-only/apply-v77-final-ui-ssl-safe.sh"; do
-    if [[ -f "$candidate" ]]; then
-      UPDATE_PATCH="$candidate"
-      break
-    fi
-  done
-  if [[ -n "$UPDATE_PATCH" ]]; then
-    log "Запускаю безопасный файловый патч без apt/dpkg: $UPDATE_PATCH"
-    exec bash "$UPDATE_PATCH"
+  if [[ -f "$PROJECT_DIR/update.sh" ]]; then
+    log "Панель уже установлена — запускаю безопасное обновление (update.sh)"
+    exec bash "$PROJECT_DIR/update.sh"
   fi
-  fail "Файл безопасного обновления не найден. Не запускай полный install.sh. Используй apply-v78-dpkg-systemd-recovery.sh или актуальный apply-патч."
+  fail "Не найден update.sh рядом с install.sh. Обнови архив панели целиком."
 fi
 
 # v49: раньше при занятой dpkg-блокировке (unattended-upgrades или другой apt-get,
