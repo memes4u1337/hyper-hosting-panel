@@ -756,10 +756,16 @@ def rcon_cmd(sid:int,command:str):
     return {'ok':True,'output':text}
 
 
+def base_map_list():
+    rt=load_runtime(); d=Path(rt.get('base_game_dir','/srv/hyper-cs16/base-hlds'))/'cstrike/maps'
+    maps=sorted({p.stem for p in d.glob('*.bsp') if SAFE_MAP.fullmatch(p.stem)},key=str.lower) if d.is_dir() else []
+    return {'ok':True,'maps':maps}
+
+
 def map_list(sid:int):
     c=load_server(sid); d=Path(c['path'])/'cstrike/maps'
     maps=sorted({p.stem for p in d.glob('*.bsp') if SAFE_MAP.fullmatch(p.stem)},key=str.lower) if d.is_dir() else []
-    return {'ok':True,'maps':maps}
+    return {'ok':True,'maps':maps,'current_map':str(c.get('start_map') or '')}
 
 
 def plugins_list(sid:int):
@@ -819,6 +825,156 @@ def config_write(sid:int,name:str,content:str):
     p.parent.mkdir(parents=True,exist_ok=True); p.write_text(content.replace('\r\n','\n'),encoding='utf-8'); normalize_permissions(Path(c['path']))
     return {'ok':True,'name':name}
 
+
+
+AMXX_ACCESS_LABELS={
+ 'a':'Иммунитет','b':'Резервный слот','c':'Kick','d':'Ban','e':'Slay / Slap','f':'Смена карты',
+ 'g':'CVAR','h':'Конфиги','i':'Чат','j':'Голосования','k':'sv_password','l':'RCON',
+ 'm':'Custom A','n':'Custom B','o':'Custom C','p':'Custom D','q':'Custom E','r':'Custom F',
+ 's':'Custom G','t':'Custom H','u':'AMXX меню'
+}
+AMXX_ALLOWED_ACCESS=set(AMXX_ACCESS_LABELS)
+AMXX_USER_RE=re.compile(r'^\s*"([^"]*)"\s+"([^"]*)"\s+"([a-z]*)"\s+"([a-z]*)"\s*(?:;.*)?$',re.I)
+STEAM_ID_RE=re.compile(r'^(?:STEAM|VALVE)_[0-9]+:[0-9]+:[0-9]+$',re.I)
+
+
+def _amxx_users_path(sid:int):
+    c=load_server(sid)
+    root=Path(c['path']).resolve()
+    p=(root/'cstrike/addons/amxmodx/configs/users.ini').resolve()
+    if root not in p.parents: raise RuntimeError('Unsafe users.ini path')
+    p.parent.mkdir(parents=True,exist_ok=True)
+    return c,p
+
+
+def _parse_amxx_admins(lines):
+    rows=[]
+    for line_index,line in enumerate(lines):
+        m=AMXX_USER_RE.match(line)
+        if not m: continue
+        identity,password,access,auth=m.groups()
+        auth_l=auth.lower()
+        if 'c' in auth_l: auth_type='steamid'
+        elif 'd' in auth_l: auth_type='ip'
+        else: auth_type='name'
+        rows.append({
+            'index':line_index,'identity':identity,'access_flags':access.lower(),'auth_flags':auth_l,
+            'auth_type':auth_type,'has_password':bool(password),'access_labels':[AMXX_ACCESS_LABELS.get(x,x) for x in access.lower() if x in AMXX_ACCESS_LABELS]
+        })
+    return rows
+
+
+def admin_list(sid:int):
+    _,p=_amxx_users_path(sid)
+    lines=p.read_text(encoding='utf-8',errors='ignore').splitlines() if p.exists() else []
+    return {'ok':True,'admins':_parse_amxx_admins(lines),'password_field':'_pw','users_ini':str(p)}
+
+
+def _validate_admin_identity(identity:str,auth_type:str):
+    identity=identity.strip()
+    if not identity or len(identity)>96 or any(ch in identity for ch in ['"','\r','\n']):
+        raise RuntimeError('Некорректный идентификатор администратора')
+    if auth_type=='steamid':
+        if not STEAM_ID_RE.fullmatch(identity): raise RuntimeError('Для SteamID нужен формат STEAM_0:1:123456')
+        return identity.upper()
+    if auth_type=='ip':
+        try: return str(ipaddress.ip_address(identity))
+        except ValueError: raise RuntimeError('Некорректный IP администратора')
+    if auth_type=='name':
+        if len(identity)>64: raise RuntimeError('Ник администратора слишком длинный')
+        return identity
+    raise RuntimeError('Неизвестный тип авторизации')
+
+
+def _normalize_access_flags(flags:str):
+    flags=''.join(dict.fromkeys((flags or '').lower()))
+    bad=[x for x in flags if x not in AMXX_ALLOWED_ACCESS]
+    if bad: raise RuntimeError('Недопустимые AMXX права: '+''.join(bad))
+    if not flags: raise RuntimeError('Выбери хотя бы одно право администратора')
+    return ''.join(x for x in 'abcdefghijklmnopqrstu' if x in flags)
+
+
+def _ensure_password_field(root:Path):
+    p=root/'cstrike/addons/amxmodx/configs/amxx.cfg'
+    p.parent.mkdir(parents=True,exist_ok=True)
+    text=p.read_text(encoding='utf-8',errors='ignore') if p.exists() else ''
+    rx=re.compile(r'^\s*amx_password_field\s+.*$',re.I|re.M)
+    line='amx_password_field "_pw"'
+    if rx.search(text): text=rx.sub(line,text,1)
+    else: text=text.rstrip()+('\n\n' if text.strip() else '')+line+'\n'
+    p.write_text(text,encoding='utf-8')
+
+
+def _reload_amxx_admins(c):
+    try:
+        r=rcon_cmd(int(c['id']),'amx_reloadadmins')
+        return {'ok':bool(r.get('ok')),'output':str(r.get('output',''))[-1000:]}
+    except Exception as exc:
+        return {'ok':False,'error':str(exc)}
+
+
+def admin_save(sid:int,payload:dict):
+    require_root(); c,p=_amxx_users_path(sid)
+    auth_type=str(payload.get('auth_type','steamid')).lower()
+    identity=_validate_admin_identity(str(payload.get('identity','')),auth_type)
+    access=_normalize_access_flags(str(payload.get('access_flags','')))
+    try: edit_index=int(payload.get('index',-1))
+    except Exception: edit_index=-1
+    password=str(payload.get('password',''))
+    generate=bool(payload.get('generate_password',False))
+    if any(ch in password for ch in ['"','\r','\n']) or len(password)>96: raise RuntimeError('Некорректный пароль администратора')
+    lines=p.read_text(encoding='utf-8',errors='ignore').splitlines() if p.exists() else []
+    existing_password=''
+    if edit_index>=0:
+        if edit_index>=len(lines): raise RuntimeError('Запись администратора уже изменилась. Обнови список.')
+        m=AMXX_USER_RE.match(lines[edit_index])
+        if not m: raise RuntimeError('Выбранная строка users.ini больше не является администратором')
+        existing_password=m.group(2)
+    password_changed=generate or password!=''
+    if generate: password=secrets.token_urlsafe(12).replace('-','A').replace('_','B')[:16]
+    elif password=='': password=existing_password
+    if auth_type=='name' and not password:
+        raise RuntimeError('Для авторизации по нику обязательно задай пароль')
+    if auth_type=='steamid': auth_flags='ca' if password else 'ce'
+    elif auth_type=='ip': auth_flags='da' if password else 'de'
+    else: auth_flags='a'
+    entry=f'"{identity}" "{password}" "{access}" "{auth_flags}"'
+    # Prevent accidental duplicate identities; editing its own row is allowed.
+    for row in _parse_amxx_admins(lines):
+        if row['index']!=edit_index and row['identity'].casefold()==identity.casefold():
+            raise RuntimeError(f'Администратор {identity} уже существует')
+    if edit_index>=0: lines[edit_index]=entry
+    else:
+        if lines and lines[-1].strip(): lines.append('')
+        lines.append(entry); edit_index=len(lines)-1
+    p.write_text('\n'.join(lines).rstrip()+'\n',encoding='utf-8')
+    root=Path(c['path'])
+    if password: _ensure_password_field(root)
+    normalize_permissions(root)
+    reload=_reload_amxx_admins(c)
+    return {
+        'ok':True,'index':edit_index,'identity':identity,'auth_type':auth_type,'access_flags':access,
+        'has_password':bool(password),'generated_password':password if generate else '',
+        'client_command':f'setinfo _pw "{password}"' if password and password_changed else '',
+        'reload':reload
+    }
+
+
+def admin_delete(sid:int,index:int):
+    require_root(); c,p=_amxx_users_path(sid)
+    lines=p.read_text(encoding='utf-8',errors='ignore').splitlines() if p.exists() else []
+    if index<0 or index>=len(lines) or not AMXX_USER_RE.match(lines[index]): raise RuntimeError('Администратор не найден')
+    removed=AMXX_USER_RE.match(lines[index]).group(1)
+    del lines[index]
+    # Avoid accumulating multiple blank lines but preserve comments/manual entries.
+    cleaned=[]
+    for line in lines:
+        if not line.strip() and cleaned and not cleaned[-1].strip(): continue
+        cleaned.append(line)
+    p.write_text('\n'.join(cleaned).rstrip()+'\n',encoding='utf-8')
+    normalize_permissions(Path(c['path']))
+    reload=_reload_amxx_admins(c)
+    return {'ok':True,'removed':removed,'reload':reload}
 
 def server_config_set(args):
     require_root(); c=load_server(args.id)
@@ -1220,6 +1376,7 @@ def doctor():
 def main():
     p=argparse.ArgumentParser(prog='hyper-cs16-ctl'); sp=p.add_subparsers(dest='cmd',required=True)
     sp.add_parser('base-install')
+    sp.add_parser('base-maps')
     c=sp.add_parser('server-create'); c.add_argument('id',type=int); c.add_argument('--name',required=True); c.add_argument('--port',type=int,required=True); c.add_argument('--slots',type=int,default=16); c.add_argument('--map',default='de_dust2'); c.add_argument('--hostname',required=True); c.add_argument('--password',default=''); c.add_argument('--profile',choices=['classic','rehlds'],default='classic')
     for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','ftp-repair','ftp-test','network','delete','repair-runtime','mods-status','nat-upnp','network-fix']:
         q=sp.add_parser(a); q.add_argument('id',type=int)
@@ -1228,6 +1385,9 @@ def main():
     q=sp.add_parser('kick'); q.add_argument('id',type=int); q.add_argument('userid',type=int)
     q=sp.add_parser('ban'); q.add_argument('id',type=int); q.add_argument('userid',type=int); q.add_argument('--minutes',type=int,default=30)
     q=sp.add_parser('plugin-toggle'); q.add_argument('id',type=int); q.add_argument('plugin'); q.add_argument('state',choices=['on','off'])
+    q=sp.add_parser('admin-list'); q.add_argument('id',type=int)
+    q=sp.add_parser('admin-save'); q.add_argument('id',type=int)
+    q=sp.add_parser('admin-delete'); q.add_argument('id',type=int); q.add_argument('index',type=int)
     q=sp.add_parser('config-read'); q.add_argument('id',type=int); q.add_argument('name',choices=sorted(ALLOWED_CONFIGS))
     q=sp.add_parser('config-write'); q.add_argument('id',type=int); q.add_argument('name',choices=sorted(ALLOWED_CONFIGS))
     q=sp.add_parser('config-set'); q.add_argument('id',type=int); q.add_argument('--port',type=int); q.add_argument('--slots',type=int); q.add_argument('--map'); q.add_argument('--hostname'); q.add_argument('--password'); q.add_argument('--rcon')
@@ -1244,6 +1404,7 @@ def main():
     args=p.parse_args()
     try:
         if args.cmd=='base-install': result=ensure_base('classic')
+        elif args.cmd=='base-maps': result=base_map_list()
         elif args.cmd=='server-create': result=server_create(args)
         elif args.cmd in {'start','stop','restart'}: result=service_action(args.id,args.cmd)
         elif args.cmd=='status': result=status_json(args.id,True)
@@ -1257,6 +1418,15 @@ def main():
         elif args.cmd=='kick': result=rcon_cmd(args.id,f'kick #{max(0,args.userid)}')
         elif args.cmd=='ban': result=rcon_cmd(args.id,f'banid {max(0,args.minutes)} #{max(0,args.userid)} kick;writeid')
         elif args.cmd=='plugin-toggle': result=plugin_toggle(args.id,args.plugin,args.state=='on')
+        elif args.cmd=='admin-list': result=admin_list(args.id)
+        elif args.cmd=='admin-save':
+            raw=sys.stdin.buffer.read(128*1024+1)
+            if len(raw)>128*1024: raise RuntimeError('Admin payload is too large')
+            try: payload=json.loads(raw.decode('utf-8','replace') or '{}')
+            except Exception: raise RuntimeError('Invalid admin payload')
+            if not isinstance(payload,dict): raise RuntimeError('Invalid admin payload')
+            result=admin_save(args.id,payload)
+        elif args.cmd=='admin-delete': result=admin_delete(args.id,args.index)
         elif args.cmd=='config-read': result=config_read(args.id,args.name)
         elif args.cmd=='config-write':
             raw=sys.stdin.buffer.read(512*1024+1)

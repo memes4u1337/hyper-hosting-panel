@@ -22,6 +22,17 @@ try {
         if($view==='plugin-toggle'){
             $plugin=(string)($_POST['plugin']??'');$state=(string)($_POST['state']??'off');$r=ctl(['plugin-toggle',$id,$plugin,$state==='on'?'on':'off'],30);audit('plugin_toggle',$plugin.'='.$state,$id);json_out($r,empty($r['ok'])?400:200);
         }
+        if($view==='admin-save'){
+            $identity=trim((string)($_POST['identity']??''));$authType=(string)($_POST['auth_type']??'steamid');$flags=(string)($_POST['access_flags']??'');$password=(string)($_POST['password']??'');$index=(int)($_POST['index']??-1);$generate=(string)($_POST['generate_password']??'0')==='1';
+            if($identity===''||mb_strlen($identity)>96)throw new RuntimeException('Проверь SteamID / ник / IP');
+            if(!in_array($authType,['steamid','name','ip'],true))throw new RuntimeException('Некорректный тип авторизации');
+            if(strlen($flags)>32||strlen($password)>96)throw new RuntimeException('Слишком длинные данные администратора');
+            $payload=json_encode(['index'=>$index,'identity'=>$identity,'auth_type'=>$authType,'access_flags'=>$flags,'password'=>$password,'generate_password'=>$generate],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+            $r=ctl(['admin-save',$id],30,$payload?:'{}');audit('amxx_admin_save',$identity.' ['.$flags.']',$id);json_out($r,empty($r['ok'])?400:200);
+        }
+        if($view==='admin-delete'){
+            $index=(int)($_POST['index']??-1);if($index<0)throw new RuntimeException('Администратор не выбран');$r=ctl(['admin-delete',$id,$index],30);audit('amxx_admin_delete',(string)($r['removed']??('#'.$index)),$id);json_out($r,empty($r['ok'])?400:200);
+        }
         if($view==='config-save'){
             $name=(string)($_POST['name']??'');$content=(string)($_POST['content']??'');$allowed=['server.cfg','amxx.cfg','users.ini','plugins.ini','modules.ini','mapcycle.txt','maps.ini'];if(!in_array($name,$allowed,true))throw new RuntimeException('Файл запрещён');if(strlen($content)>524288)throw new RuntimeException('Файл слишком большой');$r=ctl(['config-write',$id,$name],30,$content);audit('config_save',$name,$id);json_out($r,empty($r['ok'])?400:200);
         }
@@ -33,6 +44,7 @@ try {
     if($view==='players') json_out(ctl(['players',$id],10));
     if($view==='maps') json_out(ctl(['maps',$id],10));
     if($view==='plugins') json_out(ctl(['plugins',$id],10));
+    if($view==='admins') json_out(ctl(['admin-list',$id],10));
     if($view==='logs') json_out(ctl(['logs',$id,'--lines',200],10));
     if($view==='network') json_out(ctl(['network',$id],15));
     if($view==='ftp-test') json_out(ctl(['ftp-test',$id],20));
