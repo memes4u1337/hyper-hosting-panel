@@ -33,6 +33,9 @@ METAMOD_URL=f'https://github.com/rehlds/Metamod-R/releases/download/{METAMOD_VER
 METAMOD_AM_URL=f'https://www.amxmodx.org/release/metamod-{METAMOD_AM_VERSION}.zip'
 REHLDS_URL=f'https://github.com/rehlds/ReHLDS/releases/download/{REHLDS_VERSION}/rehlds-bin-{REHLDS_VERSION}.zip'
 REGAMEDLL_URL=f'https://github.com/rehlds/ReGameDLL_CS/releases/download/{REGAMEDLL_VERSION}/regamedll-bin-{REGAMEDLL_VERSION}.zip'
+YAPB_URL='https://yapb.jeefo.net/latest'
+ZP43_PLUGIN_URL='https://sourceforge.net/projects/zm-strike/files/zp_plugin_43.zip/download'
+ZP43_RESOURCES_URL='https://sourceforge.net/projects/zm-strike/files/zp_resources.zip/download'
 
 
 def out(data, code=0):
@@ -73,18 +76,107 @@ def ensure_state_permissions():
             raise RuntimeError(f'Cannot fix state file permissions for {fp}: {exc}')
 
 
+def db_connect():
+    rt=load_runtime()
+    try:
+        import pymysql
+        return pymysql.connect(host=rt.get('db_host','127.0.0.1'),port=int(rt.get('db_port',3306)),
+            user=rt['db_user'],password=rt['db_password'],database=rt['db_name'],charset='utf8mb4',
+            autocommit=True,cursorclass=pymysql.cursors.DictCursor,connect_timeout=5)
+    except Exception as exc:
+        raise RuntimeError(f'Database connection failed: {exc}')
+
+
+def db_server_row(sid:int):
+    try:
+        con=db_connect()
+        try:
+            with con.cursor() as cur:
+                cur.execute('SELECT * FROM servers WHERE id=%s LIMIT 1',(sid,))
+                return cur.fetchone()
+        finally:
+            con.close()
+    except Exception:
+        return None
+
+
+def db_update_ftp(sid:int,user:str,password:str):
+    try:
+        con=db_connect()
+        try:
+            with con.cursor() as cur:
+                cur.execute('UPDATE servers SET ftp_user=%s, ftp_password=%s WHERE id=%s',(user,password,sid))
+        finally:
+            con.close()
+    except Exception:
+        pass
+
+
+def db_update_mode(sid:int,mode:str,bots_enabled:int|None=None,bots_quota:int|None=None,bots_difficulty:int|None=None):
+    try:
+        con=db_connect()
+        try:
+            sets=['game_mode=%s']; vals=[mode]
+            if bots_enabled is not None: sets.append('bots_enabled=%s'); vals.append(int(bots_enabled))
+            if bots_quota is not None: sets.append('bots_quota=%s'); vals.append(int(bots_quota))
+            if bots_difficulty is not None: sets.append('bots_difficulty=%s'); vals.append(int(bots_difficulty))
+            vals.append(sid)
+            with con.cursor() as cur: cur.execute('UPDATE servers SET '+','.join(sets)+' WHERE id=%s',tuple(vals))
+        finally: con.close()
+    except Exception:
+        pass
+
+
+def _read_cfg_value(path:Path,key:str,default:str=''):
+    try:
+        text=path.read_text(encoding='utf-8',errors='ignore')
+        m=re.search(r'(?im)^\s*'+re.escape(key)+r'\s+"([^"]*)"',text)
+        if m: return m.group(1)
+        m=re.search(r'(?im)^\s*'+re.escape(key)+r'\s+(\S+)',text)
+        return m.group(1) if m else default
+    except Exception:
+        return default
+
+
+def recover_server_config(sid:int):
+    row=db_server_row(sid)
+    if not row: return None
+    path=safe_server_path(sid)
+    scfg=path/'cstrike/server.cfg'
+    hostname=_read_cfg_value(scfg,'hostname',str(row.get('hostname') or row.get('name') or f'CS 1.6 #{sid}'))
+    rcon=_read_cfg_value(scfg,'rcon_password','')
+    svpw=_read_cfg_value(scfg,'sv_password','')
+    c={'id':sid,'name':str(row.get('name') or f'CS 1.6 #{sid}'),'hostname':hostname,
+       'port':int(row.get('port') or 27015),'slots':int(row.get('slots') or 16),
+       'start_map':str(row.get('start_map') or 'de_dust2'),'profile':str(row.get('build_profile') or 'classic'),
+       'public_ip':str(row.get('public_ip') or load_runtime().get('public_ip','')),
+       'rcon_password':rcon,'server_password':svpw,'path':str(path),
+       'ftp_user':str(row.get('ftp_user') or ''),'ftp_password':str(row.get('ftp_password') or ''),
+       'game_mode':str(row.get('game_mode') or 'classic'),'bots_enabled':int(row.get('bots_enabled') or 0),
+       'bots_quota':int(row.get('bots_quota') or 9),'bots_difficulty':int(row.get('bots_difficulty') or 3)}
+    try: save_server(c)
+    except Exception: pass
+    return c
+
+
 def load_server(sid:int):
     p=cfg_path(sid)
     legacy=legacy_cfg_path(sid)
-    source=p if p.exists() else legacy
-    try:
-        c=json.loads(source.read_text(encoding='utf-8'))
-        # Migrate old mutable state out of /etc when the controller is running in a writable context.
-        if source==legacy and not p.exists():
-            try: save_server(c)
-            except Exception: pass
-        return c
-    except Exception as exc: out({'ok':False,'error':f'Server {sid} config unavailable: {exc}'},2)
+    source=p if p.exists() else legacy if legacy.exists() else None
+    if source is not None:
+        try:
+            c=json.loads(source.read_text(encoding='utf-8'))
+            if source==legacy and not p.exists():
+                try: save_server(c)
+                except Exception: pass
+            return c
+        except Exception as exc:
+            recovered=recover_server_config(sid)
+            if recovered is not None: return recovered
+            out({'ok':False,'error':f'Server {sid} config unavailable: {exc}'},2)
+    recovered=recover_server_config(sid)
+    if recovered is not None: return recovered
+    out({'ok':False,'error':f'Server {sid} config unavailable: state JSON and SQL row are missing'},2)
 
 def save_server(c:dict):
     ensure_state_permissions()
@@ -377,6 +469,10 @@ def setup_ftp(c:dict,path:Path,password:str|None=None):
     # Clean old v1.0-v1.5 bind target if it exists.
     old_home=Path('/var/www/hyper-host-ftp')/user/'uploads'
     run(['umount','-lf',str(old_home)],check=False)
+    # ProFTPD virtual users run as www-data. Keep the exact game-server root
+    # traversable and writable by that group while HLDS remains owned by cs16.
+    run(['chown','cs16:www-data',str(path)],check=False)
+    run(['chmod','2775',str(path)],check=False)
     cp=run([ctl,'create-ftp',user,password,'cs16',str(int(c['id']))],check=False,timeout=180)
     if cp.returncode!=0:
         return user,password,(cp.stdout or 'FTP account creation failed').strip()
@@ -414,7 +510,7 @@ def ftp_repair(sid:int):
     require_root(); c=load_server(sid); path=Path(c['path'])
     if not path.is_dir(): raise RuntimeError(f'Server directory missing: {path}')
     user,pw,warning=setup_ftp(c,path,str(c.get('ftp_password') or '') or None)
-    c['ftp_user']=user; c['ftp_password']=pw; save_server(c)
+    c['ftp_user']=user; c['ftp_password']=pw; save_server(c); db_update_ftp(sid,user,pw)
     # Let the FTP daemon notice updated user_conf/auth files before testing.
     time.sleep(.4)
     test=ftp_test(sid)
@@ -793,7 +889,7 @@ def server_reinstall(sid:int):
 def ftp_reset(sid:int):
     require_root(); c=load_server(sid); pw=secrets.token_urlsafe(12)
     user, pw, warning = setup_ftp(c,Path(c['path']),pw)
-    c['ftp_password']=pw; c['ftp_user']=user; save_server(c); time.sleep(.4)
+    c['ftp_password']=pw; c['ftp_user']=user; save_server(c); db_update_ftp(sid,user,pw); time.sleep(.4)
     test=ftp_test(sid) if not warning else {'ok':False,'error':warning}
     return {'ok':bool(test.get('ok')),'ftp_user':user,'ftp_password':pw,'warning':warning,'test':test}
 
@@ -848,12 +944,174 @@ def plugin_upload(sid:int,token:str,plugin_name:str):
     return {'ok':True,'plugin':plugin_name}
 
 
+
+def _copy_tree_contents(src:Path,dst:Path):
+    dst.mkdir(parents=True,exist_ok=True)
+    for item in src.iterdir():
+        target=dst/item.name
+        if item.is_dir(): shutil.copytree(item,target,dirs_exist_ok=True)
+        else: shutil.copy2(item,target)
+
+
+def _append_unique(path:Path,line:str):
+    path.parent.mkdir(parents=True,exist_ok=True)
+    lines=path.read_text(encoding='utf-8',errors='ignore').splitlines() if path.exists() else []
+    norm=line.strip().lower()
+    if not any(x.strip().lower()==norm for x in lines): lines.append(line)
+    path.write_text('\n'.join(lines).rstrip()+'\n',encoding='utf-8')
+
+
+def _set_cfg_cvar(path:Path,key:str,value:str):
+    path.parent.mkdir(parents=True,exist_ok=True)
+    text=path.read_text(encoding='utf-8',errors='ignore') if path.exists() else ''
+    line=f'{key} {value}'
+    pat=re.compile(r'(?im)^\s*'+re.escape(key)+r'\s+.*$')
+    if pat.search(text): text=pat.sub(line,text,count=1)
+    else: text=text.rstrip()+('\n' if text.strip() else '')+line+'\n'
+    path.write_text(text,encoding='utf-8')
+
+
+def install_yapb(sid:int,quota:int=9,difficulty:int=3):
+    require_root(); c=load_server(sid); path=Path(c['path']); cstrike=path/'cstrike'
+    quota=max(0,min(31,int(quota))); difficulty=max(0,min(4,int(difficulty)))
+    with tempfile.TemporaryDirectory(prefix='hhcs16-yapb-') as td:
+        td=Path(td); arc=td/'yapb.tar.xz'; ex=td/'ex'
+        try:
+            download(YAPB_URL,arc); extract_tar(arc,ex)
+        except Exception:
+            arc.unlink(missing_ok=True)
+            download('https://www.geforce.nl/~mb/files/games/yapb-4.4.957-linux.tar.xz',arc); extract_tar(arc,ex)
+        yapb_dirs=list(ex.rglob('addons/yapb'))
+        if not yapb_dirs: raise RuntimeError('YaPB package does not contain addons/yapb')
+        dst=cstrike/'addons/yapb'
+        if dst.exists(): shutil.rmtree(dst)
+        shutil.copytree(yapb_dirs[0],dst)
+    _append_unique(cstrike/'addons/metamod/plugins.ini','linux addons/yapb/bin/yapb.so')
+    ycfg=cstrike/'addons/yapb/conf/yapb.cfg'
+    for k,v in [('yb_quota',str(quota)),('yb_quota_mode','fill'),('yb_difficulty',str(difficulty)),('yb_autovacate','1'),('yb_autovacate_keep_slots','1'),('yb_language','ru'),('yb_radio_mode','2'),('yb_preferred_personality','none'),('yb_ignore_enemies_after_spawn_time','8'),('yb_pickup_custom_items','1')]:
+        _set_cfg_cvar(ycfg,k,v)
+    custom=cstrike/'addons/yapb/conf/custom.cfg'
+    _set_cfg_cvar(custom,'ZMDetectCvar','zp_on')
+    _set_cfg_cvar(custom,'ZMDelayCvar','zp_delay')
+    _set_cfg_cvar(custom,'ZMInfectedTeam','T')
+    normalize_permissions(path)
+    c['bots_enabled']=1; c['bots_quota']=quota; c['bots_difficulty']=difficulty; save_server(c)
+    db_update_mode(sid,str(c.get('game_mode','classic')),1,quota,difficulty)
+    run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
+    return {'ok':True,'id':sid,'bots':'YaPB','quota':quota,'difficulty':difficulty}
+
+
+def configure_yapb(sid:int,quota:int,difficulty:int):
+    require_root(); c=load_server(sid); path=Path(c['path']); ycfg=path/'cstrike/addons/yapb/conf/yapb.cfg'
+    if not ycfg.exists(): return install_yapb(sid,quota,difficulty)
+    quota=max(0,min(31,int(quota))); difficulty=max(0,min(4,int(difficulty)))
+    _set_cfg_cvar(ycfg,'yb_quota',str(quota)); _set_cfg_cvar(ycfg,'yb_quota_mode','fill'); _set_cfg_cvar(ycfg,'yb_difficulty',str(difficulty)); _set_cfg_cvar(ycfg,'yb_autovacate','1'); _set_cfg_cvar(ycfg,'yb_language','ru')
+    normalize_permissions(path); c['bots_enabled']=1; c['bots_quota']=quota; c['bots_difficulty']=difficulty; save_server(c); db_update_mode(sid,str(c.get('game_mode','classic')),1,quota,difficulty)
+    if service_status(sid)=='active':
+        try: query_rcon('127.0.0.1',int(c['port']),str(c.get('rcon_password','')),f'yb_quota {quota}',2.0); query_rcon('127.0.0.1',int(c['port']),str(c.get('rcon_password','')),f'yb_difficulty {difficulty}',2.0)
+        except Exception: pass
+    return {'ok':True,'quota':quota,'difficulty':difficulty}
+
+
+def disable_yapb(sid:int):
+    require_root(); c=load_server(sid); p=Path(c['path'])/'cstrike/addons/metamod/plugins.ini'
+    if p.exists():
+        lines=[]
+        for line in p.read_text(encoding='utf-8',errors='ignore').splitlines():
+            if 'addons/yapb/bin/yapb.so' in line.lower() and not line.lstrip().startswith(';'): line=';'+line
+            lines.append(line)
+        p.write_text('\n'.join(lines).rstrip()+'\n',encoding='utf-8')
+    c['bots_enabled']=0; save_server(c); db_update_mode(sid,str(c.get('game_mode','classic')),0,int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
+    run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
+    return {'ok':True,'bots_enabled':False}
+
+
+def install_zp43(sid:int):
+    require_root(); c=load_server(sid); path=Path(c['path']); cstrike=path/'cstrike'
+    backup=STATE_ROOT/'backups'/f'zp43-{sid}-{time.strftime("%Y%m%d-%H%M%S")}'
+    backup.mkdir(parents=True,exist_ok=True)
+    for rel in ['addons/amxmodx/configs/plugins.ini','addons/amxmodx/configs/plugins-zplague.ini','addons/amxmodx/configs/zombieplague.cfg']:
+        src=cstrike/rel
+        if src.exists():
+            dst=backup/rel; dst.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,dst)
+    with tempfile.TemporaryDirectory(prefix='hhcs16-zp43-') as td:
+        td=Path(td)
+        for url,name in [(ZP43_PLUGIN_URL,'plugin.zip'),(ZP43_RESOURCES_URL,'resources.zip')]:
+            arc=td/name; ex=td/(name+'.d'); download(url,arc)
+            try: extract_zip(arc,ex)
+            except Exception:
+                direct='https://downloads.sourceforge.net/project/zm-strike/'+('zp_plugin_43.zip' if name=='plugin.zip' else 'zp_resources.zip')
+                download(direct,arc); extract_zip(arc,ex)
+            roots=[ex/'cstrike']+list(ex.rglob('cstrike'))+[x.parent for x in ex.rglob('addons')]+[ex]
+            chosen=next((r for r in roots if r.exists() and ((r/'addons').exists() or (r/'models').exists() or (r/'sound').exists() or (r/'sprites').exists())),None)
+            if chosen is None: raise RuntimeError(f'Zombie Plague archive layout is not recognized: {name}')
+            _copy_tree_contents(chosen,cstrike)
+    # ZP 4.3 can be toggled by zp_on/zp_toggle; keep the plugin set enabled.
+    zplist=cstrike/'addons/amxmodx/configs/plugins-zplague.ini'
+    if not zplist.exists():
+        main=cstrike/'addons/amxmodx/plugins/zombie_plague40.amxx'
+        if main.exists(): zplist.write_text('zombie_plague40.amxx\nzp_zclasses40.amxx\n',encoding='utf-8')
+    if zplist.exists():
+        # AMXX automatically loads plugins-*.ini. Make sure the file is not disabled/renamed.
+        pass
+    c['game_mode']='zp43'; save_server(c); db_update_mode(sid,'zp43',int(c.get('bots_enabled',0)),int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
+    normalize_permissions(path); run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
+    return {'ok':True,'mode':'zp43','backup':str(backup)}
+
+
+def set_game_mode(sid:int,mode:str):
+    require_root(); c=load_server(sid); path=Path(c['path']); cstrike=path/'cstrike'
+    if mode not in {'classic','zp43'}: raise RuntimeError('Unsupported game mode')
+    if mode=='zp43':
+        zplist=cstrike/'addons/amxmodx/configs/plugins-zplague.ini'
+        disabled=cstrike/'addons/amxmodx/configs/disabled-zplague.ini'
+        if not zplist.exists() and disabled.exists(): disabled.rename(zplist)
+        if not zplist.exists() and not (cstrike/'addons/amxmodx/plugins/zombie_plague40.amxx').exists(): return install_zp43(sid)
+    else:
+        zplist=cstrike/'addons/amxmodx/configs/plugins-zplague.ini'
+        disabled=cstrike/'addons/amxmodx/configs/disabled-zplague.ini'
+        if zplist.exists():
+            if disabled.exists(): disabled.unlink()
+            zplist.rename(disabled)
+    c['game_mode']=mode; save_server(c); db_update_mode(sid,mode,int(c.get('bots_enabled',0)),int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
+    run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
+    return {'ok':True,'mode':mode}
+
+
+def mods_status(sid:int):
+    c=load_server(sid); path=Path(c['path']); cstrike=path/'cstrike'
+    return {'ok':True,'game_mode':str(c.get('game_mode','zp43' if (cstrike/'addons/amxmodx/configs/plugins-zplague.ini').exists() else 'classic')),
+            'zp43_installed':(cstrike/'addons/amxmodx/plugins/zombie_plague40.amxx').exists(),
+            'bots_installed':(cstrike/'addons/yapb/bin/yapb.so').exists(),
+            'bots_enabled':bool(c.get('bots_enabled',0)), 'bots_quota':int(c.get('bots_quota',9)), 'bots_difficulty':int(c.get('bots_difficulty',3))}
+
+
+def nat_upnp(sid:int):
+    require_root(); c=load_server(sid); rt=load_runtime(); lan=str(rt.get('lan_ip') or '')
+    if not lan: raise RuntimeError('LAN IP is not configured')
+    port=int(c['port']); upnpc=shutil.which('upnpc')
+    if not upnpc: raise RuntimeError('miniupnpc/upnpc is not installed')
+    cp=run([upnpc,'-e',f'HYPER-CS16-{sid}','-a',lan,str(port),str(port),'UDP'],check=False,timeout=30)
+    listing=run([upnpc,'-l'],check=False,timeout=30).stdout or ''
+    ok=cp.returncode==0 and (f'{port}->' in listing or str(port) in listing)
+    return {'ok':ok,'port':port,'lan_ip':lan,'output':(cp.stdout or '')[-2000:],'listing':listing[-4000:],
+            'note':'UPnP must be enabled on the router. Manual rule: UDP external port = internal port -> LAN IP.'}
+
+
 def server_delete(sid:int):
-    require_root(); c=load_server(sid); path=Path(c['path']); user=c.get('ftp_user','')
+    require_root()
+    # Deletion must work even when an old patch lost the JSON state file.
+    if cfg_path(sid).exists() or legacy_cfg_path(sid).exists():
+        c=load_server(sid)
+    else:
+        row=db_server_row(sid) or {}
+        c={'id':sid,'path':str(safe_server_path(sid)),'ftp_user':str(row.get('ftp_user') or f'cs16_{sid}')}
+    path=Path(str(c.get('path') or safe_server_path(sid))).resolve(); safe=safe_server_path(sid)
+    if path!=safe: raise RuntimeError(f'Unsafe server delete path: {path}')
+    user=str(c.get('ftp_user') or f'cs16_{sid}')
     run(['systemctl','disable','--now',f'hyper-cs16@{sid}.service'],check=False)
-    if user:
-        home=Path('/var/www/hyper-host-ftp')/user/'uploads'; run(['umount','-lf',str(home)],check=False)
-        ctl=shutil.which('hyper-host-ctl') or '/usr/local/sbin/hyper-host-ctl'; run([ctl,'delete-ftp',user],check=False,timeout=120)
+    ctl=shutil.which('hyper-host-ctl') or '/usr/local/sbin/hyper-host-ctl'
+    if Path(ctl).exists(): run([ctl,'delete-ftp',user],check=False,timeout=120)
     if path.exists(): shutil.rmtree(path)
     for p in (cfg_path(sid),legacy_cfg_path(sid)):
         try: p.unlink()
@@ -889,7 +1147,7 @@ def main():
     p=argparse.ArgumentParser(prog='hyper-cs16-ctl'); sp=p.add_subparsers(dest='cmd',required=True)
     sp.add_parser('base-install')
     c=sp.add_parser('server-create'); c.add_argument('id',type=int); c.add_argument('--name',required=True); c.add_argument('--port',type=int,required=True); c.add_argument('--slots',type=int,default=16); c.add_argument('--map',default='de_dust2'); c.add_argument('--hostname',required=True); c.add_argument('--password',default=''); c.add_argument('--profile',choices=['classic','rehlds'],default='classic')
-    for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','ftp-repair','ftp-test','network','delete','repair-runtime']:
+    for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','ftp-repair','ftp-test','network','delete','repair-runtime','mods-status','nat-upnp']:
         q=sp.add_parser(a); q.add_argument('id',type=int)
     q=sp.add_parser('rcon'); q.add_argument('id',type=int); q.add_argument('command')
     q=sp.add_parser('change-map'); q.add_argument('id',type=int); q.add_argument('map')
@@ -902,6 +1160,11 @@ def main():
     q=sp.add_parser('logs'); q.add_argument('id',type=int); q.add_argument('--lines',type=int,default=160)
     q=sp.add_parser('map-upload'); q.add_argument('id',type=int); q.add_argument('token'); q.add_argument('map_name')
     q=sp.add_parser('plugin-upload'); q.add_argument('id',type=int); q.add_argument('token'); q.add_argument('plugin_name')
+    q=sp.add_parser('bots-install'); q.add_argument('id',type=int); q.add_argument('--quota',type=int,default=9); q.add_argument('--difficulty',type=int,default=3)
+    q=sp.add_parser('bots-config'); q.add_argument('id',type=int); q.add_argument('--quota',type=int,required=True); q.add_argument('--difficulty',type=int,required=True)
+    q=sp.add_parser('bots-disable'); q.add_argument('id',type=int)
+    q=sp.add_parser('zp43-install'); q.add_argument('id',type=int)
+    q=sp.add_parser('mode-set'); q.add_argument('id',type=int); q.add_argument('mode',choices=['classic','zp43'])
     sp.add_parser('ftp-restore')
     sp.add_parser('doctor')
     args=p.parse_args()
@@ -933,6 +1196,13 @@ def main():
         elif args.cmd=='ftp-repair': result=ftp_repair(args.id)
         elif args.cmd=='ftp-test': result=ftp_test(args.id)
         elif args.cmd=='network': result=network_info(args.id)
+        elif args.cmd=='mods-status': result=mods_status(args.id)
+        elif args.cmd=='nat-upnp': result=nat_upnp(args.id)
+        elif args.cmd=='bots-install': result=install_yapb(args.id,args.quota,args.difficulty)
+        elif args.cmd=='bots-config': result=configure_yapb(args.id,args.quota,args.difficulty)
+        elif args.cmd=='bots-disable': result=disable_yapb(args.id)
+        elif args.cmd=='zp43-install': result=install_zp43(args.id)
+        elif args.cmd=='mode-set': result=set_game_mode(args.id,args.mode)
         elif args.cmd=='map-upload': result=map_upload(args.id,args.token,args.map_name)
         elif args.cmd=='plugin-upload': result=plugin_upload(args.id,args.token,args.plugin_name)
         elif args.cmd=='repair-runtime': result=repair_server_runtime(args.id)

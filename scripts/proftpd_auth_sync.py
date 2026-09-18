@@ -40,15 +40,32 @@ def local_root(conf_dir: Path, ftp_dir: Path, username: str) -> Path:
         pass
     if candidate is None:
         candidate = ftp_dir / username
-    candidate.mkdir(parents=True, exist_ok=True)
-    # Не разворачиваем bind-mount/symlink через resolve(): FTP-root должен
-    # оставаться путём внутри /var/www/hyper-host-ftp для безопасного chroot.
+
+    # Ordinary HYPER-HOST FTP accounts stay below FTP_DIR. CS 1.6 accounts are
+    # the only exception: cs16_<id> (and its hhftp_ alias) may chroot directly
+    # into exactly /srv/hyper-cs16/servers/<id>. This avoids /etc/fstab and bind
+    # mounts while still preventing an arbitrary local_root from becoming a
+    # ProFTPD chroot.
     absolute = Path(os.path.abspath(candidate))
     allowed = Path(os.path.abspath(ftp_dir))
     try:
         absolute.relative_to(allowed)
-    except ValueError as exc:
-        raise SystemExit(f"unsafe FTP home for {username}: {absolute}") from exc
+        absolute.mkdir(parents=True, exist_ok=True)
+        return absolute
+    except ValueError:
+        pass
+
+    match = re.fullmatch(r"(?:hhftp_)?cs16_(\d+)", username)
+    if not match:
+        raise SystemExit(f"unsafe FTP home for {username}: {absolute}")
+    expected = Path(f"/srv/hyper-cs16/servers/{int(match.group(1))}")
+    if absolute != expected:
+        raise SystemExit(f"unsafe CS16 FTP home for {username}: {absolute} (expected {expected})")
+    if not absolute.is_dir():
+        raise SystemExit(f"CS16 FTP home does not exist for {username}: {absolute}")
+    # Do not permit a symlinked server root to escape the dedicated game tree.
+    if absolute.is_symlink() or Path(os.path.realpath(absolute)) != absolute:
+        raise SystemExit(f"unsafe symlinked CS16 FTP home for {username}: {absolute}")
     return absolute
 
 

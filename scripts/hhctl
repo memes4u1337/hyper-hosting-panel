@@ -1958,6 +1958,8 @@ cmd_create_ftp() {
 
   local_root="$(ftp_prepare_scope "$username" "$mode" "$target" "$home")"
   for u in "${variants[@]}"; do write_ftp_user_conf "$u" "$local_root"; done
+  # Rebuild ProFTPD AuthUserFile after the final per-user local_root exists.
+  ftp_auth_rebuild_db || err "Не удалось пересобрать ProFTPD авторизацию для $username"
 
   ensure_vsftpd_external_access
   assert_hyper_ftp_ready
@@ -2017,6 +2019,8 @@ cmd_ftp_password() {
 
   local_root="$(ftp_prepare_scope "$username" "$mode" "$target" "$home")"
   for u in "${variants[@]}"; do write_ftp_user_conf "$u" "$local_root"; done
+  # Rebuild ProFTPD AuthUserFile after the final per-user local_root exists.
+  ftp_auth_rebuild_db || err "Не удалось пересобрать ProFTPD авторизацию для $username"
   ensure_vsftpd_external_access
   assert_hyper_ftp_ready
   log "FTP password/login repaired: $username / root=$local_root / scope=$(ftp_scope_label "$mode" "$target") / aliases: $(printf '%s ' "${variants[@]}" | sed 's/[[:space:]]*$//')"
