@@ -95,27 +95,21 @@ for cfg in /var/lib/hyper-cs16/servers/*.json; do
   [[ -f "$cfg" ]] || continue
   sid="$(basename "$cfg" .json)"
   [[ "$sid" =~ ^[0-9]+$ ]] || continue
-  if ! runuser -u cs16 -- test -r "$cfg"; then
-    echo "[CS16 FIX][ERROR] cs16 still cannot read $cfg" >&2; failed=1; continue
+  if ! runuser -u cs16 -g cs16 -- test -r "$cfg"; then
+    echo "[CS16 FIX][ERROR] cs16 still cannot read $cfg" >&2
+    failed=1
+    continue
   fi
-  systemctl enable "hyper-cs16@${sid}.service" >/dev/null 2>&1 || true
-  systemctl restart "hyper-cs16@${sid}.service" >/dev/null 2>&1 || true
-  sleep 2
-  if systemctl is-active --quiet "hyper-cs16@${sid}.service"; then
-    port="$(python3 - "$cfg" <<'PYPORT'
-import json,sys
-try: print(int(json.load(open(sys.argv[1]))['port']))
-except Exception: print('')
-PYPORT
-)"
-    if [[ -n "$port" ]] && ss -lunH | awk '{print $5}' | grep -Eq "(^|:)${port}$"; then
-      echo "[CS16 FIX] server #$sid is ACTIVE and listening on UDP $port"
-    else
-      echo "[CS16 FIX][WARNING] server #$sid is active but UDP socket is not visible yet" >&2
-    fi
+  echo "[CS16 FIX] Repairing and health-checking server #$sid..."
+  set +e
+  repair_out="$(/usr/local/sbin/hyper-cs16-ctl repair-runtime "$sid" 2>&1)"
+  repair_rc=$?
+  set -e
+  if ((repair_rc==0)); then
+    echo "[CS16 FIX] server #$sid: $repair_out"
   else
-    echo "[CS16 FIX][ERROR] server #$sid failed to start" >&2
-    journalctl -u "hyper-cs16@${sid}.service" -n 60 --no-pager || true
+    echo "[CS16 FIX][ERROR] server #$sid repair failed:" >&2
+    echo "$repair_out" >&2
     failed=1
   fi
 done

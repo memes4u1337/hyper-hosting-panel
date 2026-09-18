@@ -58,14 +58,14 @@ log "Installing OS dependencies..."
 export DEBIAN_FRONTEND=noninteractive
 dpkg --add-architecture i386 >/dev/null 2>&1 || true
 apt-get update --allow-releaseinfo-change
-apt-get install -y ca-certificates curl unzip rsync sudo openssl sqlite3 python3 python3-pymysql php-mysql lib32gcc-s1 libc6:i386 libstdc++6:i386 libgcc-s1:i386 >/dev/null
+apt-get install -y ca-certificates curl unzip rsync sudo openssl sqlite3 python3 python3-pymysql php-mysql lib32gcc-s1 libc6:i386 libstdc++6:i386 libgcc-s1:i386 lib32z1 >/dev/null
 
 log "Creating service user and directories..."
 getent group cs16 >/dev/null 2>&1 || groupadd --system cs16
 if ! id cs16 >/dev/null 2>&1; then
   useradd --system --gid cs16 --create-home --home-dir /srv/hyper-cs16 --shell /usr/sbin/nologin cs16
 fi
-usermod -aG www-data cs16 >/dev/null 2>&1 || true
+usermod -g cs16 -aG www-data cs16 >/dev/null 2>&1 || true
 mkdir -p "$BASE"/{lib,backups} "$ETC" "$SERVERS" "$STEAMCMD"
 # Mutable state must be traversable/readable by the cs16 service user.
 # Explicitly repair the parent too; older builds could leave /var/lib/hyper-cs16 root-only.
@@ -154,7 +154,7 @@ UHEX="$(hex "$ADMIN_USER")"; HHEX="$(hex "$ADMIN_HASH")"
 mysql --protocol=socket -uroot "$DB_NAME" <<SQL
 INSERT INTO users(username,password_hash,role) VALUES(CONVERT(0x$UHEX USING utf8mb4),CONVERT(0x$HHEX USING utf8mb4),'admin')
 ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash),role='admin';
-INSERT INTO settings(setting_key,setting_value) VALUES('panel_version','1.3.0') ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value);
+INSERT INTO settings(setting_key,setting_value) VALUES('panel_version','1.5.0') ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value);
 SQL
 
 log "Writing runtime configuration..."

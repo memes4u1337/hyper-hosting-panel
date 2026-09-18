@@ -25,10 +25,12 @@ SAFE_NAME=re.compile(r'^[A-Za-z0-9А-Яа-яЁё ._\-\[\]()#]{1,96}$')
 REHLDS_VERSION='3.15.0.896'
 REGAMEDLL_VERSION='5.30.0.814'
 METAMOD_VERSION='1.3.0.149'
+METAMOD_AM_VERSION='1.21.1-am'
 AMXX_BUILD='5303'
 AMXX_BASE=f'https://www.amxmodx.org/amxxdrop/1.9/amxmodx-1.9.0-git{AMXX_BUILD}-base-linux.tar.gz'
 AMXX_CSTRIKE=f'https://www.amxmodx.org/amxxdrop/1.9/amxmodx-1.9.0-git{AMXX_BUILD}-cstrike-linux.tar.gz'
 METAMOD_URL=f'https://github.com/rehlds/Metamod-R/releases/download/{METAMOD_VERSION}/metamod-bin-{METAMOD_VERSION}.zip'
+METAMOD_AM_URL=f'https://www.amxmodx.org/release/metamod-{METAMOD_AM_VERSION}.zip'
 REHLDS_URL=f'https://github.com/rehlds/ReHLDS/releases/download/{REHLDS_VERSION}/rehlds-bin-{REHLDS_VERSION}.zip'
 REGAMEDLL_URL=f'https://github.com/rehlds/ReGameDLL_CS/releases/download/{REGAMEDLL_VERSION}/regamedll-bin-{REGAMEDLL_VERSION}.zip'
 
@@ -172,28 +174,62 @@ def extract_tar(path:Path,dst:Path):
             t.extract(m,dst,set_attrs=True)
 
 
-def install_metamod_amxx(path:Path):
+def _set_liblist_metamod(cstrike:Path, relpath:str):
+    liblist=cstrike/'liblist.gam'
+    if not liblist.exists():
+        raise RuntimeError(f'liblist.gam is missing: {liblist}')
+    text=liblist.read_text(encoding='latin1',errors='ignore')
+    line=f'gamedll_linux "{relpath}"'
+    if re.search(r'(?im)^\s*gamedll_linux\s+"[^"]+"', text):
+        text=re.sub(r'(?im)^\s*gamedll_linux\s+"[^"]+"', line, text, count=1)
+    else:
+        text=text.rstrip()+f'\n{line}\n'
+    liblist.write_text(text,encoding='latin1')
+
+
+def install_metamod_classic(path:Path):
+    """Install AlliedModders Metamod for original SteamCMD HLDS.
+
+    Metamod-R is intended primarily for ReHLDS and has caused startup crashes on
+    some stock 8684 HLDS builds. The official 1.21.1-am binary is the compatible
+    choice for the classic profile.
+    """
     cstrike=path/'cstrike'; cstrike.mkdir(parents=True,exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='hhcs16-mods-') as td:
-        td=Path(td)
-        mm=td/'metamod.zip'; download(METAMOD_URL,mm); extract_zip(mm,td/'mm')
-        src=td/'mm'/'addons'
-        if not src.exists():
+    with tempfile.TemporaryDirectory(prefix='hhcs16-metamod-am-') as td:
+        td=Path(td); z=td/'metamod.zip'; download(METAMOD_AM_URL,z); extract_zip(z,td/'mm')
+        candidates=list((td/'mm').rglob('metamod.so'))
+        if not candidates:
             candidates=list((td/'mm').rglob('metamod_i386.so'))
-            if not candidates: raise RuntimeError('Metamod binary not found in archive')
-            target=cstrike/'addons/metamod'; target.mkdir(parents=True,exist_ok=True)
-            shutil.copy2(candidates[0],target/'metamod_i386.so')
-        else:
-            shutil.copytree(src,cstrike/'addons',dirs_exist_ok=True)
+        if not candidates: raise RuntimeError('Metamod 1.21.1-am Linux binary not found in archive')
+        target=cstrike/'addons/metamod/dlls'; target.mkdir(parents=True,exist_ok=True)
+        # Remove stale Metamod-R locations so liblist cannot accidentally load them.
+        for stale in [cstrike/'addons/metamod/metamod_i386.so', target/'metamod_i386.so', target/'metamod.so']:
+            try: stale.unlink()
+            except FileNotFoundError: pass
+        shutil.copy2(candidates[0],target/'metamod.so')
+    _set_liblist_metamod(cstrike,'addons/metamod/dlls/metamod.so')
+
+
+def install_metamod_rehlds(path:Path):
+    cstrike=path/'cstrike'; cstrike.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='hhcs16-metamod-r-') as td:
+        td=Path(td); z=td/'metamod-r.zip'; download(METAMOD_URL,z); extract_zip(z,td/'mm')
+        candidates=list((td/'mm').rglob('metamod_i386.so')) + list((td/'mm').rglob('metamod.so'))
+        if not candidates: raise RuntimeError('Metamod-R Linux32 binary not found in archive')
+        target=cstrike/'addons/metamod/dlls'; target.mkdir(parents=True,exist_ok=True)
+        for stale in [cstrike/'addons/metamod/metamod_i386.so', target/'metamod_i386.so', target/'metamod.so']:
+            try: stale.unlink()
+            except FileNotFoundError: pass
+        shutil.copy2(candidates[0],target/'metamod.so')
+    _set_liblist_metamod(cstrike,'addons/metamod/dlls/metamod.so')
+
+
+def install_amxx(path:Path):
+    cstrike=path/'cstrike'; cstrike.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='hhcs16-amxx-') as td:
+        td=Path(td)
         b=td/'amxx-base.tgz'; download(AMXX_BASE,b); extract_tar(b,cstrike)
         cs=td/'amxx-cstrike.tgz'; download(AMXX_CSTRIKE,cs); extract_tar(cs,cstrike)
-    liblist=cstrike/'liblist.gam'
-    if liblist.exists():
-        text=liblist.read_text(encoding='latin1',errors='ignore')
-        if 'addons/metamod/metamod_i386.so' not in text:
-            text=re.sub(r'(?im)^\s*gamedll_linux\s+"[^"]+"', 'gamedll_linux "addons/metamod/metamod_i386.so"', text)
-            if 'gamedll_linux' not in text: text+='\ngamedll_linux "addons/metamod/metamod_i386.so"\n'
-            liblist.write_text(text,encoding='latin1')
     mp=cstrike/'addons/metamod/plugins.ini'; mp.parent.mkdir(parents=True,exist_ok=True)
     existing=mp.read_text(encoding='utf-8',errors='ignore') if mp.exists() else ''
     line='linux addons/amxmodx/dlls/amxmodx_mm_i386.so'
@@ -202,6 +238,13 @@ def install_metamod_amxx(path:Path):
     if plugins.exists() and '; HYPER-HOST' not in plugins.read_text(encoding='utf-8',errors='ignore'):
         plugins.write_text(plugins.read_text(encoding='utf-8',errors='ignore')+'\n; HYPER-HOST: upload .amxx files to addons/amxmodx/plugins and enable them here.\n',encoding='utf-8')
 
+
+def install_metamod_amxx(path:Path, profile:str='classic'):
+    # AMXX files are safe to refresh on the immutable base. For existing servers
+    # server_repair() only swaps Metamod and preserves user AMXX configs/plugins.
+    if profile=='rehlds': install_metamod_rehlds(path)
+    else: install_metamod_classic(path)
+    install_amxx(path)
 
 def install_rehlds(path:Path):
     with tempfile.TemporaryDirectory(prefix='hhcs16-rehlds-') as td:
@@ -217,15 +260,44 @@ def install_rehlds(path:Path):
             (path/'cstrike/dlls').mkdir(parents=True,exist_ok=True); shutil.copy2(candidates[0],path/'cstrike/dlls/cs.so')
 
 
+def ensure_steam_runtime(steam:Path):
+    """Repair the 32-bit Steam runtime expected by GoldSrc.
+
+    This must run even when the HLDS base itself is cached; older installers
+    returned early and never created ~/.steam/sdk32/steamclient.so.
+    """
+    sdk=Path('/srv/hyper-cs16/.steam/sdk32'); sdk.mkdir(parents=True,exist_ok=True)
+    candidates=[steam.parent/'linux32/steamclient.so', Path('/opt/steamcmd/linux32/steamclient.so')]
+    src=next((x for x in candidates if x.is_file()),None)
+    if src is None:
+        # A lightweight SteamCMD invocation normally materializes linux32/steamclient.so.
+        run_as_cs16([str(steam),'+quit'],check=False,timeout=180)
+        src=next((x for x in candidates if x.is_file()),None)
+    if src is None:
+        raise RuntimeError('SteamCMD steamclient.so is missing; reinstall /opt/steamcmd')
+    dst=sdk/'steamclient.so'; shutil.copy2(src,dst)
+    shutil.chown(Path('/srv/hyper-cs16/.steam'),user='cs16',group='cs16')
+    shutil.chown(sdk,user='cs16',group='cs16'); shutil.chown(dst,user='cs16',group='cs16')
+    os.chmod(Path('/srv/hyper-cs16/.steam'),0o755); os.chmod(sdk,0o755); os.chmod(dst,0o644)
+    return dst
+
+
 def ensure_base(profile='classic'):
     require_root(); rt=load_runtime(); base=Path(rt.get('base_game_dir','/srv/hyper-cs16/base-hlds'))
     marker=base/'.hyper-cs16-ready'
     required=[base/'hlds_run',base/'hlds_linux',base/'cstrike/liblist.gam',base/'cstrike/dlls/cs.so',base/'cstrike/maps/de_dust2.bsp']
-    if marker.exists() and all(x.exists() for x in required): return {'ok':True,'path':str(base),'cached':True}
     base.parent.mkdir(parents=True,exist_ok=True); base.mkdir(parents=True,exist_ok=True)
     run(['chown','cs16:www-data',str(base)],check=False); os.chmod(base,0o2775)
     steam=Path(rt.get('steamcmd','/opt/steamcmd/steamcmd.sh'))
     if not steam.exists(): raise RuntimeError(f'SteamCMD missing: {steam}')
+    steam_runtime=ensure_steam_runtime(steam)
+    if marker.exists() and all(x.exists() for x in required):
+        # Repair the base add-on loader too; older builds installed Metamod-R into stock HLDS.
+        install_metamod_classic(base)
+        banned=base/'cstrike/banned.cfg'; listip=base/'cstrike/listip.cfg'
+        banned.touch(exist_ok=True); listip.touch(exist_ok=True)
+        normalize_permissions(base)
+        return {'ok':True,'path':str(base),'cached':True,'steamclient':str(steam_runtime)}
     log_dir=APP_ROOT/'logs'; log_dir.mkdir(parents=True,exist_ok=True)
     log_file=log_dir/'steamcmd-base.log'
     cmd=[str(steam),'+force_install_dir',str(base),'+login','anonymous','+app_set_config','90','mod','cstrike','+app_update','90','-beta','steam_legacy','validate','+quit']
@@ -249,14 +321,10 @@ def ensure_base(profile='classic'):
         missing=', '.join(str(x.relative_to(base)) for x in required if not x.exists())
         tail=(attempts[-1] if attempts else '')[-3000:]
         raise RuntimeError(f'HLDS installation incomplete; missing: {missing}. SteamCMD log: {log_file}. Last output: {tail}')
-    # Steam networking library expected by old GoldSrc dedicated servers.
-    steamclient=steam.parent/'linux32/steamclient.so'
-    if steamclient.exists():
-        sdk=Path('/srv/hyper-cs16/.steam/sdk32'); sdk.mkdir(parents=True,exist_ok=True)
-        shutil.copy2(steamclient,sdk/'steamclient.so')
-        shutil.chown(sdk/'steamclient.so',user='cs16',group='cs16')
-    install_metamod_amxx(base)
-    marker.write_text(f'classic + Metamod-R {METAMOD_VERSION} + AMXX 1.9 build {AMXX_BUILD}\n',encoding='utf-8')
+    install_metamod_amxx(base,'classic')
+    (base/'cstrike/banned.cfg').touch(exist_ok=True)
+    (base/'cstrike/listip.cfg').touch(exist_ok=True)
+    marker.write_text(f'classic + Metamod {METAMOD_AM_VERSION} + AMXX 1.9 build {AMXX_BUILD}\n',encoding='utf-8')
     shutil.chown(base,user='cs16',group='www-data')
     for root,dirs,files in os.walk(base):
         for d in dirs:
@@ -345,6 +413,62 @@ def ftp_restore():
     return {'ok':not warnings,'restored':restored,'warnings':warnings}
 
 
+def udp_listening(port:int)->bool:
+    cp=run(['ss','-lunH'],check=False)
+    needle=f':{int(port)}'
+    for line in (cp.stdout or '').splitlines():
+        parts=line.split()
+        # ss output varies slightly between iproute2 versions; find the local endpoint token.
+        if any(tok.endswith(needle) or tok.endswith(needle+'\n') for tok in parts):
+            return True
+    return False
+
+
+def wait_server_ready(c:dict, timeout:float=25.0):
+    deadline=time.time()+timeout; last=''
+    while time.time()<deadline:
+        if service_status(int(c['id']))!='active':
+            last='systemd service is not active'; time.sleep(.5); continue
+        if not udp_listening(int(c['port'])):
+            last=f'UDP {c["port"]} is not listening'; time.sleep(.5); continue
+        try:
+            info=query_info('127.0.0.1',int(c['port']),1.0)
+            return True,info
+        except Exception as exc:
+            last=f'A2S_INFO failed: {exc}'; time.sleep(.5)
+    return False,last or 'server readiness timeout'
+
+
+def repair_server_runtime(sid:int):
+    require_root(); c=load_server(sid); path=Path(c['path'])
+    rt=load_runtime(); steam=Path(rt.get('steamcmd','/opt/steamcmd/steamcmd.sh')); ensure_steam_runtime(steam)
+    if not path.is_dir(): raise RuntimeError(f'Server directory missing: {path}')
+    profile=str(c.get('profile','classic'))
+    if profile=='rehlds':
+        install_metamod_rehlds(path)
+    else:
+        install_metamod_classic(path)
+    # Preserve existing AMXX configs/plugins, only ensure the loader entry exists.
+    mp=path/'cstrike/addons/metamod/plugins.ini'; mp.parent.mkdir(parents=True,exist_ok=True)
+    existing=mp.read_text(encoding='utf-8',errors='ignore') if mp.exists() else ''
+    line='linux addons/amxmodx/dlls/amxmodx_mm_i386.so'
+    if line not in existing and (path/'cstrike/addons/amxmodx/dlls/amxmodx_mm_i386.so').exists():
+        mp.write_text((existing.rstrip()+'\n'+line+'\n').lstrip(),encoding='utf-8')
+    (path/'cstrike/banned.cfg').touch(exist_ok=True); (path/'cstrike/listip.cfg').touch(exist_ok=True)
+    normalize_permissions(path)
+    run(['systemctl','daemon-reload'],check=False)
+    run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
+    ok,detail=wait_server_ready(c,30.0)
+    if not ok:
+        run(['systemctl','stop',f'hyper-cs16@{sid}.service'],check=False)
+        journal=run(['journalctl','-u',f'hyper-cs16@{sid}.service','-n','120','--no-pager','-o','cat'],check=False).stdout or ''
+        debug=''
+        for dp in [path/'debug.log', path/'cstrike/debug.log']:
+            if dp.is_file(): debug += f'\n--- {dp} ---\n'+dp.read_text(encoding='latin1',errors='replace')[-8000:]
+        raise RuntimeError(f'HLDS health check failed: {detail}.\n{journal[-8000:]}{debug}')
+    return {'ok':True,'id':sid,'port':int(c['port']),'query':detail}
+
+
 def server_create(args):
     require_root()
     if not (1<=args.slots<=32): raise RuntimeError('Slots must be 1..32 (GoldSrc protocol limit)')
@@ -361,7 +485,9 @@ def server_create(args):
     run(['rsync','-a','--delete',str(base)+'/',str(path)+'/'],timeout=600)
     if not (path/'cstrike/maps'/(args.map+'.bsp')).is_file():
         shutil.rmtree(path,ignore_errors=True); raise RuntimeError(f'Start map is not installed in base HLDS: {args.map}')
-    if args.profile=='rehlds': install_rehlds(path)
+    if args.profile=='rehlds':
+        install_rehlds(path)
+        install_metamod_rehlds(path)
     rcon=secrets.token_urlsafe(18)
     c={'id':args.id,'name':args.name,'hostname':args.hostname,'port':args.port,'slots':args.slots,'start_map':args.map,
        'profile':args.profile,'public_ip':rt.get('public_ip',''),'rcon_password':rcon,'server_password':args.password or '',
@@ -372,11 +498,14 @@ def server_create(args):
     run(['systemctl','daemon-reload'],check=False)
     run(['systemctl','enable',f'hyper-cs16@{args.id}.service'],check=False)
     cp=run(['systemctl','restart',f'hyper-cs16@{args.id}.service'],check=False)
-    time.sleep(2)
-    active=service_status(args.id)
-    if active!='active':
-        journal=run(['journalctl','-u',f'hyper-cs16@{args.id}.service','-n','80','--no-pager'],check=False).stdout or ''
-        raise RuntimeError('HLDS failed to start. '+journal[-5000:])
+    ok,detail=wait_server_ready(c,30.0)
+    if not ok:
+        run(['systemctl','stop',f'hyper-cs16@{args.id}.service'],check=False)
+        journal=run(['journalctl','-u',f'hyper-cs16@{args.id}.service','-n','120','--no-pager','-o','cat'],check=False).stdout or ''
+        debug=''
+        for dp in [path/'debug.log',path/'cstrike/debug.log']:
+            if dp.is_file(): debug += '\n--- '+str(dp)+' ---\n'+dp.read_text(encoding='latin1',errors='replace')[-8000:]
+        raise RuntimeError(f'HLDS failed health check: {detail}. '+journal[-7000:]+debug)
     user,pw,ftp_warning=setup_ftp(c,path)
     save_server(c)
     return {'ok':True,'id':args.id,'path':str(path),'rcon_password':rcon,'ftp_user':user,'ftp_password':pw,'ftp_warning':ftp_warning,'service':'active'}
@@ -697,7 +826,7 @@ def main():
     p=argparse.ArgumentParser(prog='hyper-cs16-ctl'); sp=p.add_subparsers(dest='cmd',required=True)
     sp.add_parser('base-install')
     c=sp.add_parser('server-create'); c.add_argument('id',type=int); c.add_argument('--name',required=True); c.add_argument('--port',type=int,required=True); c.add_argument('--slots',type=int,default=16); c.add_argument('--map',default='de_dust2'); c.add_argument('--hostname',required=True); c.add_argument('--password',default=''); c.add_argument('--profile',choices=['classic','rehlds'],default='classic')
-    for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','delete']:
+    for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','delete','repair-runtime']:
         q=sp.add_parser(a); q.add_argument('id',type=int)
     q=sp.add_parser('rcon'); q.add_argument('id',type=int); q.add_argument('command')
     q=sp.add_parser('change-map'); q.add_argument('id',type=int); q.add_argument('map')
@@ -740,6 +869,7 @@ def main():
         elif args.cmd=='ftp-reset': result=ftp_reset(args.id)
         elif args.cmd=='map-upload': result=map_upload(args.id,args.token,args.map_name)
         elif args.cmd=='plugin-upload': result=plugin_upload(args.id,args.token,args.plugin_name)
+        elif args.cmd=='repair-runtime': result=repair_server_runtime(args.id)
         elif args.cmd=='delete': result=server_delete(args.id)
         elif args.cmd=='ftp-restore': result=ftp_restore()
         elif args.cmd=='doctor': result=doctor()

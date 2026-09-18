@@ -8,6 +8,10 @@ Type=simple
 User=cs16
 Group=cs16
 SupplementaryGroups=www-data
+Environment=HOME=/srv/hyper-cs16
+Environment=USER=cs16
+Environment=LOGNAME=cs16
+Environment=LC_ALL=C
 WorkingDirectory=/srv/hyper-cs16/servers/%i
 ExecStart=/usr/local/sbin/hyper-cs16-run %i
 Restart=on-failure
