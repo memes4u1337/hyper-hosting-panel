@@ -1098,6 +1098,80 @@ def nat_upnp(sid:int):
             'note':'UPnP must be enabled on the router. Manual rule: UDP external port = internal port -> LAN IP.'}
 
 
+
+def _upnp_status(port:int):
+    upnpc=shutil.which('upnpc')
+    if not upnpc:
+        return {'available':False,'external_ip':'','mapped':False,'listing':'','error':'upnpc is not installed'}
+    cp=run([upnpc,'-s'],check=False,timeout=15)
+    text=(cp.stdout or '')
+    m=re.search(r'ExternalIPAddress\s*=\s*([0-9.]+)',text,re.I) or re.search(r'ExternalIPAddress[^0-9]*([0-9.]+)',text,re.I)
+    external=m.group(1) if m else ''
+    lp=run([upnpc,'-l'],check=False,timeout=20)
+    listing=lp.stdout or ''
+    mapped=bool(re.search(rf'\b{int(port)}\b.*UDP.*->.*:{int(port)}\b',listing,re.I) or re.search(rf'UDP.*\b{int(port)}\b.*\b{int(port)}\b',listing,re.I))
+    return {'available':cp.returncode==0 or lp.returncode==0,'external_ip':external,'mapped':mapped,'listing':listing[-5000:],'error':'' if (cp.returncode==0 or lp.returncode==0) else text[-1000:]}
+
+
+def _ensure_public_server_cfg(c:dict):
+    cfg=Path(c['path'])/'cstrike/server.cfg'
+    if not cfg.exists():
+        return
+    text=cfg.read_text(encoding='utf-8',errors='ignore')
+    if re.search(r'(?mi)^\s*sv_lan\s+\"?1\"?\s*$',text):
+        text=re.sub(r'(?mi)^\s*sv_lan\s+\"?1\"?\s*$', 'sv_lan 0', text)
+    elif not re.search(r'(?mi)^\s*sv_lan\b',text):
+        text=text.rstrip()+'\nsv_lan 0\n'
+    cfg.write_text(text,encoding='utf-8')
+    try:
+        shutil.chown(cfg,user='cs16',group='cs16'); os.chmod(cfg,0o640)
+    except Exception:
+        pass
+
+
+def network_fix(sid:int):
+    require_root(); c=load_server(sid); port=int(c['port']); lan=detect_lan_ip(); rt=load_runtime(); public=str(c.get('public_ip') or rt.get('public_ip') or '')
+    changes=[]; warnings=[]
+    _ensure_public_server_cfg(c)
+    # UFW first: explicit per-server rule so the current port is obvious in `ufw status`.
+    if shutil.which('ufw'):
+        cp=run(['ufw','allow',f'{port}/udp'],check=False,timeout=30)
+        changes.append('ufw:'+('ok' if cp.returncode==0 else 'failed'))
+        cp2=run(['ufw','allow','out','proto','udp','from','any','port',str(port)],check=False,timeout=30)
+        changes.append('ufw-out:'+('ok' if cp2.returncode==0 else 'failed'))
+    # Put narrow ACCEPT rules at the top of the classic/iptables-nft INPUT/OUTPUT chains.
+    if shutil.which('iptables'):
+        check=run(['iptables','-C','INPUT','-p','udp','--dport',str(port),'-j','ACCEPT'],check=False)
+        if check.returncode!=0:
+            run(['iptables','-I','INPUT','1','-p','udp','--dport',str(port),'-j','ACCEPT'],check=False)
+        checkout=run(['iptables','-C','OUTPUT','-p','udp','--sport',str(port),'-j','ACCEPT'],check=False)
+        if checkout.returncode!=0:
+            run(['iptables','-I','OUTPUT','1','-p','udp','--sport',str(port),'-j','ACCEPT'],check=False)
+        changes.append('iptables:accept')
+    run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False,timeout=40)
+    ready,detail=wait_server_ready(c,30.0)
+    if not ready:
+        raise RuntimeError('HLDS did not become ready after network repair: '+str(detail))
+    # Try to make an exact router mapping. Delete only this same UDP port, then recreate it.
+    upnp_before=_upnp_status(port)
+    upnp_result={'ok':False,'reason':'UPnP unavailable'}
+    if upnp_before.get('available') and shutil.which('upnpc'):
+        run(['upnpc','-d',str(port),'UDP'],check=False,timeout=20)
+        cp=run(['upnpc','-e',f'HYPER-CS16-{sid}','-a',lan,str(port),str(port),'UDP'],check=False,timeout=30)
+        upnp_after=_upnp_status(port)
+        upnp_result={'ok':bool(upnp_after.get('mapped')),'external_ip':upnp_after.get('external_ip',''),'mapped':upnp_after.get('mapped',False),'output':(cp.stdout or '')[-2500:]}
+    else:
+        upnp_after=upnp_before
+    router_external=str(upnp_after.get('external_ip') or '')
+    if router_external and public and router_external!=public:
+        warnings.append(f'Router WAN IP {router_external} differs from public IP {public}; double NAT/CGNAT is likely.')
+    if not upnp_result.get('ok'):
+        warnings.append(f'Automatic router mapping was not confirmed. Keenetic must have UDP {port} -> {lan}:{port}.')
+    info=network_info(sid)
+    info.update({'host_firewall_repaired':True,'changes':changes,'upnp':upnp_result,'router_external_ip':router_external,'public_ip_matches_router':(not router_external or not public or router_external==public),'warnings':warnings})
+    info['ok']=bool(info.get('service')=='active' and info.get('udp_listening') and info.get('a2s_local'))
+    return info
+
 def server_delete(sid:int):
     require_root()
     # Deletion must work even when an old patch lost the JSON state file.
@@ -1147,7 +1221,7 @@ def main():
     p=argparse.ArgumentParser(prog='hyper-cs16-ctl'); sp=p.add_subparsers(dest='cmd',required=True)
     sp.add_parser('base-install')
     c=sp.add_parser('server-create'); c.add_argument('id',type=int); c.add_argument('--name',required=True); c.add_argument('--port',type=int,required=True); c.add_argument('--slots',type=int,default=16); c.add_argument('--map',default='de_dust2'); c.add_argument('--hostname',required=True); c.add_argument('--password',default=''); c.add_argument('--profile',choices=['classic','rehlds'],default='classic')
-    for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','ftp-repair','ftp-test','network','delete','repair-runtime','mods-status','nat-upnp']:
+    for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','ftp-repair','ftp-test','network','delete','repair-runtime','mods-status','nat-upnp','network-fix']:
         q=sp.add_parser(a); q.add_argument('id',type=int)
     q=sp.add_parser('rcon'); q.add_argument('id',type=int); q.add_argument('command')
     q=sp.add_parser('change-map'); q.add_argument('id',type=int); q.add_argument('map')
@@ -1198,6 +1272,7 @@ def main():
         elif args.cmd=='network': result=network_info(args.id)
         elif args.cmd=='mods-status': result=mods_status(args.id)
         elif args.cmd=='nat-upnp': result=nat_upnp(args.id)
+        elif args.cmd=='network-fix': result=network_fix(args.id)
         elif args.cmd=='bots-install': result=install_yapb(args.id,args.quota,args.difficulty)
         elif args.cmd=='bots-config': result=configure_yapb(args.id,args.quota,args.difficulty)
         elif args.cmd=='bots-disable': result=disable_yapb(args.id)
