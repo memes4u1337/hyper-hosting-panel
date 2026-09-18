@@ -52,6 +52,25 @@ def cfg_path(sid:int)->Path: return SERVER_CFG_DIR/f'{sid}.json'
 
 def legacy_cfg_path(sid:int)->Path: return LEGACY_SERVER_CFG_DIR/f'{sid}.json'
 
+def ensure_state_permissions():
+    """Keep mutable runtime state readable by the unprivileged cs16 service."""
+    require_root()
+    for d in (STATE_ROOT, SERVER_CFG_DIR):
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.chown(d, user='root', group='cs16')
+            os.chmod(d, 0o750)
+        except Exception as exc:
+            raise RuntimeError(f'Cannot fix state directory permissions for {d}: {exc}')
+    for fp in SERVER_CFG_DIR.glob('*.json'):
+        try:
+            if fp.is_file():
+                shutil.chown(fp, user='root', group='cs16')
+                os.chmod(fp, 0o640)
+        except Exception as exc:
+            raise RuntimeError(f'Cannot fix state file permissions for {fp}: {exc}')
+
+
 def load_server(sid:int):
     p=cfg_path(sid)
     legacy=legacy_cfg_path(sid)
@@ -66,11 +85,7 @@ def load_server(sid:int):
     except Exception as exc: out({'ok':False,'error':f'Server {sid} config unavailable: {exc}'},2)
 
 def save_server(c:dict):
-    SERVER_CFG_DIR.mkdir(parents=True,exist_ok=True)
-    try:
-        os.chmod(SERVER_CFG_DIR,0o750)
-        shutil.chown(SERVER_CFG_DIR,user='root',group='cs16')
-    except Exception: pass
+    ensure_state_permissions()
     p=cfg_path(int(c['id']))
     fd,tmp_name=tempfile.mkstemp(prefix=f'.{int(c["id"])}.',suffix='.tmp',dir=str(SERVER_CFG_DIR))
     tmp=Path(tmp_name)
@@ -660,7 +675,20 @@ def doctor():
     for name,cmd in {'steamcmd':[rt.get('steamcmd','/opt/steamcmd/steamcmd.sh'),'+quit'], 'nginx':['nginx','-t'], 'mariadb':['systemctl','is-active','mariadb'], 'ftp':['ss','-ltn','sport = :21']}.items():
         cp=run(cmd,check=False,timeout=30); checks[name]={'ok':cp.returncode==0,'output':(cp.stdout or '').strip()[-500:]}
     checks['base_game']={'ok':Path(rt.get('base_game_dir','/srv/hyper-cs16/base-hlds')).joinpath('hlds_run').exists() and Path(rt.get('base_game_dir','/srv/hyper-cs16/base-hlds')).joinpath('cstrike/maps/de_dust2.bsp').exists()}
-    checks['state_dir']={'ok':SERVER_CFG_DIR.is_dir() and os.access(SERVER_CFG_DIR,os.W_OK),'path':str(SERVER_CFG_DIR)}
+    state_ok=STATE_ROOT.is_dir() and SERVER_CFG_DIR.is_dir()
+    state_detail=[]
+    if state_ok:
+        cp=run(['runuser','-u','cs16','--','test','-x',str(STATE_ROOT)],check=False)
+        state_ok=state_ok and cp.returncode==0
+        if cp.returncode!=0: state_detail.append(f'cs16 cannot traverse {STATE_ROOT}')
+        cp=run(['runuser','-u','cs16','--','test','-x',str(SERVER_CFG_DIR)],check=False)
+        state_ok=state_ok and cp.returncode==0
+        if cp.returncode!=0: state_detail.append(f'cs16 cannot traverse {SERVER_CFG_DIR}')
+        for fp in sorted(SERVER_CFG_DIR.glob('*.json')):
+            cp=run(['runuser','-u','cs16','--','test','-r',str(fp)],check=False)
+            if cp.returncode!=0:
+                state_ok=False; state_detail.append(f'cs16 cannot read {fp.name}')
+    checks['state_dir']={'ok':state_ok,'path':str(SERVER_CFG_DIR),'detail':'; '.join(state_detail)}
     checks['ftp_restore_service']={'ok':run(['systemctl','is-enabled','hyper-cs16-ftp-restore.service'],check=False).returncode==0}
     return {'ok':all(v.get('ok') for v in checks.values()),'checks':checks}
 

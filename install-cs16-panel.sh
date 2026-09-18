@@ -67,6 +67,9 @@ if ! id cs16 >/dev/null 2>&1; then
 fi
 usermod -aG www-data cs16 >/dev/null 2>&1 || true
 mkdir -p "$BASE"/{lib,backups} "$ETC" "$SERVERS" "$STEAMCMD"
+# Mutable state must be traversable/readable by the cs16 service user.
+# Explicitly repair the parent too; older builds could leave /var/lib/hyper-cs16 root-only.
+install -d -o root -g cs16 -m 0750 "$STATE"
 install -d -o root -g cs16 -m 0750 "$SERVER_STATE"
 install -d -o root -g www-data -m 0730 "$UPLOAD_STAGE"
 # v1.3+: mutable per-server JSON belongs in /var/lib, never /etc. Migrate legacy configs if present.
@@ -81,6 +84,8 @@ fi
 chown root:cs16 "$SERVER_STATE"
 chmod 0750 "$SERVER_STATE"
 find "$SERVER_STATE" -maxdepth 1 -type f -name '*.json' -exec chown root:cs16 {} + -exec chmod 0640 {} + 2>/dev/null || true
+chmod 0750 "$STATE" "$SERVER_STATE"
+chown root:cs16 "$STATE" "$SERVER_STATE"
 cat >/etc/tmpfiles.d/hyper-cs16.conf <<EOF
 d $UPLOAD_STAGE 0730 root www-data 1h
 EOF
@@ -149,7 +154,7 @@ UHEX="$(hex "$ADMIN_USER")"; HHEX="$(hex "$ADMIN_HASH")"
 mysql --protocol=socket -uroot "$DB_NAME" <<SQL
 INSERT INTO users(username,password_hash,role) VALUES(CONVERT(0x$UHEX USING utf8mb4),CONVERT(0x$HHEX USING utf8mb4),'admin')
 ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash),role='admin';
-INSERT INTO settings(setting_key,setting_value) VALUES('panel_version','1.2.0') ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value);
+INSERT INTO settings(setting_key,setting_value) VALUES('panel_version','1.3.0') ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value);
 SQL
 
 log "Writing runtime configuration..."

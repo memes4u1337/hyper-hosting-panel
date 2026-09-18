@@ -2,6 +2,25 @@
 set -Eeuo pipefail
 [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "[ERROR] Run as root/sudo" >&2; exit 1; }
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+echo "[CS16 FIX] Stopping existing CS 1.6 instances to break possible restart loops..."
+mapfile -t CS16_UNITS < <(systemctl list-unit-files 'hyper-cs16@*.service' --no-legend 2>/dev/null | awk '{print $1}' | sort -u)
+# Template units do not enumerate instances reliably, also use state files.
+for f in /var/lib/hyper-cs16/servers/*.json /etc/hyper-cs16/servers/*.json; do
+  [[ -f "$f" ]] || continue
+  sid="$(basename "$f" .json)"
+  [[ "$sid" =~ ^[0-9]+$ ]] || continue
+  CS16_UNITS+=("hyper-cs16@${sid}.service")
+done
+if ((${#CS16_UNITS[@]})); then
+  mapfile -t CS16_UNITS < <(printf '%s\n' "${CS16_UNITS[@]}" | awk 'NF && !seen[$0]++')
+  for unit in "${CS16_UNITS[@]}"; do systemctl stop "$unit" >/dev/null 2>&1 || true; done
+fi
+
+echo "[CS16 FIX] Repairing mutable state ownership before runtime update..."
+getent group cs16 >/dev/null 2>&1 || groupadd --system cs16
+install -d -o root -g cs16 -m 0750 /var/lib/hyper-cs16 /var/lib/hyper-cs16/servers
+find /var/lib/hyper-cs16/servers -maxdepth 1 -type f -name '*.json' -exec chown root:cs16 {} + -exec chmod 0640 {} + 2>/dev/null || true
 export CS16_SKIP_GAME_DOWNLOAD=1
 export CS16_CREATE_DEFAULT=0
 echo "[CS16 FIX] Updating panel/runtime without touching existing game data..."
@@ -61,10 +80,49 @@ for r in rows:
 con.close()
 PYREPAIR
 
-echo "[CS16 FIX] Restarting monitoring and verifying services..."
+echo "[CS16 FIX] Restarting game instances and monitoring..."
+# Re-assert permissions after DB recovery/config rewrites.
+chown root:cs16 /var/lib/hyper-cs16 /var/lib/hyper-cs16/servers
+chmod 0750 /var/lib/hyper-cs16 /var/lib/hyper-cs16/servers
+find /var/lib/hyper-cs16/servers -maxdepth 1 -type f -name '*.json' -exec chown root:cs16 {} + -exec chmod 0640 {} + 2>/dev/null || true
 systemctl daemon-reload
 systemctl enable --now hyper-cs16-monitor.service >/dev/null 2>&1 || true
 systemctl enable hyper-cs16-ftp-restore.service >/dev/null 2>&1 || true
 /usr/local/sbin/hyper-cs16-ctl ftp-restore || true
+
+failed=0
+for cfg in /var/lib/hyper-cs16/servers/*.json; do
+  [[ -f "$cfg" ]] || continue
+  sid="$(basename "$cfg" .json)"
+  [[ "$sid" =~ ^[0-9]+$ ]] || continue
+  if ! runuser -u cs16 -- test -r "$cfg"; then
+    echo "[CS16 FIX][ERROR] cs16 still cannot read $cfg" >&2; failed=1; continue
+  fi
+  systemctl enable "hyper-cs16@${sid}.service" >/dev/null 2>&1 || true
+  systemctl restart "hyper-cs16@${sid}.service" >/dev/null 2>&1 || true
+  sleep 2
+  if systemctl is-active --quiet "hyper-cs16@${sid}.service"; then
+    port="$(python3 - "$cfg" <<'PYPORT'
+import json,sys
+try: print(int(json.load(open(sys.argv[1]))['port']))
+except Exception: print('')
+PYPORT
+)"
+    if [[ -n "$port" ]] && ss -lunH | awk '{print $5}' | grep -Eq "(^|:)${port}$"; then
+      echo "[CS16 FIX] server #$sid is ACTIVE and listening on UDP $port"
+    else
+      echo "[CS16 FIX][WARNING] server #$sid is active but UDP socket is not visible yet" >&2
+    fi
+  else
+    echo "[CS16 FIX][ERROR] server #$sid failed to start" >&2
+    journalctl -u "hyper-cs16@${sid}.service" -n 60 --no-pager || true
+    failed=1
+  fi
+done
+
 /usr/local/sbin/hyper-cs16-ctl doctor || true
-echo "[CS16 FIX] Done. Existing CS 1.6 servers were kept."
+if ((failed)); then
+  echo "[CS16 FIX] Patch installed, but at least one game instance is still unhealthy. See journal output above." >&2
+  exit 2
+fi
+echo "[CS16 FIX] Done. Existing CS 1.6 servers were kept and restarted."
