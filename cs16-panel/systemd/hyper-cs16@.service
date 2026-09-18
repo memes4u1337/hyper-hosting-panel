@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=cs16
-Group=www-data
+Group=cs16
 SupplementaryGroups=www-data
 WorkingDirectory=/srv/hyper-cs16/servers/%i
 ExecStart=/usr/local/sbin/hyper-cs16-run %i
