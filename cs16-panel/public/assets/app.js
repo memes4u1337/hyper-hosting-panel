@@ -62,6 +62,15 @@
   }
   $('#refreshPlayers')?.addEventListener('click',loadPlayers);
 
+  $('#networkCheck')?.addEventListener('click', async()=>{
+    const out=$('#networkCheckResult'); if(out){out.className='network-check-result';out.textContent='Проверяю...';}
+    try{
+      const j=await api('network');
+      const good=!!(j.service==='active' && j.udp_listening && j.a2s_local);
+      if(out){out.className='network-check-result '+(good?'ok':'bad');out.textContent=good?`HLDS работает: UDP ${j.port} слушается, A2S отвечает. Для LAN: ${j.lan_address}.`:`Ошибка: service=${j.service}, UDP=${j.udp_listening?'OK':'NO'}, A2S=${j.a2s_local?'OK':'NO'} ${j.query_error||''}`;}
+    }catch(e){if(out){out.className='network-check-result bad';out.textContent=e.message;}}
+  });
+
   async function runConsole(command){
     const out=$('#consoleOut'); if(!out)return;
     out.textContent += `\n> ${command}\n`; out.scrollTop=out.scrollHeight;

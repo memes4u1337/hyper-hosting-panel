@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, json, os, pwd, re, secrets, shutil, signal, stat, subprocess, sys, tarfile, tempfile, time, zipfile
+import argparse, ftplib, ipaddress, json, os, pwd, re, secrets, shutil, signal, socket, stat, subprocess, sys, tarfile, tempfile, time, zipfile
 from pathlib import Path
 
 APP_ROOT=Path('/opt/hyper-cs16')
@@ -208,6 +208,12 @@ def install_metamod_classic(path:Path):
             except FileNotFoundError: pass
         shutil.copy2(candidates[0],target/'metamod.so')
     _set_liblist_metamod(cstrike,'addons/metamod/dlls/metamod.so')
+    # Metamod-R ships a different config.ini syntax. If a server was converted
+    # to classic Metamod, keeping that file produces a wall of parser errors.
+    stale_cfg=cstrike/'addons/metamod/config.ini'
+    if stale_cfg.exists():
+        try: stale_cfg.unlink()
+        except Exception: pass
 
 
 def install_metamod_rehlds(path:Path):
@@ -357,60 +363,112 @@ def normalize_permissions(path:Path):
 
 
 def setup_ftp(c:dict,path:Path,password:str|None=None):
-    """Create FTP account and bind the game directory into the FTP chroot.
+    """Create one FTP account whose chroot is the exact game server directory.
 
-    HYPER-HOST deliberately supports systems where /etc/fstab is read-only, so
-    CS16 never persists mounts there. Reboot persistence is handled by the
-    hyper-cs16-ftp-restore systemd service via the ftp-restore controller command.
-    FTP problems are returned as a warning and never prevent HLDS from starting.
+    No /etc/fstab and no bind mount are used. HYPER-HOST's FTP runtime gets a
+    dedicated `cs16` scope, so user cs16_<id> lands directly in `/` of that
+    server and can see hlds_run/cstrike immediately.
     """
     user=c.get('ftp_user') or f'cs16_{c["id"]}'
-    password=password or secrets.token_urlsafe(12)
+    password=password or c.get('ftp_password') or secrets.token_urlsafe(12)
     ctl=shutil.which('hyper-host-ctl') or '/usr/local/sbin/hyper-host-ctl'
     if not Path(ctl).exists():
-        return user,password,'HYPER-HOST FTP runtime not found; game server was created without FTP'
-    warnings=[]
-    try:
-        run([ctl,'create-ftp',user,password,'files'],timeout=180)
-    except Exception as exc:
-        return user,password,f'FTP account creation failed: {exc}'
-    home=Path('/var/www/hyper-host-ftp')/user/'uploads'
-    try:
-        home.mkdir(parents=True,exist_ok=True)
-        run(['umount','-lf',str(home)],check=False)
-        cp=run(['mount','--bind',str(path),str(home)],check=False)
-        if cp.returncode!=0:
-            warnings.append((cp.stdout or 'bind mount failed').strip())
-    except Exception as exc:
-        warnings.append(str(exc))
+        return user,password,'HYPER-HOST FTP runtime not found'
+    # Clean old v1.0-v1.5 bind target if it exists.
+    old_home=Path('/var/www/hyper-host-ftp')/user/'uploads'
+    run(['umount','-lf',str(old_home)],check=False)
+    cp=run([ctl,'create-ftp',user,password,'cs16',str(int(c['id']))],check=False,timeout=180)
+    if cp.returncode!=0:
+        return user,password,(cp.stdout or 'FTP account creation failed').strip()
     c['ftp_user']=user; c['ftp_password']=password
-    return user,password,'; '.join(x for x in warnings if x)
+    return user,password,''
+
+
+def ftp_test(sid:int):
+    c=load_server(sid); user=str(c.get('ftp_user') or ''); pw=str(c.get('ftp_password') or '')
+    if not user or not pw:
+        return {'ok':False,'error':'FTP credentials are missing'}
+    ftp=None
+    try:
+        ftp=ftplib.FTP()
+        ftp.connect('127.0.0.1',21,timeout=8)
+        ftp.login(user,pw)
+        # Active mode keeps the local diagnostic independent from PASV/NAT.
+        ftp.set_pasv(False)
+        pwd_now=ftp.pwd()
+        names=ftp.nlst()
+        required={'cstrike','hlds_run'}
+        missing=sorted(required-set(names))
+        if missing:
+            return {'ok':False,'error':'FTP login works but wrong root: missing '+', '.join(missing),'pwd':pwd_now,'items':names[:50]}
+        return {'ok':True,'pwd':pwd_now,'items':names[:50],'root':str(c.get('path',''))}
+    except Exception as exc:
+        return {'ok':False,'error':str(exc)}
+    finally:
+        if ftp:
+            try: ftp.quit()
+            except Exception: pass
+
+
+def ftp_repair(sid:int):
+    require_root(); c=load_server(sid); path=Path(c['path'])
+    if not path.is_dir(): raise RuntimeError(f'Server directory missing: {path}')
+    user,pw,warning=setup_ftp(c,path,str(c.get('ftp_password') or '') or None)
+    c['ftp_user']=user; c['ftp_password']=pw; save_server(c)
+    # Let the FTP daemon notice updated user_conf/auth files before testing.
+    time.sleep(.4)
+    test=ftp_test(sid)
+    return {'ok':bool(test.get('ok')),'ftp_user':user,'ftp_password':pw,'root':str(path),'test':test,'warning':warning}
 
 
 def ftp_restore():
-    """Restore CS16 FTP bind mounts after reboot without touching /etc/fstab."""
+    """Repair per-server direct FTP chroots after reboot/update."""
     require_root(); restored=[]; warnings=[]
     for p in sorted(SERVER_CFG_DIR.glob('*.json')):
         try:
             c=json.loads(p.read_text(encoding='utf-8'))
-            user=str(c.get('ftp_user') or '')
-            path=Path(str(c.get('path') or ''))
-            if not user or not path.is_dir():
-                continue
-            home=Path('/var/www/hyper-host-ftp')/user/'uploads'
-            home.mkdir(parents=True,exist_ok=True)
-            # If already mounted with the correct source, leave it alone.
-            cp=run(['findmnt','-rn','-o','SOURCE','--target',str(home)],check=False)
-            current=(cp.stdout or '').strip()
-            if current and Path(current).resolve()==path.resolve():
-                restored.append(int(c.get('id',0))); continue
-            run(['umount','-lf',str(home)],check=False)
-            cp=run(['mount','--bind',str(path),str(home)],check=False)
-            if cp.returncode==0: restored.append(int(c.get('id',0)))
-            else: warnings.append(f'{c.get("id")}: {(cp.stdout or "mount failed").strip()}')
+            sid=int(c.get('id',0))
+            if sid<1: continue
+            result=ftp_repair(sid)
+            if result.get('ok'): restored.append(sid)
+            else: warnings.append(f'{sid}: '+str(result.get('warning') or result.get('test',{}).get('error') or 'FTP repair failed'))
         except Exception as exc:
             warnings.append(f'{p.name}: {exc}')
     return {'ok':not warnings,'restored':restored,'warnings':warnings}
+
+
+def detect_lan_ip():
+    rt=load_runtime(); configured=str(rt.get('lan_ip') or '').strip()
+    try:
+        if configured and ipaddress.ip_address(configured).version==4:
+            return configured
+    except Exception:
+        pass
+    cp=run(['ip','-4','route','get','1.1.1.1'],check=False)
+    m=re.search(r'\bsrc\s+(\d+\.\d+\.\d+\.\d+)',cp.stdout or '')
+    return m.group(1) if m else '127.0.0.1'
+
+
+def network_info(sid:int):
+    c=load_server(sid); port=int(c['port']); public=str(c.get('public_ip') or load_runtime().get('public_ip') or '')
+    lan=detect_lan_ip(); svc=service_status(sid); udp=udp_listening(port)
+    local_query=False; qerr=''; q={}
+    if udp:
+        try:
+            q=query_info('127.0.0.1',port,1.2); local_query=True
+        except Exception as exc: qerr=str(exc)
+    ssout=run(['ss','-lunp'],check=False).stdout or ''
+    socket_lines=[x for x in ssout.splitlines() if re.search(rf':{port}(?:\s|$)',x)]
+    return {
+        'ok':svc=='active' and udp and local_query,
+        'service':svc,'udp_listening':udp,'a2s_local':local_query,'query_error':qerr,'query':q,
+        'public_ip':public,'lan_ip':lan,'port':port,
+        'public_address':f'{public}:{port}' if public else '',
+        'lan_address':f'{lan}:{port}' if lan else '',
+        'socket':socket_lines[:8],
+        'internet_note':f'For Internet access forward UDP {port} on the router to {lan}:{port}. The panel cannot change router NAT automatically.',
+        'lan_note':f'From the same LAN use {lan}:{port}; public-IP hairpin/NAT loopback is not supported by every router.'
+    }
 
 
 def udp_listening(port:int)->bool:
@@ -507,8 +565,10 @@ def server_create(args):
             if dp.is_file(): debug += '\n--- '+str(dp)+' ---\n'+dp.read_text(encoding='latin1',errors='replace')[-8000:]
         raise RuntimeError(f'HLDS failed health check: {detail}. '+journal[-7000:]+debug)
     user,pw,ftp_warning=setup_ftp(c,path)
-    save_server(c)
-    return {'ok':True,'id':args.id,'path':str(path),'rcon_password':rcon,'ftp_user':user,'ftp_password':pw,'ftp_warning':ftp_warning,'service':'active'}
+    save_server(c); time.sleep(.4)
+    ftp_diag=ftp_test(args.id) if not ftp_warning else {'ok':False,'error':ftp_warning}
+    if not ftp_diag.get('ok') and not ftp_warning: ftp_warning=str(ftp_diag.get('error') or 'FTP self-test failed')
+    return {'ok':True,'id':args.id,'path':str(path),'rcon_password':rcon,'ftp_user':user,'ftp_password':pw,'ftp_warning':ftp_warning,'ftp_test':ftp_diag,'service':'active'}
 
 
 def service_action(sid:int,action:str):
@@ -733,8 +793,9 @@ def server_reinstall(sid:int):
 def ftp_reset(sid:int):
     require_root(); c=load_server(sid); pw=secrets.token_urlsafe(12)
     user, pw, warning = setup_ftp(c,Path(c['path']),pw)
-    c['ftp_password']=pw; c['ftp_user']=user; save_server(c)
-    return {'ok':True,'ftp_user':user,'ftp_password':pw,'warning':warning}
+    c['ftp_password']=pw; c['ftp_user']=user; save_server(c); time.sleep(.4)
+    test=ftp_test(sid) if not warning else {'ok':False,'error':warning}
+    return {'ok':bool(test.get('ok')),'ftp_user':user,'ftp_password':pw,'warning':warning,'test':test}
 
 
 def _staged_open(token:str, expected_suffix:str, max_bytes:int):
@@ -794,9 +855,11 @@ def server_delete(sid:int):
         home=Path('/var/www/hyper-host-ftp')/user/'uploads'; run(['umount','-lf',str(home)],check=False)
         ctl=shutil.which('hyper-host-ctl') or '/usr/local/sbin/hyper-host-ctl'; run([ctl,'delete-ftp',user],check=False,timeout=120)
     if path.exists(): shutil.rmtree(path)
-    try: cfg_path(sid).unlink()
-    except FileNotFoundError: pass
-    return {'ok':True}
+    for p in (cfg_path(sid),legacy_cfg_path(sid)):
+        try: p.unlink()
+        except FileNotFoundError: pass
+    run(['systemctl','reset-failed',f'hyper-cs16@{sid}.service'],check=False)
+    return {'ok':True,'id':sid,'deleted_path':str(path),'ftp_user':user}
 
 
 def doctor():
@@ -826,7 +889,7 @@ def main():
     p=argparse.ArgumentParser(prog='hyper-cs16-ctl'); sp=p.add_subparsers(dest='cmd',required=True)
     sp.add_parser('base-install')
     c=sp.add_parser('server-create'); c.add_argument('id',type=int); c.add_argument('--name',required=True); c.add_argument('--port',type=int,required=True); c.add_argument('--slots',type=int,default=16); c.add_argument('--map',default='de_dust2'); c.add_argument('--hostname',required=True); c.add_argument('--password',default=''); c.add_argument('--profile',choices=['classic','rehlds'],default='classic')
-    for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','delete','repair-runtime']:
+    for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','ftp-repair','ftp-test','network','delete','repair-runtime']:
         q=sp.add_parser(a); q.add_argument('id',type=int)
     q=sp.add_parser('rcon'); q.add_argument('id',type=int); q.add_argument('command')
     q=sp.add_parser('change-map'); q.add_argument('id',type=int); q.add_argument('map')
@@ -867,6 +930,9 @@ def main():
         elif args.cmd=='update': result=server_update(args.id)
         elif args.cmd=='reinstall': result=server_reinstall(args.id)
         elif args.cmd=='ftp-reset': result=ftp_reset(args.id)
+        elif args.cmd=='ftp-repair': result=ftp_repair(args.id)
+        elif args.cmd=='ftp-test': result=ftp_test(args.id)
+        elif args.cmd=='network': result=network_info(args.id)
         elif args.cmd=='map-upload': result=map_upload(args.id,args.token,args.map_name)
         elif args.cmd=='plugin-upload': result=plugin_upload(args.id,args.token,args.plugin_name)
         elif args.cmd=='repair-runtime': result=repair_server_runtime(args.id)

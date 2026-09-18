@@ -1704,6 +1704,7 @@ ftp_scope_normalize() {
     bots|pm2) echo bots ;;
     backups|backup) echo backups ;;
     files|ftp|uploads|own) echo files ;;
+    cs16|game|game-server|counter-strike) echo cs16 ;;
     *) err "Неверный режим FTP-доступа: $mode" ;;
   esac
 }
@@ -1718,6 +1719,7 @@ ftp_scope_label() {
     bots) echo "боты" ;;
     backups) echo "backup" ;;
     files) echo "личная FTP-папка uploads" ;;
+    cs16) echo "CS 1.6 сервер #${target:-?}" ;;
   esac
 }
 
@@ -1797,6 +1799,12 @@ ftp_prepare_scope() {
     files)
       mkdir -p "$home/uploads"
       local_root="$home/uploads"
+      ;;
+    cs16)
+      [[ "$target" =~ ^[0-9]+$ ]] || err "Для режима cs16 укажи числовой ID сервера"
+      local_root="/srv/hyper-cs16/servers/$target"
+      [[ -d "$local_root" ]] || err "Папка игрового сервера не найдена: $local_root"
+      # Direct chroot into the exact game server directory. No bind-mounts and no /etc/fstab.
       ;;
   esac
   [[ -n "$local_root" ]] || err "FTP local_root не определён"
@@ -5210,7 +5218,7 @@ Usage: hyper-host-ctl nginx-runtime-fix
        hyper-host-ctl nginx-runtime-doctor-json
        hyper-host-ctl nginx-hard-restart
        hyper-host-ctl add-site DOMAIN [ALIASES] [PHP_VERSION]
-       hyper-host-ctl create-ftp USER PASS [all|sites|site|bots|backups|files] [DOMAIN]
+       hyper-host-ctl create-ftp USER PASS [all|sites|site|bots|backups|files|cs16] [DOMAIN|SERVER_ID]
        hyper-host-ctl mysql-import-start DB FILE
        hyper-host-ctl mysql-import-status-json
        hyper-host-ctl ftp-test-login USER PASS [HOST]

@@ -3,6 +3,13 @@ set -Eeuo pipefail
 [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "[ERROR] Run as root/sudo" >&2; exit 1; }
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# v1.6: install the matching HYPER-HOST FTP controller first. It adds the
+# restricted `cs16 SERVER_ID` FTP scope used for direct per-server chroots.
+if [[ -f "$ROOT_DIR/scripts/hhctl" ]]; then
+  echo "[CS16 FIX] Updating HYPER-HOST FTP controller (CS16 direct-root scope)..."
+  install -m 0755 "$ROOT_DIR/scripts/hhctl" /usr/local/sbin/hyper-host-ctl
+fi
+
 echo "[CS16 FIX] Stopping existing CS 1.6 instances to break possible restart loops..."
 mapfile -t CS16_UNITS < <(systemctl list-unit-files 'hyper-cs16@*.service' --no-legend 2>/dev/null | awk '{print $1}' | sort -u)
 # Template units do not enumerate instances reliably, also use state files.
@@ -26,7 +33,11 @@ export CS16_CREATE_DEFAULT=0
 echo "[CS16 FIX] Updating panel/runtime without touching existing game data..."
 bash "$ROOT_DIR/install-cs16-panel.sh"
 
-echo "[CS16 FIX] Restoring FTP runtime mounts (no /etc/fstab writes)..."
+echo "[CS16 FIX] Repairing direct per-server FTP accounts (no /etc/fstab/bind mounts)..."
+if command -v ufw >/dev/null 2>&1; then
+  ufw allow 21/tcp >/dev/null 2>&1 || true
+  ufw allow 40000:40100/tcp >/dev/null 2>&1 || true
+fi
 /usr/local/sbin/hyper-cs16-ctl ftp-restore || true
 
 echo "[CS16 FIX] Installing/repairing HLDS base via SteamCMD..."
@@ -107,6 +118,10 @@ for cfg in /var/lib/hyper-cs16/servers/*.json; do
   set -e
   if ((repair_rc==0)); then
     echo "[CS16 FIX] server #$sid: $repair_out"
+    echo "[CS16 FIX] Repairing FTP for server #$sid..."
+    /usr/local/sbin/hyper-cs16-ctl ftp-repair "$sid" || true
+    echo "[CS16 FIX] Network status for server #$sid:"
+    /usr/local/sbin/hyper-cs16-ctl network "$sid" || true
   else
     echo "[CS16 FIX][ERROR] server #$sid repair failed:" >&2
     echo "$repair_out" >&2

@@ -34,6 +34,8 @@ try {
     if($view==='maps') json_out(ctl(['maps',$id],10));
     if($view==='plugins') json_out(ctl(['plugins',$id],10));
     if($view==='logs') json_out(ctl(['logs',$id,'--lines',200],10));
+    if($view==='network') json_out(ctl(['network',$id],15));
+    if($view==='ftp-test') json_out(ctl(['ftp-test',$id],20));
     if($view==='config'){
         $name=(string)($_GET['name']??'server.cfg');$allowed=['server.cfg','amxx.cfg','users.ini','plugins.ini','modules.ini','mapcycle.txt','maps.ini'];if(!in_array($name,$allowed,true))throw new RuntimeException('Файл запрещён');json_out(ctl(['config-read',$id,$name],10));
     }

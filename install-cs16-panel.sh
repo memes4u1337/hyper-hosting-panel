@@ -2,7 +2,8 @@
 set -Eeuo pipefail
 
 [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo '[ERROR] Run as root: sudo bash install-cs16-panel.sh' >&2; exit 1; }
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cs16-panel"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC_DIR="$ROOT_DIR/cs16-panel"
 [[ -d "$SRC_DIR" ]] || { echo "[ERROR] cs16-panel directory not found next to installer" >&2; exit 1; }
 
 DOMAIN="${CS16_PANEL_DOMAIN:-www.avito.hyper-host.pw}"
@@ -10,6 +11,7 @@ DB_NAME="${CS16_DB_NAME:-hyper_cs16}"
 DB_USER="${CS16_DB_USER:-hyper_cs16_panel}"
 DB_PASS="${CS16_DB_PASSWORD:-$(openssl rand -hex 24)}"
 REQUESTED_PUBLIC_IP="${CS16_PUBLIC_IP:-}"
+REQUESTED_LAN_IP="${CS16_LAN_IP:-}"
 SSL_EMAIL="${CS16_SSL_EMAIL:-}"
 SKIP_GAME="${CS16_SKIP_GAME_DOWNLOAD:-0}"
 CREATE_DEFAULT="${CS16_CREATE_DEFAULT:-1}"
@@ -33,6 +35,11 @@ fail(){ printf '\033[1;31m[CS16 ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
 
 command -v hyper-host-ctl >/dev/null 2>&1 || fail 'hyper-host-ctl not found. Install HYPER-HOST first.'
 command -v mysql >/dev/null 2>&1 || fail 'MariaDB/MySQL client not found. Run the main HYPER-HOST installer first.'
+# Keep the installed HYPER-HOST controller in sync with this repository. v1.6
+# adds a restricted CS16 FTP scope that chroots directly to one game server.
+if [[ -f "$ROOT_DIR/scripts/hhctl" ]]; then
+  install -m 0755 "$ROOT_DIR/scripts/hhctl" /usr/local/sbin/hyper-host-ctl
+fi
 
 # Read HYPER-HOST network values, but do not overwrite explicit CS16_PUBLIC_IP.
 set +u
@@ -53,6 +60,20 @@ import ipaddress,sys
 ip=ipaddress.ip_address(sys.argv[1])
 assert ip.version==4
 PYIP
+
+if [[ -n "$REQUESTED_LAN_IP" ]]; then
+  GAME_LAN_IP="$REQUESTED_LAN_IP"
+else
+  GAME_LAN_IP="${STATIC_LAN_IP:-${SERVER_IP:-}}"
+fi
+if [[ -z "$GAME_LAN_IP" ]]; then
+  GAME_LAN_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="src"){print $(i+1);exit}}' || true)"
+fi
+[[ -n "$GAME_LAN_IP" ]] || GAME_LAN_IP="127.0.0.1"
+python3 - "$GAME_LAN_IP" <<'PYLAN' || fail "Invalid LAN IPv4: $GAME_LAN_IP"
+import ipaddress,sys
+ip=ipaddress.ip_address(sys.argv[1]); assert ip.version==4
+PYLAN
 
 log "Installing OS dependencies..."
 export DEBIAN_FRONTEND=noninteractive
@@ -154,7 +175,7 @@ UHEX="$(hex "$ADMIN_USER")"; HHEX="$(hex "$ADMIN_HASH")"
 mysql --protocol=socket -uroot "$DB_NAME" <<SQL
 INSERT INTO users(username,password_hash,role) VALUES(CONVERT(0x$UHEX USING utf8mb4),CONVERT(0x$HHEX USING utf8mb4),'admin')
 ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash),role='admin';
-INSERT INTO settings(setting_key,setting_value) VALUES('panel_version','1.5.0') ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value);
+INSERT INTO settings(setting_key,setting_value) VALUES('panel_version','1.6.0') ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value);
 SQL
 
 log "Writing runtime configuration..."
@@ -163,6 +184,7 @@ cat >"$ETC/panel.php" <<PHP
 return [
   'domain' => '$DOMAIN',
   'public_ip' => '$GAME_PUBLIC_IP',
+  'lan_ip' => '$GAME_LAN_IP',
   'db_host' => '127.0.0.1',
   'db_port' => 3306,
   'db_name' => '$DB_NAME',
@@ -171,10 +193,10 @@ return [
 ];
 PHP
 chmod 0640 "$ETC/panel.php"; chown root:www-data "$ETC/panel.php"
-python3 - "$ETC/runtime.json" "$DOMAIN" "$GAME_PUBLIC_IP" "$DB_NAME" "$DB_USER" "$DB_PASS" <<'PY'
+python3 - "$ETC/runtime.json" "$DOMAIN" "$GAME_PUBLIC_IP" "$GAME_LAN_IP" "$DB_NAME" "$DB_USER" "$DB_PASS" <<'PY'
 import json,sys
-path,domain,ip,dbname,user,pw=sys.argv[1:]
-data={'domain':domain,'public_ip':ip,'db_host':'127.0.0.1','db_port':3306,'db_name':dbname,'db_user':user,'db_password':pw,'servers_dir':'/srv/hyper-cs16/servers','base_game_dir':'/srv/hyper-cs16/base-hlds','steamcmd':'/opt/steamcmd/steamcmd.sh'}
+path,domain,ip,lan,dbname,user,pw=sys.argv[1:]
+data={'domain':domain,'public_ip':ip,'lan_ip':lan,'db_host':'127.0.0.1','db_port':3306,'db_name':dbname,'db_user':user,'db_password':pw,'servers_dir':'/srv/hyper-cs16/servers','base_game_dir':'/srv/hyper-cs16/base-hlds','steamcmd':'/opt/steamcmd/steamcmd.sh'}
 open(path,'w',encoding='utf-8').write(json.dumps(data,ensure_ascii=False,indent=2)+'\n')
 PY
 chmod 0600 "$ETC/runtime.json"
@@ -214,6 +236,7 @@ log "Opening game ports and enabling monitor..."
 if command -v ufw >/dev/null 2>&1; then
   ufw allow 27015:27100/udp >/dev/null 2>&1 || true
   ufw allow 21/tcp >/dev/null 2>&1 || true
+  ufw allow 40000:40100/tcp >/dev/null 2>&1 || true
 fi
 systemctl daemon-reload
 systemctl enable --now hyper-cs16-monitor.service >/dev/null 2>&1 || warn 'Monitor will start after MariaDB/network is ready.'
@@ -260,8 +283,9 @@ echo
 printf '\033[1;32mHYPER-HOST CS 1.6 PANEL INSTALLED\033[0m\n'
 printf 'Panel:      http://%s\n' "$DOMAIN"
 printf 'Public IP:  %s\n' "$GAME_PUBLIC_IP"
+printf 'LAN IP:     %s\n' "$GAME_LAN_IP"
 printf 'Game ports: UDP 27015-27100\n'
-printf 'FTP:        %s:21\n' "$GAME_PUBLIC_IP"
+printf 'FTP:        %s:21 (PASV TCP 40000-40100)\n' "$GAME_PUBLIC_IP"
 printf 'Login:      %s\n' "$ADMIN_USER"
 if [[ "$IMPORTED_ADMIN" == "1" ]]; then
   printf 'Password:   same as the main HYPER-HOST panel\n'
