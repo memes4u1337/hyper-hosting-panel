@@ -569,27 +569,43 @@ def detect_lan_ip():
     return m.group(1) if m else '127.0.0.1'
 
 
+def query_info_retry(port:int, attempts:int=3):
+    """Small retry window for UDP A2S. A dropped query packet is not a dead server."""
+    last=''
+    timeouts=(0.9,1.3,1.8,2.2)
+    for i in range(max(1,attempts)):
+        try:
+            return query_info('127.0.0.1',int(port),timeouts[min(i,len(timeouts)-1)]), ''
+        except Exception as exc:
+            last=str(exc)
+            if i+1<attempts: time.sleep(.15)
+    return None,last or 'A2S_INFO timeout'
+
+
 def network_info(sid:int):
     c=load_server(sid); port=int(c['port']); public=str(c.get('public_ip') or load_runtime().get('public_ip') or '')
     lan=detect_lan_ip(); svc=service_status(sid); udp=udp_listening(port)
     local_query=False; qerr=''; q={}
     if udp:
-        try:
-            q=query_info('127.0.0.1',port,1.2); local_query=True
-        except Exception as exc: qerr=str(exc)
+        qi,qerr=query_info_retry(port,3)
+        if qi:
+            q=qi; local_query=True
     ssout=run(['ss','-lunp'],check=False).stdout or ''
     socket_lines=[x for x in ssout.splitlines() if re.search(rf':{port}(?:\s|$)',x)]
+    health='online' if svc=='active' and udp else ('starting' if svc=='active' else 'offline')
+    query_state='ok' if local_query else ('retrying' if udp else 'offline')
     return {
-        'ok':svc=='active' and udp and local_query,
-        'service':svc,'udp_listening':udp,'a2s_local':local_query,'query_error':qerr,'query':q,
+        # Service + UDP is the authoritative connectivity signal. A2S can be rate-limited transiently.
+        'ok':svc=='active' and udp,
+        'health':health,'service':svc,'udp_listening':udp,'a2s_local':local_query,'query_state':query_state,
+        'query_error':qerr,'query':q,
         'public_ip':public,'lan_ip':lan,'port':port,
         'public_address':f'{public}:{port}' if public else '',
         'lan_address':f'{lan}:{port}' if lan else '',
         'socket':socket_lines[:8],
-        'internet_note':f'For Internet access forward UDP {port} on the router to {lan}:{port}. The panel cannot change router NAT automatically.',
-        'lan_note':f'From the same LAN use {lan}:{port}; public-IP hairpin/NAT loopback is not supported by every router.'
+        'internet_note':f'For Internet access forward UDP {port} on the router to {lan}:{port}.',
+        'lan_note':f'From the same LAN use {lan}:{port}.'
     }
-
 
 def udp_listening(port:int)->bool:
     cp=run(['ss','-lunH'],check=False)
@@ -603,17 +619,21 @@ def udp_listening(port:int)->bool:
 
 
 def wait_server_ready(c:dict, timeout:float=25.0):
-    deadline=time.time()+timeout; last=''
+    deadline=time.time()+timeout; last=''; udp_since=None
     while time.time()<deadline:
         if service_status(int(c['id']))!='active':
-            last='systemd service is not active'; time.sleep(.5); continue
+            last='systemd service is not active'; udp_since=None; time.sleep(.6); continue
         if not udp_listening(int(c['port'])):
-            last=f'UDP {c["port"]} is not listening'; time.sleep(.5); continue
-        try:
-            info=query_info('127.0.0.1',int(c['port']),1.0)
-            return True,info
-        except Exception as exc:
-            last=f'A2S_INFO failed: {exc}'; time.sleep(.5)
+            last=f'UDP {c["port"]} is not listening'; udp_since=None; time.sleep(.6); continue
+        if udp_since is None: udp_since=time.time()
+        qi,qerr=query_info_retry(int(c['port']),1)
+        if qi: return True,qi
+        last=f'A2S_INFO transient failure: {qerr}'
+        # A real hlds_linux UDP socket is enough to declare the process ready. A2S is
+        # auxiliary telemetry and may be temporarily rate-limited during map loading.
+        if time.time()-udp_since>=2.5:
+            return True,{'map':str(c.get('start_map') or ''),'query_degraded':True,'query_error':qerr}
+        time.sleep(.8)
     return False,last or 'server readiness timeout'
 
 
@@ -726,6 +746,14 @@ def disk_mb(path:Path):
 
 def query_host(c): return '127.0.0.1'
 
+def rcon_current_map(c):
+    try:
+        raw=query_rcon(query_host(c),int(c['port']),str(c.get('rcon_password','')),'status',2.2)
+    except Exception:
+        return '', ''
+    m=re.search(r'(?mi)^\s*map\s*:\s*([A-Za-z0-9_-]+)',raw)
+    return (m.group(1) if m else ''), raw
+
 def rcon_status_players(c):
     try:
         raw=query_rcon(query_host(c),int(c['port']),str(c.get('rcon_password','')),'status',2.0)
@@ -745,17 +773,19 @@ def rcon_status_players(c):
     return rows
 
 def status_json(sid:int,include_players=True):
-    c=load_server(sid); svc=service_status(sid); pid=get_pid(sid); pm=proc_metrics(pid); path=Path(c['path'])
-    data={'ok':True,'id':sid,'service':svc,'running':svc=='active','pid':pid,'cpu_percent':pm['cpu_percent'],'memory_mb':pm['memory_mb'],
-          'uptime_seconds':pm['uptime_seconds'],'disk_mb':disk_mb(path),'port':c['port'],'slots':c['slots'],'hostname':c['hostname'],
+    c=load_server(sid); svc=service_status(sid); pid=get_pid(sid); pm=proc_metrics(pid); path=Path(c['path']); port=int(c['port'])
+    udp=udp_listening(port) if svc=='active' else False
+    data={'ok':True,'id':sid,'service':svc,'running':svc=='active','udp_listening':udp,'pid':pid,'cpu_percent':pm['cpu_percent'],'memory_mb':pm['memory_mb'],
+          'uptime_seconds':pm['uptime_seconds'],'disk_mb':disk_mb(path),'port':port,'slots':c['slots'],'hostname':c['hostname'],
           'public_ip':c.get('public_ip',''),'start_map':c['start_map'],'profile':c.get('profile','classic'),'ftp_user':c.get('ftp_user',''),
-          'ftp_password':c.get('ftp_password',''),'query':None,'players':[],'query_error':''}
-    if svc=='active':
-        try:
-            data['query']=query_info(query_host(c),int(c['port']),1.2)
+          'ftp_password':c.get('ftp_password',''),'query':None,'query_ok':False,'query_state':'offline','players':[],'query_error':''}
+    if svc=='active' and udp:
+        qi,qerr=query_info_retry(port,2)
+        if qi:
+            data['query']=qi; data['query_ok']=True; data['query_state']='ok'
             if include_players:
                 a2s=[]
-                try: a2s=query_players(query_host(c),int(c['port']),1.2)
+                try: a2s=query_players(query_host(c),port,1.5)
                 except Exception as exc: data['players_error']=str(exc)
                 status_rows=rcon_status_players(c)
                 by_name={}
@@ -769,9 +799,14 @@ def status_json(sid:int,include_players=True):
                 for r in status_rows:
                     if (r.get('name',''),r.get('userid')) not in used: merged.append(r)
                 data['players']=merged
-        except Exception as exc: data['query_error']=str(exc)
+        else:
+            # Do not call a healthy UDP server dead only because A2S dropped a packet.
+            data['query_state']='retrying'; data['query_error']=qerr
+            if include_players:
+                data['players']=rcon_status_players(c)
+    elif svc=='active':
+        data['query_state']='no_udp'; data['query_error']=f'UDP {port} is not listening'
     return data
-
 
 def rcon_cmd(sid:int,command:str):
     c=load_server(sid)
@@ -790,11 +825,13 @@ def map_list(sid:int):
     c=load_server(sid); d=Path(c['path'])/'cstrike/maps'
     maps=sorted({p.stem for p in d.glob('*.bsp') if SAFE_MAP.fullmatch(p.stem)},key=str.lower) if d.is_dir() else []
     current=str(c.get('start_map') or '')
-    if service_status(sid)=='active':
-        try:
-            current=str(query_info(query_host(c),int(c['port']),1.2).get('map') or current)
-        except Exception:
-            pass
+    if service_status(sid)=='active' and udp_listening(int(c['port'])):
+        rmap,_=rcon_current_map(c)
+        if rmap:
+            current=rmap
+        else:
+            qi,_=query_info_retry(int(c['port']),1)
+            if qi: current=str(qi.get('map') or current)
     return {'ok':True,'maps':maps,'current_map':current,'start_map':str(c.get('start_map') or '')}
 
 
@@ -804,64 +841,74 @@ def activate_map(sid:int,map_name:str):
     bsp=Path(c['path'])/'cstrike/maps'/(map_name+'.bsp')
     if not bsp.is_file(): raise RuntimeError(f'Map is not installed on this server: {map_name}')
 
-    # Persist first so any restart/start uses the selected map too.
+    # Persist first: if a restart is ever needed, HLDS comes back on the selected map.
     c['start_map']=map_name
-    write_server_cfg(Path(c['path']),c)
-    save_server(c)
-    normalize_permissions(Path(c['path']))
-    db_update_start_map(sid,map_name)
+    write_server_cfg(Path(c['path']),c); save_server(c); normalize_permissions(Path(c['path'])); db_update_start_map(sid,map_name)
 
-    service=service_status(sid)
-    mode='changelevel'
-    output=''
-    if service!='active':
-        cp=run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False)
-        if cp.returncode!=0: raise RuntimeError((cp.stderr or cp.stdout or 'HLDS start failed').strip())
+    service=service_status(sid); mode='changelevel'; output=''; last_error=''
+    if service!='active' or not udp_listening(int(c['port'])):
+        run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
         mode='start'
+        ok,detail=wait_server_ready(c,30.0)
+        if not ok: raise RuntimeError(f'HLDS failed to start on {map_name}: {detail}')
     else:
         try:
             output=query_rcon(query_host(c),int(c['port']),str(c.get('rcon_password','')),'changelevel '+map_name,3.0)
         except Exception as exc:
-            output='RCON changelevel failed: '+str(exc)
+            last_error='RCON changelevel failed: '+str(exc)
             mode='restart_fallback'
             run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
 
-    # Do not report success until A2S confirms that the selected map is actually running.
-    deadline=time.time()+18.0
-    last_error=''
+    # GoldSrc can briefly suppress A2S during map load. Verify by RCON first and query
+    # A2S only at a low rate so our own panel never triggers query flood protection.
+    deadline=time.time()+20.0; next_a2s=0.0; last_q=None
     while time.time()<deadline:
-        if service_status(sid)!='active':
-            time.sleep(.5); continue
-        try:
-            q=query_info(query_host(c),int(c['port']),1.2)
-            current=str(q.get('map') or '')
-            if current==map_name:
-                db_update_current_map(sid,map_name)
-                return {'ok':True,'map':map_name,'current_map':current,'mode':mode,'service':'active','query':q,'output':output}
-            last_error=f'current map is {current or "unknown"}'
-        except Exception as exc:
-            last_error=str(exc)
-        time.sleep(.6)
+        if service_status(sid)!='active' or not udp_listening(int(c['port'])):
+            time.sleep(.8); continue
+        rmap,_=rcon_current_map(c)
+        if rmap==map_name:
+            qi,qerr=query_info_retry(int(c['port']),1)
+            if qi: last_q=qi
+            db_update_current_map(sid,map_name)
+            return {'ok':True,'map':map_name,'current_map':map_name,'mode':mode,'service':'active','query':last_q or {},'output':output,'verified_by':'rcon'}
+        now=time.time()
+        if now>=next_a2s:
+            qi,qerr=query_info_retry(int(c['port']),1); next_a2s=now+2.0
+            if qi:
+                last_q=qi
+                current=str(qi.get('map') or '')
+                if current==map_name:
+                    db_update_current_map(sid,map_name)
+                    return {'ok':True,'map':map_name,'current_map':current,'mode':mode,'service':'active','query':qi,'output':output,'verified_by':'a2s'}
+                last_error=f'current map is {current or "unknown"}'
+            elif qerr:
+                last_error=qerr
+        time.sleep(.75)
 
-    # One final restart makes the persisted start_map authoritative if changelevel was ignored.
+    # Restart only when the map really did not change. Never restart merely because A2S
+    # timed out while RCON/UDP still show a healthy server.
     if mode=='changelevel':
-        run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
-        mode='restart_fallback'
-        deadline=time.time()+18.0
-        while time.time()<deadline:
-            try:
-                if service_status(sid)=='active':
-                    q=query_info(query_host(c),int(c['port']),1.2)
-                    current=str(q.get('map') or '')
-                    if current==map_name:
-                        db_update_current_map(sid,map_name)
-                        return {'ok':True,'map':map_name,'current_map':current,'mode':mode,'service':'active','query':q,'output':output}
-                    last_error=f'current map is {current or "unknown"}'
-            except Exception as exc:
-                last_error=str(exc)
-            time.sleep(.6)
-    raise RuntimeError(f'Failed to activate map {map_name}: {last_error or "A2S did not confirm the map"}')
+        rmap,_=rcon_current_map(c)
+        if rmap and rmap!=map_name:
+            run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
+            mode='restart_fallback'
+            ok,detail=wait_server_ready(c,30.0)
+            if not ok: raise RuntimeError(f'HLDS restart failed while activating {map_name}: {detail}')
+            deadline=time.time()+12.0
+            while time.time()<deadline:
+                rmap,_=rcon_current_map(c)
+                if rmap==map_name:
+                    db_update_current_map(sid,map_name)
+                    return {'ok':True,'map':map_name,'current_map':map_name,'mode':mode,'service':'active','query':{},'output':output,'verified_by':'rcon'}
+                time.sleep(1.0)
 
+    # If UDP remains live, do not poison the whole server state with a false NO QUERY.
+    if service_status(sid)=='active' and udp_listening(int(c['port'])):
+        rmap,_=rcon_current_map(c)
+        if rmap==map_name:
+            db_update_current_map(sid,map_name)
+            return {'ok':True,'map':map_name,'current_map':map_name,'mode':mode,'service':'active','query':{},'output':output,'verified_by':'rcon'}
+    raise RuntimeError(f'Failed to activate map {map_name}: {last_error or "map verification failed"}')
 
 def plugins_list(sid:int):
     c=load_server(sid); root=Path(c['path'])/'cstrike/addons/amxmodx'; pin=root/'configs/plugins.ini'; plugdir=root/'plugins'
@@ -1420,7 +1467,7 @@ def network_fix(sid:int):
         warnings.append(f'Automatic router mapping was not confirmed. Keenetic must have UDP {port} -> {lan}:{port}.')
     info=network_info(sid)
     info.update({'host_firewall_repaired':True,'changes':changes,'upnp':upnp_result,'router_external_ip':router_external,'public_ip_matches_router':(not router_external or not public or router_external==public),'warnings':warnings})
-    info['ok']=bool(info.get('service')=='active' and info.get('udp_listening') and info.get('a2s_local'))
+    info['ok']=bool(info.get('service')=='active' and info.get('udp_listening'))
     return info
 
 def server_delete(sid:int):

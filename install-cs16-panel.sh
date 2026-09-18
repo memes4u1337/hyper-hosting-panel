@@ -175,7 +175,7 @@ UHEX="$(hex "$ADMIN_USER")"; HHEX="$(hex "$ADMIN_HASH")"
 mysql --protocol=socket -uroot "$DB_NAME" <<SQL
 INSERT INTO users(username,password_hash,role) VALUES(CONVERT(0x$UHEX USING utf8mb4),CONVERT(0x$HHEX USING utf8mb4),'admin')
 ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash),role='admin';
-INSERT INTO settings(setting_key,setting_value) VALUES('panel_version','1.6.0') ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value);
+INSERT INTO settings(setting_key,setting_value) VALUES('panel_version','2.3.0') ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value);
 SQL
 
 log "Writing runtime configuration..."

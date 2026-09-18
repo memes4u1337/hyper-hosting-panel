@@ -32,19 +32,24 @@
 
   let chart;
   let currentMap = String(cfg.currentMap || '');
+  const setHealthPill=(id,state,text)=>{const el=$(id);if(!el)return;el.classList.remove('ok','warn','bad');el.classList.add(state);el.innerHTML=`<i></i>${text}`;};
   async function loadStatus(){
     try{
       const j=await api('status'); const q=j.query||{};
       if($('#livePlayers')) $('#livePlayers').textContent=`${q.players ?? (j.players||[]).length} / ${q.max_players ?? j.slots}`;
-      currentMap = q.map || j.start_map || currentMap;
+      currentMap = q.map || currentMap || j.start_map || '';
       if($('#liveMap')) $('#liveMap').textContent=currentMap || '—';
       if($('#currentMapLabel')) $('#currentMapLabel').textContent=currentMap || '—';
-      if($('#mapSelector') && currentMap && [...$('#mapSelector').options].some(o=>o.value===currentMap)) $('#mapSelector').value=currentMap;
+      ['#mapSelector','#settingsMapSelector','#quickMapSelector'].forEach(sel=>{const el=$(sel);if(el&&currentMap&&[...el.options].some(o=>o.value===currentMap))el.value=currentMap;});
       if($('#liveCpu')) $('#liveCpu').textContent=`${Number(j.cpu_percent||0).toFixed(1)}%`;
       if($('#liveRam')) $('#liveRam').textContent=mb(j.memory_mb||0);
       if($('#liveDisk')) $('#liveDisk').textContent=mb(j.disk_mb||0);
-      if($('#livePing')) $('#livePing').textContent=`${Number((q.ping_ms ?? 0)).toFixed(1)} ms`;
+      if($('#livePing') && q.ping_ms!=null) $('#livePing').textContent=`${Number(q.ping_ms).toFixed(1)} ms`;
+      if($('#livePing') && q.ping_ms==null && j.udp_listening) $('#livePing').textContent='ожидание';
       if($('#liveUptime')) $('#liveUptime').textContent=dur(j.uptime_seconds||0);
+      setHealthPill('#healthService',j.running?'ok':'bad',`Процесс ${j.running?'ON':'OFF'}`);
+      setHealthPill('#healthUdp',j.udp_listening?'ok':'bad',`UDP ${j.udp_listening?'ON':'OFF'}`);
+      setHealthPill('#healthQuery',j.query_state==='ok'?'ok':(j.udp_listening?'warn':'bad'),`A2S ${j.query_state==='ok'?'OK':(j.udp_listening?'RETRY':'OFF')}`);
     }catch(e){ /* keep cached values */ }
   }
   loadStatus(); setInterval(loadStatus, 10000);
@@ -157,8 +162,8 @@
     const out=$('#networkCheckResult'); if(out){out.className='network-check-result';out.textContent='Проверяю...';}
     try{
       const j=await api('network');
-      const good=!!(j.service==='active' && j.udp_listening && j.a2s_local);
-      if(out){out.className='network-check-result '+(good?'ok':'bad');out.textContent=good?`HLDS работает: UDP ${j.port} слушается, A2S отвечает. Для LAN: ${j.lan_address}.`:`Ошибка: service=${j.service}, UDP=${j.udp_listening?'OK':'NO'}, A2S=${j.a2s_local?'OK':'NO'} ${j.query_error||''}`;}
+      const good=!!(j.service==='active' && j.udp_listening);
+      if(out){out.className='network-check-result '+(good?'ok':'bad');out.textContent=good?(j.a2s_local?`HLDS работает: UDP ${j.port} слушается, A2S отвечает. LAN: ${j.lan_address}.`:`HLDS работает: UDP ${j.port} слушается. A2S временно не ответил — панель повторит запрос автоматически.`):`Ошибка: service=${j.service}, UDP=${j.udp_listening?'OK':'NO'} ${j.query_error||''}`;}
     }catch(e){if(out){out.className='network-check-result bad';out.textContent=e.message;}}
   });
 
@@ -184,18 +189,22 @@
     const groups=new Map(); maps.forEach(m=>{const g=mapGroup(m);if(!groups.has(g))groups.set(g,[]);groups.get(g).push(m)});
     sel.innerHTML=[...groups].map(([g,items])=>`<optgroup label="${esc(g)}">${items.map(m=>`<option value="${esc(m)}" ${m===currentMap?'selected':''}>${esc(m)}</option>`).join('')}</optgroup>`).join('');
   }
+  let mapBusy=false;
   async function changeMap(map,ask=false){
-    map=String(map||'').trim(); if(!map||map===currentMap)return;
+    map=String(map||'').trim(); if(!map||map===currentMap||mapBusy)return;
     if(ask&&!confirm(`Переключить сервер на ${map}?`))return;
-    const previous=currentMap; const selectors=[$('#mapSelector'),$('#settingsMapSelector')].filter(Boolean); selectors.forEach(s=>s.disabled=true);
+    mapBusy=true;
+    const previous=currentMap; const selectors=[$('#mapSelector'),$('#settingsMapSelector'),$('#quickMapSelector')].filter(Boolean); selectors.forEach(s=>s.disabled=true);
+    const state=$('#mapChangeState');if(state){state.className='busy';state.textContent=`Запускаю ${map}...`;}
     toast(`Запускаю карту ${map}...`);
     try{
       const r=await api('change-map',{map},'POST');currentMap=r.current_map||map;
       if($('#liveMap'))$('#liveMap').textContent=currentMap;if($('#currentMapLabel'))$('#currentMapLabel').textContent=currentMap;
       selectors.forEach(s=>{if([...s.options].some(o=>o.value===currentMap))s.value=currentMap;});
-      toast(`Карта уже запущена: ${currentMap}${r.mode==='restart_fallback'?' (через перезапуск)':''}`);setTimeout(loadStatus,500);
-    }catch(e){selectors.forEach(s=>{if(previous&&[...s.options].some(o=>o.value===previous))s.value=previous;});toast(e.message,true)}
-    finally{selectors.forEach(s=>s.disabled=false);}
+      if(state){state.className='ok';state.textContent=`${currentMap} запущена`;setTimeout(()=>{state.textContent='';state.className='';},3000);}
+      toast(`Карта уже запущена: ${currentMap}${r.mode==='restart_fallback'?' (через перезапуск)':''}`);setTimeout(loadStatus,700);
+    }catch(e){selectors.forEach(s=>{if(previous&&[...s.options].some(o=>o.value===previous))s.value=previous;});if(state){state.className='bad';state.textContent=e.message;}toast(e.message,true)}
+    finally{mapBusy=false;selectors.forEach(s=>s.disabled=false);}
   }
   async function loadMaps(){
     const g=$('#mapGrid'); if(!g)return; g.innerHTML='<span>Загрузка...</span>';
@@ -209,6 +218,8 @@
   }
 
   $('#settingsMapSelector')?.addEventListener('change',e=>changeMap(e.currentTarget.value,false));
+  $('#quickMapApply')?.addEventListener('click',()=>changeMap($('#quickMapSelector')?.value,false));
+  $('#quickMapSelector')?.addEventListener('change',()=>{const state=$('#mapChangeState');if(state){state.className='';state.textContent='Нажми «Запустить»';}});
 
   async function loadPlugins(){
     const box=$('#pluginList');if(!box)return;box.textContent='Загрузка...';

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import json, os, subprocess, sys, time, re
+import json, subprocess, sys, time, re, socket
 from pathlib import Path
 
 APP=Path('/opt/hyper-cs16'); ETC=Path('/etc/hyper-cs16'); STATE=Path('/var/lib/hyper-cs16')
@@ -44,8 +44,25 @@ def disk(path):
     try:return float(cp.stdout.split()[0])
     except:return 0.0
 
+def udp_listening(port):
+    cp=subprocess.run(['ss','-lunH'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+    needle=f':{int(port)}'
+    for line in (cp.stdout or '').splitlines():
+        if any(tok.endswith(needle) for tok in line.split()): return True
+    return False
+
+def query_info_retry(port, attempts=2):
+    last=None
+    timeouts=(0.9,1.5,2.0)
+    for i in range(max(1,attempts)):
+        try: return query_info('127.0.0.1',int(port),timeouts[min(i,len(timeouts)-1)]), ''
+        except Exception as exc:
+            last=exc
+            if i+1<attempts: time.sleep(.15)
+    return None, str(last or 'A2S_INFO timeout')
+
 def rcon_player_rows(c):
-    try: raw=query_rcon('127.0.0.1',int(c['port']),str(c.get('rcon_password','')),'status',1.5)
+    try: raw=query_rcon('127.0.0.1',int(c['port']),str(c.get('rcon_password','')),'status',1.8)
     except Exception: return []
     rx=re.compile(r'^\s*#\s*(\d+)\s+\"(.*?)\"\s+(\d+)\s+(\S+)\s+(-?\d+)\s+(\S+)\s+(\d+)\s+(\d+)\s+(.*)$')
     rows=[]
@@ -56,13 +73,32 @@ def rcon_player_rows(c):
 
 def one(db,row,store_stats=False,store_players=False):
     sid=int(row['id']); c=scfg(sid); svc=service(sid); p=pid(sid); cpu,mem,uptime=proc_metrics(p)
-    status='online' if svc=='active' else ('offline' if svc in {'inactive','failed'} else svc)
-    map_name=''; online=0; maxp=int(row.get('slots') or 0); ping=0.0; plist=[]
-    if c and svc=='active':
-        try:
-            qi=query_info('127.0.0.1',int(c['port']),1.0); map_name=str(qi.get('map','')); online=int(qi.get('players',0)); maxp=int(qi.get('max_players',maxp)); ping=float(qi.get('ping_ms',0)); status='online'
+    # Keep the last good query values. A single dropped A2S packet must never turn a
+    # healthy HLDS process into a scary "NO QUERY" state in the panel.
+    map_name=str(row.get('current_map') or row.get('start_map') or '')
+    online=int(row.get('players_online') or 0)
+    maxp=int(row.get('max_players') or row.get('slots') or 0)
+    ping=float(row.get('ping_ms') or 0.0)
+    query_ok=False; query_error=''; plist=[]
+    port=int((c or {}).get('port') or row.get('port') or 0)
+    udp=bool(port and udp_listening(port))
+
+    if svc!='active':
+        status='offline' if svc in {'inactive','failed','deactivating'} else 'starting'
+    elif not c:
+        status='failed'
+    elif not udp:
+        status='starting' if uptime < 90 else 'failed'
+    else:
+        # UDP socket is the authoritative liveness signal. A2S is statistics only.
+        status='online'
+        qi,query_error=query_info_retry(port,2)
+        if qi:
+            query_ok=True
+            map_name=str(qi.get('map') or map_name)
+            online=int(qi.get('players',online)); maxp=int(qi.get('max_players',maxp)); ping=float(qi.get('ping_ms',ping))
             if store_players:
-                try: plist=query_players('127.0.0.1',int(c['port']),1.0)
+                try: plist=query_players('127.0.0.1',port,1.5)
                 except Exception: plist=[]
                 status_rows=rcon_player_rows(c); by_name={}
                 for rr in status_rows: by_name.setdefault(rr.get('name',''),[]).append(rr)
@@ -72,11 +108,14 @@ def one(db,row,store_stats=False,store_players=False):
                         if cand: pl.update(cand.pop(0))
                 else:
                     plist=[dict(rr,duration=0) for rr in status_rows]
-        except Exception:
-            status='starting' if uptime<60 else 'unreachable'
+
     d=disk(c['path']) if c else 0.0
     with db.cursor() as cur:
-        cur.execute("UPDATE servers SET status_cache=%s,current_map=%s,players_online=%s,max_players=%s,cpu_percent=%s,memory_mb=%s,disk_mb=%s,uptime_seconds=%s,ping_ms=%s,last_query_at=NOW() WHERE id=%s",(status,map_name,online,maxp,cpu,mem,d,uptime,ping,sid))
+        if query_ok:
+            cur.execute("UPDATE servers SET status_cache=%s,current_map=%s,players_online=%s,max_players=%s,cpu_percent=%s,memory_mb=%s,disk_mb=%s,uptime_seconds=%s,ping_ms=%s,last_query_at=NOW() WHERE id=%s",(status,map_name,online,maxp,cpu,mem,d,uptime,ping,sid))
+        else:
+            # Preserve last_query_at and last known map/player values on transient A2S loss.
+            cur.execute("UPDATE servers SET status_cache=%s,cpu_percent=%s,memory_mb=%s,disk_mb=%s,uptime_seconds=%s WHERE id=%s",(status,cpu,mem,d,uptime,sid))
         if store_stats:
             cur.execute("INSERT INTO server_stats(server_id,players,max_players,cpu_percent,memory_mb,disk_mb,ping_ms,map_name) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",(sid,online,maxp,cpu,mem,d,ping,map_name))
         if store_players:
@@ -89,7 +128,7 @@ def main():
         try:
             db=conn()
             with db.cursor() as cur:
-                cur.execute("SELECT id,slots FROM servers WHERE enabled=1 ORDER BY id"); rows=cur.fetchall()
+                cur.execute("SELECT id,port,slots,start_map,current_map,players_online,max_players,ping_ms FROM servers WHERE enabled=1 ORDER BY id"); rows=cur.fetchall()
             store_stats=(tick%6==0); store_players=(tick%6==0)
             for row in rows:
                 try: one(db,row,store_stats,store_players)
