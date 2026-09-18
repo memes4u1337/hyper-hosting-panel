@@ -5,9 +5,11 @@ from pathlib import Path
 
 APP_ROOT=Path('/opt/hyper-cs16')
 ETC_ROOT=Path('/etc/hyper-cs16')
-SERVER_CFG_DIR=ETC_ROOT/'servers'
+STATE_ROOT=Path('/var/lib/hyper-cs16')
+SERVER_CFG_DIR=STATE_ROOT/'servers'
+LEGACY_SERVER_CFG_DIR=ETC_ROOT/'servers'
 RUNTIME_FILE=ETC_ROOT/'runtime.json'
-STAGING_DIR=Path('/var/lib/hyper-cs16/uploads')
+STAGING_DIR=STATE_ROOT/'uploads'
 LIB_DIR=APP_ROOT/'lib'
 if str(LIB_DIR) not in sys.path: sys.path.insert(0,str(LIB_DIR))
 try:
@@ -48,21 +50,43 @@ def load_runtime():
 
 def cfg_path(sid:int)->Path: return SERVER_CFG_DIR/f'{sid}.json'
 
+def legacy_cfg_path(sid:int)->Path: return LEGACY_SERVER_CFG_DIR/f'{sid}.json'
+
 def load_server(sid:int):
     p=cfg_path(sid)
-    try: return json.loads(p.read_text(encoding='utf-8'))
+    legacy=legacy_cfg_path(sid)
+    source=p if p.exists() else legacy
+    try:
+        c=json.loads(source.read_text(encoding='utf-8'))
+        # Migrate old mutable state out of /etc when the controller is running in a writable context.
+        if source==legacy and not p.exists():
+            try: save_server(c)
+            except Exception: pass
+        return c
     except Exception as exc: out({'ok':False,'error':f'Server {sid} config unavailable: {exc}'},2)
 
 def save_server(c:dict):
     SERVER_CFG_DIR.mkdir(parents=True,exist_ok=True)
-    p=cfg_path(int(c['id']))
-    tmp=p.with_suffix('.tmp')
-    tmp.write_text(json.dumps(c,ensure_ascii=False,indent=2),encoding='utf-8')
-    os.chmod(tmp,0o640)
     try:
-        shutil.chown(tmp,user='root',group='cs16')
+        os.chmod(SERVER_CFG_DIR,0o750)
+        shutil.chown(SERVER_CFG_DIR,user='root',group='cs16')
     except Exception: pass
-    os.replace(tmp,p)
+    p=cfg_path(int(c['id']))
+    fd,tmp_name=tempfile.mkstemp(prefix=f'.{int(c["id"])}.',suffix='.tmp',dir=str(SERVER_CFG_DIR))
+    tmp=Path(tmp_name)
+    try:
+        with os.fdopen(fd,'w',encoding='utf-8') as fh:
+            json.dump(c,fh,ensure_ascii=False,indent=2)
+            fh.write('\n')
+            fh.flush(); os.fsync(fh.fileno())
+        os.chmod(tmp,0o640)
+        try: shutil.chown(tmp,user='root',group='cs16')
+        except Exception: pass
+        os.replace(tmp,p)
+    finally:
+        try:
+            if tmp.exists(): tmp.unlink()
+        except Exception: pass
 
 
 def run(cmd, check=True, capture=True, timeout=None, cwd=None, env=None):
@@ -84,16 +108,25 @@ def safe_server_path(sid:int):
 
 
 def port_available(port:int, ignore_sid:int|None=None):
-    # UDP socket ownership check plus configs, deterministic and NAT-safe.
-    for p in SERVER_CFG_DIR.glob('*.json'):
-        try:
-            c=json.loads(p.read_text());
-            if ignore_sid is not None and int(c.get('id',0))==ignore_sid: continue
-            if int(c.get('port',0))==port: return False
-        except Exception: pass
+    # Check both the new mutable state directory and legacy /etc configs during migration.
+    # If the ignored server already owns this same port, its live UDP socket is not a conflict.
+    own_same_port=False
+    seen=set()
+    for root in (SERVER_CFG_DIR,LEGACY_SERVER_CFG_DIR):
+        for p in root.glob('*.json') if root.exists() else []:
+            try:
+                c=json.loads(p.read_text(encoding='utf-8')); sid=int(c.get('id',0)); key=(sid,int(c.get('port',0)))
+                if key in seen: continue
+                seen.add(key)
+                if ignore_sid is not None and sid==ignore_sid:
+                    if int(c.get('port',0))==port: own_same_port=True
+                    continue
+                if int(c.get('port',0))==port: return False
+            except Exception: pass
     cp=run(['ss','-lunH'],check=False)
     needle=f':{port} '
-    return needle not in (cp.stdout or '')
+    if needle in (cp.stdout or '') and not own_same_port: return False
+    return True
 
 
 def download(url:str,dst:Path):
@@ -489,6 +522,11 @@ def config_write(sid:int,name:str,content:str):
 
 def server_config_set(args):
     require_root(); c=load_server(args.id)
+    if args.port is not None:
+        if not 27015<=args.port<=27100: raise RuntimeError('port 27015..27100')
+        old_port=int(c.get('port',0) or 0)
+        if args.port!=old_port and not port_available(args.port,args.id): raise RuntimeError(f'Port {args.port} is already used')
+        c['port']=args.port
     if args.slots is not None:
         if not 1<=args.slots<=32: raise RuntimeError('slots 1..32')
         c['slots']=args.slots
@@ -622,6 +660,7 @@ def doctor():
     for name,cmd in {'steamcmd':[rt.get('steamcmd','/opt/steamcmd/steamcmd.sh'),'+quit'], 'nginx':['nginx','-t'], 'mariadb':['systemctl','is-active','mariadb'], 'ftp':['ss','-ltn','sport = :21']}.items():
         cp=run(cmd,check=False,timeout=30); checks[name]={'ok':cp.returncode==0,'output':(cp.stdout or '').strip()[-500:]}
     checks['base_game']={'ok':Path(rt.get('base_game_dir','/srv/hyper-cs16/base-hlds')).joinpath('hlds_run').exists() and Path(rt.get('base_game_dir','/srv/hyper-cs16/base-hlds')).joinpath('cstrike/maps/de_dust2.bsp').exists()}
+    checks['state_dir']={'ok':SERVER_CFG_DIR.is_dir() and os.access(SERVER_CFG_DIR,os.W_OK),'path':str(SERVER_CFG_DIR)}
     checks['ftp_restore_service']={'ok':run(['systemctl','is-enabled','hyper-cs16-ftp-restore.service'],check=False).returncode==0}
     return {'ok':all(v.get('ok') for v in checks.values()),'checks':checks}
 
@@ -639,7 +678,7 @@ def main():
     q=sp.add_parser('plugin-toggle'); q.add_argument('id',type=int); q.add_argument('plugin'); q.add_argument('state',choices=['on','off'])
     q=sp.add_parser('config-read'); q.add_argument('id',type=int); q.add_argument('name',choices=sorted(ALLOWED_CONFIGS))
     q=sp.add_parser('config-write'); q.add_argument('id',type=int); q.add_argument('name',choices=sorted(ALLOWED_CONFIGS))
-    q=sp.add_parser('config-set'); q.add_argument('id',type=int); q.add_argument('--slots',type=int); q.add_argument('--map'); q.add_argument('--hostname'); q.add_argument('--password'); q.add_argument('--rcon')
+    q=sp.add_parser('config-set'); q.add_argument('id',type=int); q.add_argument('--port',type=int); q.add_argument('--slots',type=int); q.add_argument('--map'); q.add_argument('--hostname'); q.add_argument('--password'); q.add_argument('--rcon')
     q=sp.add_parser('logs'); q.add_argument('id',type=int); q.add_argument('--lines',type=int,default=160)
     q=sp.add_parser('map-upload'); q.add_argument('id',type=int); q.add_argument('token'); q.add_argument('map_name')
     q=sp.add_parser('plugin-upload'); q.add_argument('id',type=int); q.add_argument('token'); q.add_argument('plugin_name')

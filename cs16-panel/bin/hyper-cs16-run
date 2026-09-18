@@ -5,7 +5,10 @@ from pathlib import Path
 
 if len(sys.argv)!=2 or not sys.argv[1].isdigit():
     print('Usage: hyper-cs16-run SERVER_ID',file=sys.stderr); raise SystemExit(2)
-sid=int(sys.argv[1]); cfg=Path('/etc/hyper-cs16/servers')/f'{sid}.json'
+sid=int(sys.argv[1]); cfg=Path('/var/lib/hyper-cs16/servers')/f'{sid}.json'
+if not cfg.exists():
+    legacy=Path('/etc/hyper-cs16/servers')/f'{sid}.json'
+    if legacy.exists(): cfg=legacy
 try: c=json.loads(cfg.read_text(encoding='utf-8'))
 except Exception as exc:
     print(f'Cannot read {cfg}: {exc}',file=sys.stderr); raise SystemExit(2)

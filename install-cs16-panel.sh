@@ -23,7 +23,9 @@ BASE="/opt/hyper-cs16"
 ETC="/etc/hyper-cs16"
 SERVERS="/srv/hyper-cs16/servers"
 STEAMCMD="/opt/steamcmd"
-UPLOAD_STAGE="/var/lib/hyper-cs16/uploads"
+STATE="/var/lib/hyper-cs16"
+SERVER_STATE="$STATE/servers"
+UPLOAD_STAGE="$STATE/uploads"
 
 log(){ printf '\033[1;36m[CS16]\033[0m %s\n' "$*"; }
 warn(){ printf '\033[1;33m[CS16 WARNING]\033[0m %s\n' "$*" >&2; }
@@ -64,8 +66,21 @@ if ! id cs16 >/dev/null 2>&1; then
   useradd --system --gid cs16 --create-home --home-dir /srv/hyper-cs16 --shell /usr/sbin/nologin cs16
 fi
 usermod -aG www-data cs16 >/dev/null 2>&1 || true
-mkdir -p "$BASE"/{lib,backups} "$ETC/servers" "$SERVERS" "$STEAMCMD"
+mkdir -p "$BASE"/{lib,backups} "$ETC" "$SERVERS" "$STEAMCMD"
+install -d -o root -g cs16 -m 0750 "$SERVER_STATE"
 install -d -o root -g www-data -m 0730 "$UPLOAD_STAGE"
+# v1.3+: mutable per-server JSON belongs in /var/lib, never /etc. Migrate legacy configs if present.
+if [[ -d "$ETC/servers" ]]; then
+  shopt -s nullglob
+  for old_cfg in "$ETC/servers"/*.json; do
+    base_cfg="$(basename "$old_cfg")"
+    [[ -e "$SERVER_STATE/$base_cfg" ]] || cp -a "$old_cfg" "$SERVER_STATE/$base_cfg" || true
+  done
+  shopt -u nullglob
+fi
+chown root:cs16 "$SERVER_STATE"
+chmod 0750 "$SERVER_STATE"
+find "$SERVER_STATE" -maxdepth 1 -type f -name '*.json' -exec chown root:cs16 {} + -exec chmod 0640 {} + 2>/dev/null || true
 cat >/etc/tmpfiles.d/hyper-cs16.conf <<EOF
 d $UPLOAD_STAGE 0730 root www-data 1h
 EOF
@@ -134,7 +149,7 @@ UHEX="$(hex "$ADMIN_USER")"; HHEX="$(hex "$ADMIN_HASH")"
 mysql --protocol=socket -uroot "$DB_NAME" <<SQL
 INSERT INTO users(username,password_hash,role) VALUES(CONVERT(0x$UHEX USING utf8mb4),CONVERT(0x$HHEX USING utf8mb4),'admin')
 ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash),role='admin';
-INSERT INTO settings(setting_key,setting_value) VALUES('panel_version','1.1.0') ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value);
+INSERT INTO settings(setting_key,setting_value) VALUES('panel_version','1.2.0') ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value);
 SQL
 
 log "Writing runtime configuration..."
@@ -158,7 +173,7 @@ data={'domain':domain,'public_ip':ip,'db_host':'127.0.0.1','db_port':3306,'db_na
 open(path,'w',encoding='utf-8').write(json.dumps(data,ensure_ascii=False,indent=2)+'\n')
 PY
 chmod 0600 "$ETC/runtime.json"
-chown root:root "$ETC/runtime.json"; chown root:cs16 "$ETC/servers"; chmod 0750 "$ETC/servers"
+chown root:root "$ETC/runtime.json"
 
 log "Creating $DOMAIN in HYPER-HOST..."
 if [[ ! -d "$SITE_PUBLIC" ]]; then

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json, os, subprocess, sys, time, re
 from pathlib import Path
 
-APP=Path('/opt/hyper-cs16'); ETC=Path('/etc/hyper-cs16')
+APP=Path('/opt/hyper-cs16'); ETC=Path('/etc/hyper-cs16'); STATE=Path('/var/lib/hyper-cs16')
 sys.path.insert(0,str(APP/'lib'))
 from csquery import info as query_info, players as query_players, rcon as query_rcon
 try:
@@ -18,7 +18,9 @@ def conn():
     return pymysql.connect(host=r.get('db_host','127.0.0.1'),port=int(r.get('db_port',3306)),user=r['db_user'],password=r['db_password'],database=r['db_name'],charset='utf8mb4',autocommit=True,cursorclass=pymysql.cursors.DictCursor,connect_timeout=5)
 
 def scfg(sid):
-    try: return json.loads((ETC/'servers'/f'{sid}.json').read_text(encoding='utf-8'))
+    p=STATE/'servers'/f'{sid}.json'
+    if not p.exists(): p=ETC/'servers'/f'{sid}.json'
+    try: return json.loads(p.read_text(encoding='utf-8'))
     except Exception: return None
 
 def service(sid):

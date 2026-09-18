@@ -34,11 +34,17 @@ with con.cursor() as cur:
         print('[CS16 FIX] No game servers found; created default DB entry for UDP 27015')
 rows=[]
 for r in all_rows:
-    cfg=Path(f'/etc/hyper-cs16/servers/{int(r["id"])}.json')
+    cfg=Path(f'/var/lib/hyper-cs16/servers/{int(r["id"])}.json')
+    if not cfg.exists():
+        legacy=Path(f'/etc/hyper-cs16/servers/{int(r["id"])}.json')
+        if legacy.exists(): cfg=legacy
     if int(r.get('installed') or 0)==0 or str(r.get('status_cache') or '') in ('failed','installing') or not cfg.exists():
         rows.append(r)
 for r in rows:
-    sid=int(r['id']); cfg=Path(f'/etc/hyper-cs16/servers/{sid}.json')
+    sid=int(r['id']); cfg=Path(f'/var/lib/hyper-cs16/servers/{sid}.json')
+    if not cfg.exists():
+        legacy=Path(f'/etc/hyper-cs16/servers/{sid}.json')
+        if legacy.exists(): cfg=legacy
     if cfg.exists():
         subprocess.run(['systemctl','enable','--now',f'hyper-cs16@{sid}.service'],check=False)
         with con.cursor() as cur: cur.execute("UPDATE servers SET installed=1,status_cache='starting' WHERE id=%s",(sid,))
