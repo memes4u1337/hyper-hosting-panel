@@ -1,0 +1,11 @@
+HYPER-HOST CS 1.6 PANEL v1.0
+Domain: www.avito.hyper-host.pw
+Install: sudo bash install-cs16-panel.sh
+Update existing installation: sudo bash update-cs16-panel.sh
+Docs: README-CS16-HOSTING-RU.md
+
+Important before public access:
+1. A record www.avito.hyper-host.pw -> public IPv4 of the Ubuntu server.
+2. If behind NAT/router: forward UDP 27015-27100 to the Ubuntu host.
+3. Existing HYPER-HOST FTP runtime should already expose FTP/21 and its passive range.
+4. For HTTPS run installer with CS16_SSL_EMAIL after DNS resolves.

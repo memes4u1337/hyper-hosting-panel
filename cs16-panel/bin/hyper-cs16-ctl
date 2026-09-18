@@ -1,0 +1,617 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import argparse, json, os, pwd, re, secrets, shutil, signal, stat, subprocess, sys, tarfile, tempfile, time, zipfile
+from pathlib import Path
+
+APP_ROOT=Path('/opt/hyper-cs16')
+ETC_ROOT=Path('/etc/hyper-cs16')
+SERVER_CFG_DIR=ETC_ROOT/'servers'
+RUNTIME_FILE=ETC_ROOT/'runtime.json'
+STAGING_DIR=Path('/var/lib/hyper-cs16/uploads')
+LIB_DIR=APP_ROOT/'lib'
+if str(LIB_DIR) not in sys.path: sys.path.insert(0,str(LIB_DIR))
+try:
+    from csquery import info as query_info, players as query_players, rcon as query_rcon, QueryError
+except Exception as exc:
+    print(json.dumps({'ok':False,'error':f'csquery import failed: {exc}'},ensure_ascii=False)); raise
+
+SAFE_MAP=re.compile(r'^[A-Za-z0-9_\-]{1,64}$')
+SAFE_PLUGIN=re.compile(r'^[A-Za-z0-9_.\-]{1,96}$')
+SAFE_STAGE=re.compile(r'^(?:map|plugin)-[a-f0-9]{32}\.(?:bsp|amxx)$')
+SAFE_HOST=re.compile(r'^[A-Za-z0-9 ._\-\[\]()#]{1,160}$')
+SAFE_NAME=re.compile(r'^[A-Za-z0-9А-Яа-яЁё ._\-\[\]()#]{1,96}$')
+REHLDS_VERSION='3.15.0.896'
+REGAMEDLL_VERSION='5.30.0.814'
+METAMOD_VERSION='1.3.0.149'
+AMXX_BUILD='5303'
+AMXX_BASE=f'https://www.amxmodx.org/amxxdrop/1.9/amxmodx-1.9.0-git{AMXX_BUILD}-base-linux.tar.gz'
+AMXX_CSTRIKE=f'https://www.amxmodx.org/amxxdrop/1.9/amxmodx-1.9.0-git{AMXX_BUILD}-cstrike-linux.tar.gz'
+METAMOD_URL=f'https://github.com/rehlds/Metamod-R/releases/download/{METAMOD_VERSION}/metamod-bin-{METAMOD_VERSION}.zip'
+REHLDS_URL=f'https://github.com/rehlds/ReHLDS/releases/download/{REHLDS_VERSION}/rehlds-bin-{REHLDS_VERSION}.zip'
+REGAMEDLL_URL=f'https://github.com/rehlds/ReGameDLL_CS/releases/download/{REGAMEDLL_VERSION}/regamedll-bin-{REGAMEDLL_VERSION}.zip'
+
+
+def out(data, code=0):
+    if isinstance(data,str): print(data)
+    else: print(json.dumps(data,ensure_ascii=False,separators=(',',':')))
+    raise SystemExit(code)
+
+
+def require_root():
+    if os.geteuid()!=0: out({'ok':False,'error':'root privileges required'},2)
+
+
+def load_runtime():
+    try: return json.loads(RUNTIME_FILE.read_text(encoding='utf-8'))
+    except Exception as exc: out({'ok':False,'error':f'Runtime config unavailable: {exc}'},2)
+
+
+def cfg_path(sid:int)->Path: return SERVER_CFG_DIR/f'{sid}.json'
+
+def load_server(sid:int):
+    p=cfg_path(sid)
+    try: return json.loads(p.read_text(encoding='utf-8'))
+    except Exception as exc: out({'ok':False,'error':f'Server {sid} config unavailable: {exc}'},2)
+
+def save_server(c:dict):
+    SERVER_CFG_DIR.mkdir(parents=True,exist_ok=True)
+    p=cfg_path(int(c['id']))
+    tmp=p.with_suffix('.tmp')
+    tmp.write_text(json.dumps(c,ensure_ascii=False,indent=2),encoding='utf-8')
+    os.chmod(tmp,0o640)
+    try:
+        shutil.chown(tmp,user='root',group='cs16')
+    except Exception: pass
+    os.replace(tmp,p)
+
+
+def run(cmd, check=True, capture=True, timeout=None, cwd=None, env=None):
+    cp=subprocess.run(cmd,stdout=subprocess.PIPE if capture else None,stderr=subprocess.STDOUT if capture else None,text=True,check=False,timeout=timeout,cwd=cwd,env=env)
+    if check and cp.returncode!=0:
+        raise RuntimeError((cp.stdout or '').strip() or f'Command failed: {cmd!r}')
+    return cp
+
+
+def run_as_cs16(cmd, **kw):
+    return run(['runuser','-u','cs16','--']+list(cmd),**kw)
+
+
+def safe_server_path(sid:int):
+    rt=load_runtime(); base=Path(rt.get('servers_dir','/srv/hyper-cs16/servers')).resolve()
+    p=(base/str(sid)).resolve()
+    if p.parent!=base: raise RuntimeError('Unsafe server path')
+    return p
+
+
+def port_available(port:int, ignore_sid:int|None=None):
+    # UDP socket ownership check plus configs, deterministic and NAT-safe.
+    for p in SERVER_CFG_DIR.glob('*.json'):
+        try:
+            c=json.loads(p.read_text());
+            if ignore_sid is not None and int(c.get('id',0))==ignore_sid: continue
+            if int(c.get('port',0))==port: return False
+        except Exception: pass
+    cp=run(['ss','-lunH'],check=False)
+    needle=f':{port} '
+    return needle not in (cp.stdout or '')
+
+
+def download(url:str,dst:Path):
+    dst.parent.mkdir(parents=True,exist_ok=True)
+    run(['curl','-fL','--retry','4','--retry-delay','2','--connect-timeout','20','-o',str(dst),url],timeout=600)
+
+
+def extract_zip(path:Path,dst:Path):
+    dst=dst.resolve(); dst.mkdir(parents=True,exist_ok=True)
+    with zipfile.ZipFile(path) as z:
+        for m in z.infolist():
+            target=(dst/m.filename).resolve()
+            if dst not in target.parents and target!=dst: raise RuntimeError('Unsafe zip path')
+            mode=(m.external_attr >> 16) & 0xFFFF
+            if stat.S_ISLNK(mode): raise RuntimeError('Symlinks are not allowed in downloaded zip archives')
+        z.extractall(dst)
+
+
+def extract_tar(path:Path,dst:Path):
+    dst=dst.resolve(); dst.mkdir(parents=True,exist_ok=True)
+    with tarfile.open(path,'r:*') as t:
+        members=t.getmembers()
+        for m in members:
+            target=(dst/m.name).resolve()
+            if dst not in target.parents and target!=dst: raise RuntimeError('Unsafe tar path')
+            if not (m.isdir() or m.isfile()): raise RuntimeError('Links/devices are not allowed in downloaded tar archives')
+        for m in members:
+            t.extract(m,dst,set_attrs=True)
+
+
+def install_metamod_amxx(path:Path):
+    cstrike=path/'cstrike'; cstrike.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='hhcs16-mods-') as td:
+        td=Path(td)
+        mm=td/'metamod.zip'; download(METAMOD_URL,mm); extract_zip(mm,td/'mm')
+        src=td/'mm'/'addons'
+        if not src.exists():
+            candidates=list((td/'mm').rglob('metamod_i386.so'))
+            if not candidates: raise RuntimeError('Metamod binary not found in archive')
+            target=cstrike/'addons/metamod'; target.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(candidates[0],target/'metamod_i386.so')
+        else:
+            shutil.copytree(src,cstrike/'addons',dirs_exist_ok=True)
+        b=td/'amxx-base.tgz'; download(AMXX_BASE,b); extract_tar(b,cstrike)
+        cs=td/'amxx-cstrike.tgz'; download(AMXX_CSTRIKE,cs); extract_tar(cs,cstrike)
+    liblist=cstrike/'liblist.gam'
+    if liblist.exists():
+        text=liblist.read_text(encoding='latin1',errors='ignore')
+        if 'addons/metamod/metamod_i386.so' not in text:
+            text=re.sub(r'(?im)^\s*gamedll_linux\s+"[^"]+"', 'gamedll_linux "addons/metamod/metamod_i386.so"', text)
+            if 'gamedll_linux' not in text: text+='\ngamedll_linux "addons/metamod/metamod_i386.so"\n'
+            liblist.write_text(text,encoding='latin1')
+    mp=cstrike/'addons/metamod/plugins.ini'; mp.parent.mkdir(parents=True,exist_ok=True)
+    existing=mp.read_text(encoding='utf-8',errors='ignore') if mp.exists() else ''
+    line='linux addons/amxmodx/dlls/amxmodx_mm_i386.so'
+    if line not in existing: mp.write_text((existing.rstrip()+'\n'+line+'\n').lstrip(),encoding='utf-8')
+    plugins=cstrike/'addons/amxmodx/configs/plugins.ini'
+    if plugins.exists() and '; HYPER-HOST' not in plugins.read_text(encoding='utf-8',errors='ignore'):
+        plugins.write_text(plugins.read_text(encoding='utf-8',errors='ignore')+'\n; HYPER-HOST: upload .amxx files to addons/amxmodx/plugins and enable them here.\n',encoding='utf-8')
+
+
+def install_rehlds(path:Path):
+    with tempfile.TemporaryDirectory(prefix='hhcs16-rehlds-') as td:
+        td=Path(td)
+        z=td/'rehlds.zip'; download(REHLDS_URL,z); extract_zip(z,td/'rehlds')
+        src=td/'rehlds'/'bin/linux32'
+        if not src.exists(): raise RuntimeError('ReHLDS linux32 payload not found')
+        for name in ['engine_i486.so','hlds_linux','core.so','filesystem_stdio.so','demoplayer.so']:
+            if (src/name).exists(): shutil.copy2(src/name,path/name)
+        z2=td/'regamedll.zip'; download(REGAMEDLL_URL,z2); extract_zip(z2,td/'regamedll')
+        candidates=list((td/'regamedll').rglob('cstrike/dlls/cs.so'))
+        if candidates:
+            (path/'cstrike/dlls').mkdir(parents=True,exist_ok=True); shutil.copy2(candidates[0],path/'cstrike/dlls/cs.so')
+
+
+def ensure_base(profile='classic'):
+    require_root(); rt=load_runtime(); base=Path(rt.get('base_game_dir','/srv/hyper-cs16/base-hlds'))
+    marker=base/'.hyper-cs16-ready'
+    if marker.exists() and (base/'hlds_run').exists(): return {'ok':True,'path':str(base),'cached':True}
+    base.parent.mkdir(parents=True,exist_ok=True); base.mkdir(parents=True,exist_ok=True)
+    run(['chown','cs16:www-data',str(base)],check=False); os.chmod(base,0o2775)
+    steam=Path(rt.get('steamcmd','/opt/steamcmd/steamcmd.sh'))
+    if not steam.exists(): raise RuntimeError(f'SteamCMD missing: {steam}')
+    # app 90 sometimes needs several passes to fetch complete cstrike content.
+    cmd=[str(steam),'+force_install_dir',str(base),'+login','anonymous','+app_set_config','90','mod','cstrike','+app_update','90','-beta','steam_legacy','validate','+quit']
+    logs=[]
+    for _ in range(3): logs.append(run_as_cs16(cmd,check=False,timeout=1800).stdout or '')
+    if not (base/'hlds_run').exists() or not (base/'cstrike').is_dir():
+        raise RuntimeError('HLDS installation incomplete. Last SteamCMD output: '+logs[-1][-3000:])
+    install_metamod_amxx(base)
+    # ReHLDS files are optional in template; individual profile can overlay them.
+    marker.write_text(f'classic + Metamod-R {METAMOD_VERSION} + AMXX 1.9 build {AMXX_BUILD}\n',encoding='utf-8')
+    shutil.chown(base,user='cs16',group='www-data')
+    for root,dirs,files in os.walk(base):
+        for d in dirs:
+            try: os.chmod(Path(root)/d,0o2775); shutil.chown(Path(root)/d,user='cs16',group='www-data')
+            except Exception: pass
+        for f in files:
+            try: os.chmod(Path(root)/f,0o664 if not os.access(Path(root)/f,os.X_OK) else 0o775); shutil.chown(Path(root)/f,user='cs16',group='www-data')
+            except Exception: pass
+    for exe in ['hlds_run','hlds_linux']:
+        if (base/exe).exists(): os.chmod(base/exe,0o775)
+    return {'ok':True,'path':str(base),'cached':False}
+
+
+def write_server_cfg(path:Path,c:dict):
+    cfg=path/'cstrike/server.cfg'; cfg.parent.mkdir(parents=True,exist_ok=True)
+    def q(v): return str(v).replace('"','').replace('\n',' ').replace('\r',' ')
+    content=f'''// HYPER-HOST CS 1.6 managed configuration\nhostname "{q(c['hostname'])}"\nrcon_password "{q(c['rcon_password'])}"\nsv_password "{q(c.get('server_password',''))}"\nsv_lan 0\nsv_region 255\nsv_contact ""\nsv_aim 0\nsv_cheats 0\nsv_allowupload 1\nsv_allowdownload 1\nsv_downloadurl ""\nsv_maxrate 100000\nsv_minrate 25000\nsv_maxupdaterate 102\nsv_minupdaterate 30\nsys_ticrate 1000\npausable 0\nlog on\nmp_autokick 0\nmp_autoteambalance 1\nmp_buytime 1.5\nmp_c4timer 35\nmp_chattime 10\nmp_flashlight 1\nmp_freezetime 3\nmp_friendlyfire 0\nmp_hostagepenalty 2\nmp_limitteams 2\nmp_maxrounds 0\nmp_roundtime 2.0\nmp_startmoney 800\nmp_timelimit 25\nmp_tkpunish 0\nexec banned.cfg\nexec listip.cfg\n'''
+    cfg.write_text(content,encoding='utf-8')
+    mapcycle=path/'cstrike/mapcycle.txt'
+    if not mapcycle.exists(): mapcycle.write_text('de_dust2\nde_inferno\nde_nuke\nde_train\ncs_office\ncs_italy\n',encoding='utf-8')
+
+
+def normalize_permissions(path:Path):
+    run(['chown','-R','cs16:www-data',str(path)],check=False)
+    run(['chmod','-R','u+rwX,g+rwX,o+rX',str(path)],check=False)
+    run(['find',str(path),'-type','d','-exec','chmod','g+s','{}','+'],check=False)
+    for exe in ['hlds_run','hlds_linux','hltv']:
+        p=path/exe
+        if p.exists(): os.chmod(p,0o775)
+
+
+def setup_ftp(c:dict,path:Path,password:str|None=None):
+    user=c.get('ftp_user') or f'cs16_{c["id"]}'
+    password=password or secrets.token_urlsafe(12)
+    ctl=shutil.which('hyper-host-ctl') or '/usr/local/sbin/hyper-host-ctl'
+    if not Path(ctl).exists():
+        return user,password,'HYPER-HOST FTP runtime not found; FTP account was not created'
+    run([ctl,'create-ftp',user,password,'files'],timeout=180)
+    home=Path('/var/www/hyper-host-ftp')/user/'uploads'; home.mkdir(parents=True,exist_ok=True)
+    # Remove old mount if any, then expose server root as FTP root.
+    run(['umount','-lf',str(home)],check=False)
+    run(['mount','--bind',str(path),str(home)])
+    fstab=Path('/etc/fstab')
+    line=f'{path} {home} none bind,nofail 0 0'
+    text=fstab.read_text(encoding='utf-8',errors='ignore') if fstab.exists() else ''
+    text='\n'.join(x for x in text.splitlines() if f' {home} ' not in x)
+    fstab.write_text(text.rstrip()+'\n'+line+'\n',encoding='utf-8')
+    c['ftp_user']=user; c['ftp_password']=password
+    return user,password,''
+
+
+def server_create(args):
+    require_root()
+    if not (1<=args.slots<=32): raise RuntimeError('Slots must be 1..32')
+    if not (27015<=args.port<=27100): raise RuntimeError('Port must be 27015..27100')
+    if not SAFE_MAP.fullmatch(args.map): raise RuntimeError('Invalid start map')
+    if not SAFE_NAME.fullmatch(args.name): raise RuntimeError('Invalid server name')
+    if not args.hostname or len(args.hostname)>160: raise RuntimeError('Invalid hostname')
+    if not port_available(args.port,args.id): raise RuntimeError(f'Port {args.port} is already used')
+    rt=load_runtime(); path=safe_server_path(args.id)
+    base=Path(rt.get('base_game_dir','/srv/hyper-cs16/base-hlds'))
+    ensure_base('classic')
+    if path.exists(): shutil.rmtree(path)
+    path.parent.mkdir(parents=True,exist_ok=True)
+    run(['rsync','-a','--delete',str(base)+'/',str(path)+'/'],timeout=600)
+    if not (path/'cstrike/maps'/(args.map+'.bsp')).is_file():
+        shutil.rmtree(path,ignore_errors=True); raise RuntimeError(f'Start map is not installed in base HLDS: {args.map}')
+    if args.profile=='rehlds': install_rehlds(path)
+    rcon=secrets.token_urlsafe(18)
+    c={'id':args.id,'name':args.name,'hostname':args.hostname,'port':args.port,'slots':args.slots,'start_map':args.map,
+       'profile':args.profile,'public_ip':rt.get('public_ip',''),'rcon_password':rcon,'server_password':args.password or '',
+       'path':str(path),'ftp_user':'','ftp_password':''}
+    write_server_cfg(path,c); normalize_permissions(path)
+    user,pw,ftp_warning=setup_ftp(c,path)
+    save_server(c)
+    run(['systemctl','daemon-reload'],check=False)
+    run(['systemctl','enable',f'hyper-cs16@{args.id}.service'],check=False)
+    run(['systemctl','restart',f'hyper-cs16@{args.id}.service'],check=False)
+    return {'ok':True,'id':args.id,'path':str(path),'rcon_password':rcon,'ftp_user':user,'ftp_password':pw,'ftp_warning':ftp_warning}
+
+
+def service_action(sid:int,action:str):
+    require_root(); load_server(sid)
+    if action not in {'start','stop','restart'}: raise RuntimeError('Invalid action')
+    cp=run(['systemctl',action,f'hyper-cs16@{sid}.service'],check=False)
+    return {'ok':cp.returncode==0,'output':(cp.stdout or '').strip(),'service':service_status(sid)}
+
+
+def service_status(sid:int):
+    cp=run(['systemctl','is-active',f'hyper-cs16@{sid}.service'],check=False)
+    return (cp.stdout or '').strip() or 'unknown'
+
+
+def get_pid(sid:int):
+    cp=run(['systemctl','show',f'hyper-cs16@{sid}.service','-p','MainPID','--value'],check=False)
+    try: return int((cp.stdout or '0').strip())
+    except: return 0
+
+
+def proc_metrics(pid:int):
+    if pid<=0: return {'cpu_percent':0.0,'memory_mb':0.0,'uptime_seconds':0}
+    cp=run(['ps','-p',str(pid),'-o','%cpu=,rss=,etimes='],check=False)
+    parts=(cp.stdout or '').split()
+    if len(parts)<3: return {'cpu_percent':0.0,'memory_mb':0.0,'uptime_seconds':0}
+    try: return {'cpu_percent':float(parts[0]),'memory_mb':round(float(parts[1])/1024,2),'uptime_seconds':int(float(parts[2]))}
+    except: return {'cpu_percent':0.0,'memory_mb':0.0,'uptime_seconds':0}
+
+
+def disk_mb(path:Path):
+    cp=run(['du','-sm',str(path)],check=False); 
+    try: return float((cp.stdout or '0').split()[0])
+    except: return 0.0
+
+
+def query_host(c): return '127.0.0.1'
+
+def rcon_status_players(c):
+    try:
+        raw=query_rcon(query_host(c),int(c['port']),str(c.get('rcon_password','')),'status',2.0)
+    except Exception:
+        return []
+    rows=[]
+    rx=re.compile(r'^\s*#\s*(\d+)\s+\"(.*?)\"\s+(\d+)\s+(\S+)\s+(-?\d+)\s+(\S+)\s+(\d+)\s+(\d+)\s+(.*)$')
+    rx_short=re.compile(r'^\s*#\s*(\d+)\s+\"(.*?)\"\s+(\d+)\s+(\S+)(?:\s+(.*))?$')
+    for line in raw.splitlines():
+        m=rx.match(line)
+        if m:
+            rows.append({'slot':int(m.group(1)),'name':m.group(2),'userid':int(m.group(3)),'steam_id':m.group(4),'score':int(m.group(5)),'time':m.group(6),'ping':int(m.group(7)),'loss':int(m.group(8)),'address':m.group(9).strip()})
+            continue
+        m=rx_short.match(line)
+        if m:
+            rows.append({'slot':int(m.group(1)),'name':m.group(2),'userid':int(m.group(3)),'steam_id':m.group(4),'raw':m.group(5) or ''})
+    return rows
+
+def status_json(sid:int,include_players=True):
+    c=load_server(sid); svc=service_status(sid); pid=get_pid(sid); pm=proc_metrics(pid); path=Path(c['path'])
+    data={'ok':True,'id':sid,'service':svc,'running':svc=='active','pid':pid,'cpu_percent':pm['cpu_percent'],'memory_mb':pm['memory_mb'],
+          'uptime_seconds':pm['uptime_seconds'],'disk_mb':disk_mb(path),'port':c['port'],'slots':c['slots'],'hostname':c['hostname'],
+          'public_ip':c.get('public_ip',''),'start_map':c['start_map'],'profile':c.get('profile','classic'),'ftp_user':c.get('ftp_user',''),
+          'ftp_password':c.get('ftp_password',''),'query':None,'players':[],'query_error':''}
+    if svc=='active':
+        try:
+            data['query']=query_info(query_host(c),int(c['port']),1.2)
+            if include_players:
+                a2s=[]
+                try: a2s=query_players(query_host(c),int(c['port']),1.2)
+                except Exception as exc: data['players_error']=str(exc)
+                status_rows=rcon_status_players(c)
+                by_name={}
+                for r in status_rows: by_name.setdefault(r.get('name',''),[]).append(r)
+                merged=[]
+                for p in a2s:
+                    row=dict(p); candidates=by_name.get(p.get('name',''),[])
+                    if candidates: row.update(candidates.pop(0))
+                    merged.append(row)
+                used={(x.get('name',''),x.get('userid')) for x in merged}
+                for r in status_rows:
+                    if (r.get('name',''),r.get('userid')) not in used: merged.append(r)
+                data['players']=merged
+        except Exception as exc: data['query_error']=str(exc)
+    return data
+
+
+def rcon_cmd(sid:int,command:str):
+    c=load_server(sid)
+    if not command or len(command)>512 or '\n' in command or '\r' in command: raise RuntimeError('Invalid RCON command')
+    text=query_rcon(query_host(c),int(c['port']),str(c.get('rcon_password','')),command,2.5)
+    return {'ok':True,'output':text}
+
+
+def map_list(sid:int):
+    c=load_server(sid); d=Path(c['path'])/'cstrike/maps'
+    maps=sorted({p.stem for p in d.glob('*.bsp') if SAFE_MAP.fullmatch(p.stem)},key=str.lower) if d.is_dir() else []
+    return {'ok':True,'maps':maps}
+
+
+def plugins_list(sid:int):
+    c=load_server(sid); root=Path(c['path'])/'cstrike/addons/amxmodx'; pin=root/'configs/plugins.ini'; plugdir=root/'plugins'
+    enabled=[]; disabled=[]; raw=[]
+    text=pin.read_text(encoding='utf-8',errors='ignore') if pin.exists() else ''
+    for line in text.splitlines():
+        stripped=line.strip();
+        if not stripped: continue
+        active=not stripped.startswith(';')
+        token=stripped.lstrip(';').strip().split(';',1)[0].strip().split()[0] if stripped.lstrip(';').strip() else ''
+        if token.endswith('.amxx'):
+            (enabled if active else disabled).append(token)
+        raw.append(line)
+    files=sorted([p.name for p in plugdir.glob('*.amxx')]) if plugdir.is_dir() else []
+    return {'ok':True,'enabled':enabled,'disabled':disabled,'files':files,'plugins_ini':raw}
+
+
+def plugin_toggle(sid:int,name:str,enable:bool):
+    require_root();
+    if not SAFE_PLUGIN.fullmatch(name) or not name.endswith('.amxx'): raise RuntimeError('Invalid plugin name')
+    c=load_server(sid); pin=Path(c['path'])/'cstrike/addons/amxmodx/configs/plugins.ini'; pin.parent.mkdir(parents=True,exist_ok=True)
+    lines=pin.read_text(encoding='utf-8',errors='ignore').splitlines() if pin.exists() else []
+    found=False; out_lines=[]
+    for line in lines:
+        stripped=line.strip(); token=stripped.lstrip(';').strip().split(';',1)[0].strip().split()[0] if stripped.lstrip(';').strip() else ''
+        if token==name:
+            found=True; out_lines.append(name if enable else ';'+name)
+        else: out_lines.append(line)
+    if not found: out_lines.append(name if enable else ';'+name)
+    pin.write_text('\n'.join(out_lines).rstrip()+'\n',encoding='utf-8'); normalize_permissions(Path(c['path']))
+    return {'ok':True,'plugin':name,'enabled':enable}
+
+
+ALLOWED_CONFIGS={
+ 'server.cfg':'cstrike/server.cfg',
+ 'amxx.cfg':'cstrike/addons/amxmodx/configs/amxx.cfg',
+ 'users.ini':'cstrike/addons/amxmodx/configs/users.ini',
+ 'plugins.ini':'cstrike/addons/amxmodx/configs/plugins.ini',
+ 'modules.ini':'cstrike/addons/amxmodx/configs/modules.ini',
+ 'mapcycle.txt':'cstrike/mapcycle.txt',
+ 'maps.ini':'cstrike/addons/amxmodx/configs/maps.ini',
+}
+
+def config_file(sid:int,name:str):
+    if name not in ALLOWED_CONFIGS: raise RuntimeError('Config file is not allowed')
+    c=load_server(sid); root=Path(c['path']).resolve(); p=(root/ALLOWED_CONFIGS[name]).resolve()
+    if root not in p.parents: raise RuntimeError('Unsafe config path')
+    return c,p
+
+def config_read(sid:int,name:str):
+    _,p=config_file(sid,name); return {'ok':True,'name':name,'content':p.read_text(encoding='utf-8',errors='ignore') if p.exists() else ''}
+
+def config_write(sid:int,name:str,content:str):
+    require_root(); c,p=config_file(sid,name)
+    if len(content.encode('utf-8'))>512*1024: raise RuntimeError('Config is too large')
+    p.parent.mkdir(parents=True,exist_ok=True); p.write_text(content.replace('\r\n','\n'),encoding='utf-8'); normalize_permissions(Path(c['path']))
+    return {'ok':True,'name':name}
+
+
+def server_config_set(args):
+    require_root(); c=load_server(args.id)
+    if args.slots is not None:
+        if not 1<=args.slots<=32: raise RuntimeError('slots 1..32')
+        c['slots']=args.slots
+    if args.map is not None:
+        if not SAFE_MAP.fullmatch(args.map): raise RuntimeError('invalid map')
+        if not (Path(c['path'])/'cstrike/maps'/(args.map+'.bsp')).is_file(): raise RuntimeError('map is not installed on this server')
+        c['start_map']=args.map
+    if args.hostname is not None:
+        if not args.hostname or len(args.hostname)>160: raise RuntimeError('invalid hostname')
+        c['hostname']=args.hostname
+    if args.password is not None: c['server_password']=args.password[:64]
+    if args.rcon is not None and args.rcon!='': c['rcon_password']=args.rcon[:96]
+    write_server_cfg(Path(c['path']),c); save_server(c); normalize_permissions(Path(c['path']))
+    return {'ok':True,'server':{k:c.get(k) for k in ['id','hostname','slots','start_map','server_password']}}
+
+
+def logs(sid:int,lines:int=160):
+    load_server(sid); lines=max(10,min(lines,1000))
+    cp=run(['journalctl','-u',f'hyper-cs16@{sid}.service','-n',str(lines),'--no-pager','-o','short-iso'],check=False)
+    return {'ok':True,'output':(cp.stdout or '')[-200000:]}
+
+
+def server_update(sid:int):
+    require_root(); c=load_server(sid); path=Path(c['path']); rt=load_runtime(); steam=rt.get('steamcmd','/opt/steamcmd/steamcmd.sh')
+    run(['systemctl','stop',f'hyper-cs16@{sid}.service'],check=False)
+    cmd=[steam,'+force_install_dir',str(path),'+login','anonymous','+app_set_config','90','mod','cstrike','+app_update','90','-beta','steam_legacy','validate','+quit']
+    result=run_as_cs16(cmd,check=False,timeout=1800)
+    install_metamod_amxx(path)
+    if c.get('profile')=='rehlds': install_rehlds(path)
+    write_server_cfg(path,c); normalize_permissions(path); run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False)
+    if result.returncode!=0: raise RuntimeError((result.stdout or '')[-4000:])
+    return {'ok':True,'output':(result.stdout or '')[-4000:]}
+
+
+def server_reinstall(sid:int):
+    require_root(); c=load_server(sid); path=Path(c['path']); backup=APP_ROOT/'backups'/f'server-{sid}-{int(time.time())}'
+    backup.parent.mkdir(parents=True,exist_ok=True); run(['systemctl','stop',f'hyper-cs16@{sid}.service'],check=False)
+    if path.exists():
+        backup.mkdir(parents=True,exist_ok=True)
+        for rel in ['cstrike/server.cfg','cstrike/addons/amxmodx/configs/users.ini','cstrike/addons/amxmodx/configs/plugins.ini','cstrike/addons/amxmodx/plugins']:
+            src=path/rel
+            if src.exists():
+                dst=backup/rel; dst.parent.mkdir(parents=True,exist_ok=True)
+                if src.is_dir(): shutil.copytree(src,dst,dirs_exist_ok=True)
+                else: shutil.copy2(src,dst)
+        shutil.rmtree(path)
+    base=Path(load_runtime().get('base_game_dir','/srv/hyper-cs16/base-hlds')); ensure_base('classic'); run(['rsync','-a',str(base)+'/',str(path)+'/'],timeout=600)
+    if c.get('profile')=='rehlds': install_rehlds(path)
+    # Restore user AMXX admins/plugins after clean game files are recreated. server.cfg is regenerated from panel settings.
+    for rel in ['cstrike/addons/amxmodx/configs/users.ini','cstrike/addons/amxmodx/configs/plugins.ini','cstrike/addons/amxmodx/plugins']:
+        src=backup/rel
+        if src.exists():
+            dst=path/rel; dst.parent.mkdir(parents=True,exist_ok=True)
+            if src.is_dir(): shutil.copytree(src,dst,dirs_exist_ok=True)
+            else: shutil.copy2(src,dst)
+    write_server_cfg(path,c); normalize_permissions(path); run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False)
+    return {'ok':True,'backup':str(backup)}
+
+
+def ftp_reset(sid:int):
+    require_root(); c=load_server(sid); pw=secrets.token_urlsafe(12)
+    user, pw, warning = setup_ftp(c,Path(c['path']),pw)
+    c['ftp_password']=pw; c['ftp_user']=user; save_server(c)
+    return {'ok':True,'ftp_user':user,'ftp_password':pw,'warning':warning}
+
+
+def _staged_open(token:str, expected_suffix:str, max_bytes:int):
+    require_root()
+    if not SAFE_STAGE.fullmatch(token) or not token.endswith(expected_suffix): raise RuntimeError('Invalid upload token')
+    STAGING_DIR.mkdir(parents=True,exist_ok=True)
+    src=STAGING_DIR/token
+    st=os.lstat(src)
+    if not stat.S_ISREG(st.st_mode): raise RuntimeError('Staged upload is not a regular file')
+    try: web_uid=pwd.getpwnam('www-data').pw_uid
+    except KeyError: raise RuntimeError('www-data user not found')
+    if st.st_uid!=web_uid: raise RuntimeError('Staged upload has invalid owner')
+    if st.st_size<1 or st.st_size>max_bytes: raise RuntimeError('Uploaded file size is invalid')
+    flags=os.O_RDONLY | getattr(os,'O_NOFOLLOW',0) | getattr(os,'O_CLOEXEC',0)
+    fd=os.open(src,flags)
+    fst=os.fstat(fd)
+    if not stat.S_ISREG(fst.st_mode) or fst.st_uid!=web_uid or fst.st_ino!=st.st_ino or fst.st_dev!=st.st_dev:
+        os.close(fd); raise RuntimeError('Staged upload changed during validation')
+    return src,fd
+
+
+def _copy_staged(token:str, expected_suffix:str, dst:Path, max_bytes:int):
+    src,fd=_staged_open(token,expected_suffix,max_bytes)
+    try:
+        dst.parent.mkdir(parents=True,exist_ok=True)
+        tmp=dst.with_name('.'+dst.name+'.upload-'+secrets.token_hex(6))
+        with os.fdopen(fd,'rb',closefd=True) as rf, open(tmp,'xb') as wf:
+            shutil.copyfileobj(rf,wf,1024*1024)
+            wf.flush(); os.fsync(wf.fileno())
+        os.replace(tmp,dst)
+    finally:
+        try: src.unlink()
+        except FileNotFoundError: pass
+    return dst
+
+
+def map_upload(sid:int,token:str,map_name:str):
+    require_root(); c=load_server(sid)
+    if not SAFE_MAP.fullmatch(map_name): raise RuntimeError('Invalid map name')
+    dst=Path(c['path'])/'cstrike/maps'/(map_name+'.bsp')
+    _copy_staged(token,'.bsp',dst,256*1024*1024); normalize_permissions(Path(c['path']))
+    return {'ok':True,'map':map_name}
+
+
+def plugin_upload(sid:int,token:str,plugin_name:str):
+    require_root(); c=load_server(sid)
+    if not SAFE_PLUGIN.fullmatch(plugin_name) or not plugin_name.endswith('.amxx'): raise RuntimeError('Invalid plugin name')
+    dst=Path(c['path'])/'cstrike/addons/amxmodx/plugins'/plugin_name
+    _copy_staged(token,'.amxx',dst,32*1024*1024); normalize_permissions(Path(c['path']))
+    return {'ok':True,'plugin':plugin_name}
+
+
+def server_delete(sid:int):
+    require_root(); c=load_server(sid); path=Path(c['path']); user=c.get('ftp_user','')
+    run(['systemctl','disable','--now',f'hyper-cs16@{sid}.service'],check=False)
+    if user:
+        home=Path('/var/www/hyper-host-ftp')/user/'uploads'; run(['umount','-lf',str(home)],check=False)
+        fstab=Path('/etc/fstab')
+        if fstab.exists():
+            text='\n'.join(x for x in fstab.read_text(encoding='utf-8',errors='ignore').splitlines() if f' {home} ' not in x)+'\n'; fstab.write_text(text,encoding='utf-8')
+        ctl=shutil.which('hyper-host-ctl') or '/usr/local/sbin/hyper-host-ctl'; run([ctl,'delete-ftp',user],check=False,timeout=120)
+    if path.exists(): shutil.rmtree(path)
+    try: cfg_path(sid).unlink()
+    except FileNotFoundError: pass
+    return {'ok':True}
+
+
+def doctor():
+    rt=load_runtime(); checks={}
+    for name,cmd in {'steamcmd':[rt.get('steamcmd','/opt/steamcmd/steamcmd.sh'),'+quit'], 'nginx':['nginx','-t'], 'mariadb':['systemctl','is-active','mariadb'], 'ftp':['ss','-ltn','sport = :21']}.items():
+        cp=run(cmd,check=False,timeout=30); checks[name]={'ok':cp.returncode==0,'output':(cp.stdout or '').strip()[-500:]}
+    checks['base_game']={'ok':Path(rt.get('base_game_dir','/srv/hyper-cs16/base-hlds')).joinpath('hlds_run').exists()}
+    return {'ok':all(v.get('ok') for v in checks.values()),'checks':checks}
+
+
+def main():
+    p=argparse.ArgumentParser(prog='hyper-cs16-ctl'); sp=p.add_subparsers(dest='cmd',required=True)
+    sp.add_parser('base-install')
+    c=sp.add_parser('server-create'); c.add_argument('id',type=int); c.add_argument('--name',required=True); c.add_argument('--port',type=int,required=True); c.add_argument('--slots',type=int,default=16); c.add_argument('--map',default='de_dust2'); c.add_argument('--hostname',required=True); c.add_argument('--password',default=''); c.add_argument('--profile',choices=['classic','rehlds'],default='classic')
+    for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','delete']:
+        q=sp.add_parser(a); q.add_argument('id',type=int)
+    q=sp.add_parser('rcon'); q.add_argument('id',type=int); q.add_argument('command')
+    q=sp.add_parser('change-map'); q.add_argument('id',type=int); q.add_argument('map')
+    q=sp.add_parser('kick'); q.add_argument('id',type=int); q.add_argument('userid',type=int)
+    q=sp.add_parser('ban'); q.add_argument('id',type=int); q.add_argument('userid',type=int); q.add_argument('--minutes',type=int,default=30)
+    q=sp.add_parser('plugin-toggle'); q.add_argument('id',type=int); q.add_argument('plugin'); q.add_argument('state',choices=['on','off'])
+    q=sp.add_parser('config-read'); q.add_argument('id',type=int); q.add_argument('name',choices=sorted(ALLOWED_CONFIGS))
+    q=sp.add_parser('config-write'); q.add_argument('id',type=int); q.add_argument('name',choices=sorted(ALLOWED_CONFIGS))
+    q=sp.add_parser('config-set'); q.add_argument('id',type=int); q.add_argument('--slots',type=int); q.add_argument('--map'); q.add_argument('--hostname'); q.add_argument('--password'); q.add_argument('--rcon')
+    q=sp.add_parser('logs'); q.add_argument('id',type=int); q.add_argument('--lines',type=int,default=160)
+    q=sp.add_parser('map-upload'); q.add_argument('id',type=int); q.add_argument('token'); q.add_argument('map_name')
+    q=sp.add_parser('plugin-upload'); q.add_argument('id',type=int); q.add_argument('token'); q.add_argument('plugin_name')
+    sp.add_parser('doctor')
+    args=p.parse_args()
+    try:
+        if args.cmd=='base-install': result=ensure_base('classic')
+        elif args.cmd=='server-create': result=server_create(args)
+        elif args.cmd in {'start','stop','restart'}: result=service_action(args.id,args.cmd)
+        elif args.cmd=='status': result=status_json(args.id,True)
+        elif args.cmd=='players': result={'ok':True,'players':status_json(args.id,True).get('players',[])}
+        elif args.cmd=='maps': result=map_list(args.id)
+        elif args.cmd=='plugins': result=plugins_list(args.id)
+        elif args.cmd=='rcon': result=rcon_cmd(args.id,args.command)
+        elif args.cmd=='change-map':
+            if not SAFE_MAP.fullmatch(args.map): raise RuntimeError('Invalid map')
+            result=rcon_cmd(args.id,'changelevel '+args.map)
+        elif args.cmd=='kick': result=rcon_cmd(args.id,f'kick #{max(0,args.userid)}')
+        elif args.cmd=='ban': result=rcon_cmd(args.id,f'banid {max(0,args.minutes)} #{max(0,args.userid)} kick;writeid')
+        elif args.cmd=='plugin-toggle': result=plugin_toggle(args.id,args.plugin,args.state=='on')
+        elif args.cmd=='config-read': result=config_read(args.id,args.name)
+        elif args.cmd=='config-write':
+            raw=sys.stdin.buffer.read(512*1024+1)
+            if len(raw)>512*1024: raise RuntimeError('Config is too large')
+            result=config_write(args.id,args.name,raw.decode('utf-8','replace'))
+        elif args.cmd=='config-set': result=server_config_set(args)
+        elif args.cmd=='logs': result=logs(args.id,args.lines)
+        elif args.cmd=='update': result=server_update(args.id)
+        elif args.cmd=='reinstall': result=server_reinstall(args.id)
+        elif args.cmd=='ftp-reset': result=ftp_reset(args.id)
+        elif args.cmd=='map-upload': result=map_upload(args.id,args.token,args.map_name)
+        elif args.cmd=='plugin-upload': result=plugin_upload(args.id,args.token,args.plugin_name)
+        elif args.cmd=='delete': result=server_delete(args.id)
+        elif args.cmd=='doctor': result=doctor()
+        else: raise RuntimeError('Unknown command')
+        out(result,0 if result.get('ok',True) else 1)
+    except Exception as exc:
+        out({'ok':False,'error':str(exc)},1)
+
+if __name__=='__main__': main()

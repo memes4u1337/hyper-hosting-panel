@@ -1,0 +1,96 @@
+CREATE TABLE IF NOT EXISTS users (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  username VARCHAR(64) NOT NULL,
+  password_hash VARCHAR(255) NOT NULL,
+  role ENUM('admin','operator') NOT NULL DEFAULT 'admin',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_users_username (username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS servers (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  name VARCHAR(96) NOT NULL,
+  hostname VARCHAR(160) NOT NULL,
+  public_ip VARCHAR(64) NOT NULL DEFAULT '',
+  port SMALLINT UNSIGNED NOT NULL,
+  slots TINYINT UNSIGNED NOT NULL DEFAULT 16,
+  start_map VARCHAR(64) NOT NULL DEFAULT 'de_dust2',
+  build_profile ENUM('classic','rehlds') NOT NULL DEFAULT 'classic',
+  installed TINYINT(1) NOT NULL DEFAULT 0,
+  enabled TINYINT(1) NOT NULL DEFAULT 1,
+  status_cache VARCHAR(24) NOT NULL DEFAULT 'unknown',
+  current_map VARCHAR(64) NOT NULL DEFAULT '',
+  players_online SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  max_players SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  cpu_percent DECIMAL(7,2) NOT NULL DEFAULT 0,
+  memory_mb DECIMAL(10,2) NOT NULL DEFAULT 0,
+  disk_mb DECIMAL(12,2) NOT NULL DEFAULT 0,
+  uptime_seconds BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  ping_ms DECIMAL(8,2) NOT NULL DEFAULT 0,
+  ftp_user VARCHAR(64) NOT NULL DEFAULT '',
+  ftp_password VARCHAR(255) NOT NULL DEFAULT '',
+  last_query_at DATETIME NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_servers_port (port),
+  KEY idx_servers_status (status_cache),
+  KEY idx_servers_updated (updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS server_stats (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  server_id INT UNSIGNED NOT NULL,
+  recorded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  players SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  max_players SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  cpu_percent DECIMAL(7,2) NOT NULL DEFAULT 0,
+  memory_mb DECIMAL(10,2) NOT NULL DEFAULT 0,
+  disk_mb DECIMAL(12,2) NOT NULL DEFAULT 0,
+  ping_ms DECIMAL(8,2) NOT NULL DEFAULT 0,
+  map_name VARCHAR(64) NOT NULL DEFAULT '',
+  PRIMARY KEY (id),
+  KEY idx_stats_server_time (server_id, recorded_at),
+  CONSTRAINT fk_stats_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS player_history (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  server_id INT UNSIGNED NOT NULL,
+  name VARCHAR(128) NOT NULL DEFAULT '',
+  steam_id VARCHAR(64) NOT NULL DEFAULT '',
+  score INT NOT NULL DEFAULT 0,
+  connected_seconds INT UNSIGNED NOT NULL DEFAULT 0,
+  address VARCHAR(64) NOT NULL DEFAULT '',
+  first_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  visits INT UNSIGNED NOT NULL DEFAULT 1,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_player_identity (server_id, steam_id, name),
+  KEY idx_players_server_time (server_id, last_seen),
+  KEY idx_players_steam (steam_id),
+  CONSTRAINT fk_players_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  user_id INT UNSIGNED NULL,
+  server_id INT UNSIGNED NULL,
+  action VARCHAR(64) NOT NULL,
+  details TEXT NOT NULL,
+  ip VARCHAR(64) NOT NULL DEFAULT '',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_audit_created (created_at),
+  KEY idx_audit_server (server_id, created_at),
+  CONSTRAINT fk_audit_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+  CONSTRAINT fk_audit_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS settings (
+  setting_key VARCHAR(96) NOT NULL,
+  setting_value TEXT NOT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (setting_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

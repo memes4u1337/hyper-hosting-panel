@@ -1,0 +1,25 @@
+[Unit]
+Description=HYPER-HOST Counter-Strike 1.6 server %i
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cs16
+Group=www-data
+SupplementaryGroups=www-data
+WorkingDirectory=/srv/hyper-cs16/servers/%i
+ExecStart=/usr/local/sbin/hyper-cs16-run %i
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+KillSignal=SIGINT
+LimitNOFILE=65535
+UMask=0002
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/srv/hyper-cs16/servers/%i
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import json, os, subprocess, sys, time, re
+from pathlib import Path
+
+APP=Path('/opt/hyper-cs16'); ETC=Path('/etc/hyper-cs16')
+sys.path.insert(0,str(APP/'lib'))
+from csquery import info as query_info, players as query_players, rcon as query_rcon
+try:
+    import pymysql
+except Exception as exc:
+    print(f'PyMySQL unavailable: {exc}',file=sys.stderr); raise SystemExit(2)
+
+
+def runtime(): return json.loads((ETC/'runtime.json').read_text(encoding='utf-8'))
+def conn():
+    r=runtime()
+    return pymysql.connect(host=r.get('db_host','127.0.0.1'),port=int(r.get('db_port',3306)),user=r['db_user'],password=r['db_password'],database=r['db_name'],charset='utf8mb4',autocommit=True,cursorclass=pymysql.cursors.DictCursor,connect_timeout=5)
+
+def scfg(sid):
+    try: return json.loads((ETC/'servers'/f'{sid}.json').read_text(encoding='utf-8'))
+    except Exception: return None
+
+def service(sid):
+    cp=subprocess.run(['systemctl','is-active',f'hyper-cs16@{sid}.service'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+    return cp.stdout.strip() or 'unknown'
+
+def pid(sid):
+    cp=subprocess.run(['systemctl','show',f'hyper-cs16@{sid}.service','-p','MainPID','--value'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+    try:return int(cp.stdout.strip())
+    except:return 0
+
+def proc_metrics(p):
+    if p<=0:return 0.0,0.0,0
+    cp=subprocess.run(['ps','-p',str(p),'-o','%cpu=,rss=,etimes='],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+    x=cp.stdout.split()
+    try:return float(x[0]),round(float(x[1])/1024,2),int(float(x[2]))
+    except:return 0.0,0.0,0
+
+def disk(path):
+    cp=subprocess.run(['du','-sm',path],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+    try:return float(cp.stdout.split()[0])
+    except:return 0.0
+
+def rcon_player_rows(c):
+    try: raw=query_rcon('127.0.0.1',int(c['port']),str(c.get('rcon_password','')),'status',1.5)
+    except Exception: return []
+    rx=re.compile(r'^\s*#\s*(\d+)\s+\"(.*?)\"\s+(\d+)\s+(\S+)\s+(-?\d+)\s+(\S+)\s+(\d+)\s+(\d+)\s+(.*)$')
+    rows=[]
+    for line in raw.splitlines():
+        m=rx.match(line)
+        if m: rows.append({'name':m.group(2),'steam_id':m.group(4),'score':int(m.group(5)),'time':m.group(6),'address':m.group(9).strip()})
+    return rows
+
+def one(db,row,store_stats=False,store_players=False):
+    sid=int(row['id']); c=scfg(sid); svc=service(sid); p=pid(sid); cpu,mem,uptime=proc_metrics(p)
+    status='online' if svc=='active' else ('offline' if svc in {'inactive','failed'} else svc)
+    map_name=''; online=0; maxp=int(row.get('slots') or 0); ping=0.0; plist=[]
+    if c and svc=='active':
+        try:
+            qi=query_info('127.0.0.1',int(c['port']),1.0); map_name=str(qi.get('map','')); online=int(qi.get('players',0)); maxp=int(qi.get('max_players',maxp)); ping=float(qi.get('ping_ms',0)); status='online'
+            if store_players:
+                try: plist=query_players('127.0.0.1',int(c['port']),1.0)
+                except Exception: plist=[]
+                status_rows=rcon_player_rows(c); by_name={}
+                for rr in status_rows: by_name.setdefault(rr.get('name',''),[]).append(rr)
+                if plist:
+                    for pl in plist:
+                        cand=by_name.get(pl.get('name',''),[])
+                        if cand: pl.update(cand.pop(0))
+                else:
+                    plist=[dict(rr,duration=0) for rr in status_rows]
+        except Exception:
+            status='starting' if uptime<60 else 'unreachable'
+    d=disk(c['path']) if c else 0.0
+    with db.cursor() as cur:
+        cur.execute("UPDATE servers SET status_cache=%s,current_map=%s,players_online=%s,max_players=%s,cpu_percent=%s,memory_mb=%s,disk_mb=%s,uptime_seconds=%s,ping_ms=%s,last_query_at=NOW() WHERE id=%s",(status,map_name,online,maxp,cpu,mem,d,uptime,ping,sid))
+        if store_stats:
+            cur.execute("INSERT INTO server_stats(server_id,players,max_players,cpu_percent,memory_mb,disk_mb,ping_ms,map_name) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",(sid,online,maxp,cpu,mem,d,ping,map_name))
+        if store_players:
+            for pl in plist:
+                cur.execute("INSERT INTO player_history(server_id,name,steam_id,score,connected_seconds,address,first_seen,last_seen,visits) VALUES(%s,%s,%s,%s,%s,%s,NOW(),NOW(),1) ON DUPLICATE KEY UPDATE score=VALUES(score),connected_seconds=VALUES(connected_seconds),address=VALUES(address),visits=visits+IF(last_seen < NOW() - INTERVAL 2 MINUTE,1,0),last_seen=NOW()",(sid,str(pl.get('name',''))[:128],str(pl.get('steam_id',''))[:64],int(pl.get('score',0)),int(float(pl.get('duration',0))),str(pl.get('address',''))[:64]))
+
+def main():
+    tick=0
+    while True:
+        try:
+            db=conn()
+            with db.cursor() as cur:
+                cur.execute("SELECT id,slots FROM servers WHERE enabled=1 ORDER BY id"); rows=cur.fetchall()
+            store_stats=(tick%6==0); store_players=(tick%6==0)
+            for row in rows:
+                try: one(db,row,store_stats,store_players)
+                except Exception as exc: print(f'server {row.get("id")}: {exc}',file=sys.stderr)
+            if tick%360==0:
+                with db.cursor() as cur:
+                    cur.execute("DELETE FROM server_stats WHERE recorded_at < NOW() - INTERVAL 90 DAY")
+                    cur.execute("DELETE FROM player_history WHERE last_seen < NOW() - INTERVAL 180 DAY")
+                    cur.execute("DELETE FROM audit_logs WHERE created_at < NOW() - INTERVAL 180 DAY")
+            db.close()
+        except Exception as exc:
+            print(f'monitor loop: {exc}',file=sys.stderr)
+        tick+=1; time.sleep(10)
+if __name__=='__main__': main()
