@@ -11,7 +11,10 @@ try {
             $cmd=trim((string)($_POST['command']??'')); if($cmd===''||strlen($cmd)>512)throw new RuntimeException('Некорректная команда');$r=ctl(['rcon',$id,$cmd],20);audit('rcon',$cmd,$id);json_out($r,empty($r['ok'])?400:200);
         }
         if($view==='change-map'){
-            $map=trim((string)($_POST['map']??''));if(!preg_match('/^[A-Za-z0-9_-]{1,64}$/',$map))throw new RuntimeException('Некорректная карта');$r=ctl(['change-map',$id,$map],20);audit('change_map',$map,$id);json_out($r,empty($r['ok'])?400:200);
+            $map=trim((string)($_POST['map']??''));if(!preg_match('/^[A-Za-z0-9_-]{1,64}$/',$map))throw new RuntimeException('Некорректная карта');
+            $r=ctl(['activate-map',$id,$map],45);if(empty($r['ok']))throw new RuntimeException((string)($r['error']??'Не удалось запустить карту'));
+            db()->prepare('UPDATE servers SET start_map=?,current_map=? WHERE id=?')->execute([$map,$map,$id]);
+            audit('change_map',$map.' ['.(string)($r['mode']??'changelevel').']',$id);json_out($r,200);
         }
         if($view==='kick'){
             $uid=(int)($_POST['userid']??-1);$r=ctl(['kick',$id,$uid],20);audit('player_kick','#'.$uid,$id);json_out($r,empty($r['ok'])?400:200);

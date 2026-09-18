@@ -184,19 +184,31 @@
     const groups=new Map(); maps.forEach(m=>{const g=mapGroup(m);if(!groups.has(g))groups.set(g,[]);groups.get(g).push(m)});
     sel.innerHTML=[...groups].map(([g,items])=>`<optgroup label="${esc(g)}">${items.map(m=>`<option value="${esc(m)}" ${m===currentMap?'selected':''}>${esc(m)}</option>`).join('')}</optgroup>`).join('');
   }
-  async function changeMap(map){
-    map=String(map||'').trim(); if(!map)return;
-    if(!confirm(`Переключить сервер на ${map}?`))return;
-    try{await api('change-map',{map},'POST');currentMap=map;if($('#liveMap'))$('#liveMap').textContent=map;if($('#currentMapLabel'))$('#currentMapLabel').textContent=map;if($('#mapSelector'))$('#mapSelector').value=map;toast(`Карта переключена: ${map}`);setTimeout(loadStatus,700);}catch(e){toast(e.message,true)}
+  async function changeMap(map,ask=false){
+    map=String(map||'').trim(); if(!map||map===currentMap)return;
+    if(ask&&!confirm(`Переключить сервер на ${map}?`))return;
+    const previous=currentMap; const selectors=[$('#mapSelector'),$('#settingsMapSelector')].filter(Boolean); selectors.forEach(s=>s.disabled=true);
+    toast(`Запускаю карту ${map}...`);
+    try{
+      const r=await api('change-map',{map},'POST');currentMap=r.current_map||map;
+      if($('#liveMap'))$('#liveMap').textContent=currentMap;if($('#currentMapLabel'))$('#currentMapLabel').textContent=currentMap;
+      selectors.forEach(s=>{if([...s.options].some(o=>o.value===currentMap))s.value=currentMap;});
+      toast(`Карта уже запущена: ${currentMap}${r.mode==='restart_fallback'?' (через перезапуск)':''}`);setTimeout(loadStatus,500);
+    }catch(e){selectors.forEach(s=>{if(previous&&[...s.options].some(o=>o.value===previous))s.value=previous;});toast(e.message,true)}
+    finally{selectors.forEach(s=>s.disabled=false);}
   }
   async function loadMaps(){
     const g=$('#mapGrid'); if(!g)return; g.innerHTML='<span>Загрузка...</span>';
     try{
       const j=await api('maps'); const maps=(j.maps||[]).slice().sort((a,b)=>a.localeCompare(b)); fillMapSelector(maps);
-      const render=()=>{const q=String($('#mapFilter')?.value||'').trim().toLowerCase();const list=q?maps.filter(m=>m.toLowerCase().includes(q)):maps;g.innerHTML=list.map(m=>`<button class="map-card ${m===currentMap?'active-map':''}" data-map="${esc(m)}"><i class="fa-solid fa-map"></i><b>${esc(m)}</b><span>${m===currentMap?'Сейчас запущена':'Сменить карту'}</span></button>`).join('')||'<span class="text-secondary">Карты не найдены</span>';$$('[data-map]',g).forEach(b=>b.onclick=()=>changeMap(b.dataset.map));};
-      render(); if($('#mapFilter'))$('#mapFilter').oninput=render; if($('#changeMapSelected'))$('#changeMapSelected').onclick=()=>changeMap($('#mapSelector')?.value);
+      const render=()=>{const q=String($('#mapFilter')?.value||'').trim().toLowerCase();const list=q?maps.filter(m=>m.toLowerCase().includes(q)):maps;g.innerHTML=list.map(m=>`<button class="map-card ${m===currentMap?'active-map':''}" data-map="${esc(m)}"><i class="fa-solid fa-map"></i><b>${esc(m)}</b><span>${m===currentMap?'Сейчас запущена':'Сменить карту'}</span></button>`).join('')||'<span class="text-secondary">Карты не найдены</span>';$$('[data-map]',g).forEach(b=>b.onclick=()=>changeMap(b.dataset.map,false));};
+      render(); if($('#mapFilter'))$('#mapFilter').oninput=render;
+      if($('#mapSelector'))$('#mapSelector').onchange=()=>changeMap($('#mapSelector').value,false);
+      if($('#changeMapSelected'))$('#changeMapSelected').onclick=()=>changeMap($('#mapSelector')?.value,false);
     }catch(e){g.innerHTML=`<span class="text-danger">${esc(e.message)}</span>`}
   }
+
+  $('#settingsMapSelector')?.addEventListener('change',e=>changeMap(e.currentTarget.value,false));
 
   async function loadPlugins(){
     const box=$('#pluginList');if(!box)return;box.textContent='Загрузка...';

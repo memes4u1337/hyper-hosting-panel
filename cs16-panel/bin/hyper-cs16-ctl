@@ -112,6 +112,30 @@ def db_update_ftp(sid:int,user:str,password:str):
         pass
 
 
+def db_update_start_map(sid:int,map_name:str):
+    try:
+        con=db_connect()
+        try:
+            with con.cursor() as cur:
+                cur.execute('UPDATE servers SET start_map=%s WHERE id=%s',(map_name,sid))
+        finally:
+            con.close()
+    except Exception:
+        pass
+
+
+def db_update_current_map(sid:int,map_name:str):
+    try:
+        con=db_connect()
+        try:
+            with con.cursor() as cur:
+                cur.execute('UPDATE servers SET start_map=%s, current_map=%s WHERE id=%s',(map_name,map_name,sid))
+        finally:
+            con.close()
+    except Exception:
+        pass
+
+
 def db_update_mode(sid:int,mode:str,bots_enabled:int|None=None,bots_quota:int|None=None,bots_difficulty:int|None=None):
     try:
         con=db_connect()
@@ -765,7 +789,78 @@ def base_map_list():
 def map_list(sid:int):
     c=load_server(sid); d=Path(c['path'])/'cstrike/maps'
     maps=sorted({p.stem for p in d.glob('*.bsp') if SAFE_MAP.fullmatch(p.stem)},key=str.lower) if d.is_dir() else []
-    return {'ok':True,'maps':maps,'current_map':str(c.get('start_map') or '')}
+    current=str(c.get('start_map') or '')
+    if service_status(sid)=='active':
+        try:
+            current=str(query_info(query_host(c),int(c['port']),1.2).get('map') or current)
+        except Exception:
+            pass
+    return {'ok':True,'maps':maps,'current_map':current,'start_map':str(c.get('start_map') or '')}
+
+
+def activate_map(sid:int,map_name:str):
+    require_root(); c=load_server(sid)
+    if not SAFE_MAP.fullmatch(map_name): raise RuntimeError('Invalid map')
+    bsp=Path(c['path'])/'cstrike/maps'/(map_name+'.bsp')
+    if not bsp.is_file(): raise RuntimeError(f'Map is not installed on this server: {map_name}')
+
+    # Persist first so any restart/start uses the selected map too.
+    c['start_map']=map_name
+    write_server_cfg(Path(c['path']),c)
+    save_server(c)
+    normalize_permissions(Path(c['path']))
+    db_update_start_map(sid,map_name)
+
+    service=service_status(sid)
+    mode='changelevel'
+    output=''
+    if service!='active':
+        cp=run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False)
+        if cp.returncode!=0: raise RuntimeError((cp.stderr or cp.stdout or 'HLDS start failed').strip())
+        mode='start'
+    else:
+        try:
+            output=query_rcon(query_host(c),int(c['port']),str(c.get('rcon_password','')),'changelevel '+map_name,3.0)
+        except Exception as exc:
+            output='RCON changelevel failed: '+str(exc)
+            mode='restart_fallback'
+            run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
+
+    # Do not report success until A2S confirms that the selected map is actually running.
+    deadline=time.time()+18.0
+    last_error=''
+    while time.time()<deadline:
+        if service_status(sid)!='active':
+            time.sleep(.5); continue
+        try:
+            q=query_info(query_host(c),int(c['port']),1.2)
+            current=str(q.get('map') or '')
+            if current==map_name:
+                db_update_current_map(sid,map_name)
+                return {'ok':True,'map':map_name,'current_map':current,'mode':mode,'service':'active','query':q,'output':output}
+            last_error=f'current map is {current or "unknown"}'
+        except Exception as exc:
+            last_error=str(exc)
+        time.sleep(.6)
+
+    # One final restart makes the persisted start_map authoritative if changelevel was ignored.
+    if mode=='changelevel':
+        run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
+        mode='restart_fallback'
+        deadline=time.time()+18.0
+        while time.time()<deadline:
+            try:
+                if service_status(sid)=='active':
+                    q=query_info(query_host(c),int(c['port']),1.2)
+                    current=str(q.get('map') or '')
+                    if current==map_name:
+                        db_update_current_map(sid,map_name)
+                        return {'ok':True,'map':map_name,'current_map':current,'mode':mode,'service':'active','query':q,'output':output}
+                    last_error=f'current map is {current or "unknown"}'
+            except Exception as exc:
+                last_error=str(exc)
+            time.sleep(.6)
+    raise RuntimeError(f'Failed to activate map {map_name}: {last_error or "A2S did not confirm the map"}')
 
 
 def plugins_list(sid:int):
@@ -1382,6 +1477,7 @@ def main():
         q=sp.add_parser(a); q.add_argument('id',type=int)
     q=sp.add_parser('rcon'); q.add_argument('id',type=int); q.add_argument('command')
     q=sp.add_parser('change-map'); q.add_argument('id',type=int); q.add_argument('map')
+    q=sp.add_parser('activate-map'); q.add_argument('id',type=int); q.add_argument('map')
     q=sp.add_parser('kick'); q.add_argument('id',type=int); q.add_argument('userid',type=int)
     q=sp.add_parser('ban'); q.add_argument('id',type=int); q.add_argument('userid',type=int); q.add_argument('--minutes',type=int,default=30)
     q=sp.add_parser('plugin-toggle'); q.add_argument('id',type=int); q.add_argument('plugin'); q.add_argument('state',choices=['on','off'])
@@ -1412,9 +1508,8 @@ def main():
         elif args.cmd=='maps': result=map_list(args.id)
         elif args.cmd=='plugins': result=plugins_list(args.id)
         elif args.cmd=='rcon': result=rcon_cmd(args.id,args.command)
-        elif args.cmd=='change-map':
-            if not SAFE_MAP.fullmatch(args.map): raise RuntimeError('Invalid map')
-            result=rcon_cmd(args.id,'changelevel '+args.map)
+        elif args.cmd in {'change-map','activate-map'}:
+            result=activate_map(args.id,args.map)
         elif args.cmd=='kick': result=rcon_cmd(args.id,f'kick #{max(0,args.userid)}')
         elif args.cmd=='ban': result=rcon_cmd(args.id,f'banid {max(0,args.minutes)} #{max(0,args.userid)} kick;writeid')
         elif args.cmd=='plugin-toggle': result=plugin_toggle(args.id,args.plugin,args.state=='on')
