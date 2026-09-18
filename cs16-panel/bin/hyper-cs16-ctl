@@ -753,15 +753,272 @@ def _recovery_backup(sid:int, c:dict):
     root=Path(c['path']); rels=[
         'cstrike/server.cfg','cstrike/liblist.gam','cstrike/addons/metamod/plugins.ini',
         'cstrike/addons/amxmodx/configs/plugins.ini','cstrike/addons/amxmodx/configs/plugins-zplague.ini',
-        'cstrike/addons/amxmodx/configs/disabled-zplague.ini']
+        'cstrike/addons/amxmodx/configs/disabled-zplague.ini','cstrike/addons/amxmodx/configs/modules.ini']
     for rel in rels:
         src=root/rel
         if src.is_file():
             target=dst/rel; target.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,target)
+    cfgdir=root/'cstrike/addons/amxmodx/configs'
+    if cfgdir.is_dir():
+        for src in cfgdir.glob('plugins*.ini'):
+            rel=src.relative_to(root); target=dst/rel; target.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,target)
     state=cfg_path(sid)
     if state.is_file(): shutil.copy2(state,dst/'server-state.json')
     return dst
 
+
+
+AMXX_STOCK_PLUGINS={
+    'admin.amxx','admincmd.amxx','adminhelp.amxx','slots_reservation.amxx','multilingual.amxx',
+    'menufront.amxx','cmdmenu.amxx','plmenu.amxx','telemenu.amxx','mapsmenu.amxx','pluginmenu.amxx',
+    'adminchat.amxx','antiflood.amxx','scrollmsg.amxx','imessage.amxx','adminvote.amxx',
+    'nextmap.amxx','mapchooser.amxx','timeleft.amxx','pausecfg.amxx','statscfg.amxx',
+    'statsx.amxx','miscstats.amxx','stats_logging.amxx'
+}
+
+def _plugin_name_from_line(line:str):
+    s=line.strip()
+    if not s or s.startswith(';'): return ''
+    s=s.split(';',1)[0].strip()
+    if not s: return ''
+    token=s.split()[0].strip()
+    return token if token.lower().endswith('.amxx') else ''
+
+def _split_amxx_tokens(token:str):
+    if not token: return []
+    return re.findall(r'[A-Za-z0-9_.-]+?\.amxx',token,flags=re.I)
+
+def _sanitize_plugin_file(path:Path, plugins_dir:Path):
+    """Repair malformed AMXX plugin lists without deleting user data."""
+    if not path.exists(): return {'changed':False,'split':[],'missing':[],'duplicates':[]}
+    raw=path.read_text(encoding='utf-8',errors='ignore').replace('\r\n','\n').replace('\r','\n')
+    out=[]; seen=set(); changed=False; split=[]; missing=[]; duplicates=[]
+    for original in raw.splitlines():
+        stripped=original.strip()
+        if not stripped or stripped.startswith(';'):
+            out.append(original)
+            continue
+        active_part=stripped.split(';',1)[0].strip()
+        token=active_part.split()[0] if active_part else ''
+        pieces=_split_amxx_tokens(token)
+        if len(pieces)<=1:
+            name=pieces[0] if pieces else ''
+            if not name:
+                out.append(original); continue
+            key=name.lower()
+            if key in seen:
+                duplicates.append(name); changed=True
+                out.append(f'; HYPER-HOST duplicate disabled: {name}')
+                continue
+            seen.add(key)
+            if not (plugins_dir/name).is_file():
+                missing.append(name); changed=True
+                out.append(f'; HYPER-HOST missing plugin disabled: {name}')
+                continue
+            out.append(name if stripped==token else original)
+            if original!=out[-1]: changed=True
+            continue
+        changed=True; split.append(token)
+        out.append(f'; HYPER-HOST repaired malformed entry: {token}')
+        for name in pieces:
+            key=name.lower()
+            if key in seen:
+                duplicates.append(name)
+                out.append(f'; HYPER-HOST duplicate disabled: {name}')
+                continue
+            seen.add(key)
+            if (plugins_dir/name).is_file():
+                out.append(name)
+            else:
+                missing.append(name)
+                out.append(f'; HYPER-HOST missing plugin disabled: {name}')
+    new='\n'.join(out).rstrip()+'\n'
+    if new!=raw.rstrip()+'\n': changed=True
+    if changed: path.write_text(new,encoding='utf-8')
+    return {'changed':changed,'split':split,'missing':missing,'duplicates':duplicates}
+
+def _sanitize_all_plugin_lists(c:dict):
+    cstrike=Path(c['path'])/'cstrike'
+    cfg=cstrike/'addons/amxmodx/configs'
+    plugdir=cstrike/'addons/amxmodx/plugins'
+    reports=[]
+    if cfg.is_dir():
+        for f in sorted(cfg.glob('plugins*.ini')):
+            try:
+                r=_sanitize_plugin_file(f,plugdir)
+                if r.get('changed'): reports.append({'file':f.name,**r})
+            except Exception as exc:
+                reports.append({'file':f.name,'error':str(exc)})
+    return reports
+
+def _sanitize_modules_ini(c:dict):
+    p=Path(c['path'])/'cstrike/addons/amxmodx/configs/modules.ini'
+    if not p.exists(): return {'changed':False,'duplicates':[]}
+    raw=p.read_text(encoding='utf-8',errors='ignore').replace('\r\n','\n').replace('\r','\n')
+    seen=set(); out=[]; dup=[]; changed=False
+    for line in raw.splitlines():
+        s=line.strip()
+        if not s or s.startswith(';'):
+            out.append(line); continue
+        token=s.split(';',1)[0].strip().split()[0].lower() if s.split(';',1)[0].strip() else ''
+        if not token:
+            out.append(line); continue
+        if token in seen:
+            out.append('; HYPER-HOST duplicate module disabled: '+line.strip())
+            dup.append(token); changed=True
+        else:
+            seen.add(token); out.append(line)
+    new='\n'.join(out).rstrip()+'\n'
+    if new!=raw.rstrip()+'\n': changed=True
+    if changed: p.write_text(new,encoding='utf-8')
+    return {'changed':changed,'duplicates':dup}
+
+def _sanitize_metamod_plugins(c:dict):
+    p=Path(c['path'])/'cstrike/addons/metamod/plugins.ini'
+    if not p.exists(): return {'changed':False,'duplicates':[],'invalid_amxx_modules':[]}
+    raw=p.read_text(encoding='utf-8',errors='ignore').replace('\r\n','\n').replace('\r','\n')
+    seen=set(); out=[]; dup=[]; invalid=[]; changed=False
+    for line in raw.splitlines():
+        s=line.strip()
+        if not s or s.startswith(';'):
+            out.append(line); continue
+        low=s.lower()
+        if '/amxmodx/modules/' in low or re.search(r'\b(?:cstrike|csx|engine|fakemeta|fun|geoip|hamsandwich|mysql)_amxx_i386\.so\b',low):
+            out.append('; HYPER-HOST invalid Metamod entry disabled: '+s)
+            invalid.append(s); changed=True; continue
+        key=re.sub(r'\s+',' ',low)
+        if key in seen:
+            out.append('; HYPER-HOST duplicate Metamod entry disabled: '+s)
+            dup.append(s); changed=True; continue
+        seen.add(key); out.append(line)
+    new='\n'.join(out).rstrip()+'\n'
+    if new!=raw.rstrip()+'\n': changed=True
+    if changed: p.write_text(new,encoding='utf-8')
+    return {'changed':changed,'duplicates':dup,'invalid_amxx_modules':invalid}
+
+def _active_plugin_lists(c:dict):
+    cfg=Path(c['path'])/'cstrike/addons/amxmodx/configs'
+    if not cfg.is_dir(): return []
+    files=[]
+    main=cfg/'plugins.ini'
+    if main.exists(): files.append(main)
+    for f in sorted(cfg.glob('plugins-*.ini')):
+        if f.name.startswith('disabled-'): continue
+        files.append(f)
+    return files
+
+def _disable_plugin_in_file(path:Path, plugin:str, reason:str):
+    if not path.exists(): return False
+    changed=False; out=[]
+    for line in path.read_text(encoding='utf-8',errors='ignore').splitlines():
+        name=_plugin_name_from_line(line)
+        if name.lower()==plugin.lower():
+            out.append(f'; HYPER-HOST QUARANTINE [{reason}]: {name}')
+            changed=True
+        else:
+            out.append(line)
+    if changed: path.write_text('\n'.join(out).rstrip()+'\n',encoding='utf-8')
+    return changed
+
+def _quarantine_plugins(c:dict, plugins:list[str], reason:str):
+    changed=[]; seen=set()
+    for x in plugins:
+        plugin=Path(str(x)).name
+        if not plugin.lower().endswith('.amxx') or plugin.lower() in seen: continue
+        seen.add(plugin.lower()); hit=False
+        for f in _active_plugin_lists(c):
+            if _disable_plugin_in_file(f,plugin,reason): hit=True
+        if hit: changed.append(plugin)
+    return changed
+
+def _find_plugins_referencing_asset(c:dict, asset:str):
+    plugdir=Path(c['path'])/'cstrike/addons/amxmodx/plugins'
+    if not plugdir.is_dir(): return []
+    needle=str(asset).replace('\\','/').lstrip('/').lower().encode('utf-8','ignore')
+    base=Path(str(asset)).name.lower().encode('utf-8','ignore')
+    hits=[]
+    for f in plugdir.glob('*.amxx'):
+        try:
+            data=f.read_bytes().lower()
+            if (needle and needle in data) or (base and len(base)>5 and base in data):
+                hits.append(f.name)
+        except Exception:
+            pass
+    return hits
+
+def _parse_plugin_failures(log:str):
+    broken=[]
+    pats=[
+        r'Could not load plugin\s+"([^"]+\.amxx)"',
+        r'Error opening plugin file\s+\(plugin\s+"([^"]+\.amxx)"\)',
+        r'Plugin file open error\s+\(plugin\s+"([^"]+\.amxx)"\)',
+    ]
+    for pat in pats:
+        for m in re.finditer(pat,log,re.I):
+            broken.append(Path(m.group(1)).name)
+    assets=[]
+    for m in re.finditer(r'Mod_NumForName:\s*([^\s"]+)\s+not found',log,re.I):
+        assets.append(m.group(1).replace('\\','/'))
+    return broken,assets
+
+def _safe_mode_custom_plugins(c:dict, reason:str='startup crash'):
+    quarantined=[]
+    for f in _active_plugin_lists(c):
+        out=[]; changed=False
+        for line in f.read_text(encoding='utf-8',errors='ignore').splitlines():
+            name=_plugin_name_from_line(line)
+            if name and name.lower() not in AMXX_STOCK_PLUGINS:
+                out.append(f'; HYPER-HOST SAFE MODE [{reason}]: {name}')
+                quarantined.append(name); changed=True
+            else:
+                out.append(line)
+        if changed: f.write_text('\n'.join(out).rstrip()+'\n',encoding='utf-8')
+    cfg=Path(c['path'])/'cstrike/addons/amxmodx/configs'
+    if cfg.is_dir():
+        zplist=cfg/'plugins-zplague.ini'
+        if zplist.exists():
+            disabled=cfg/'disabled-zplague.ini'
+            if disabled.exists(): disabled.unlink()
+            zplist.rename(disabled)
+    return list(dict.fromkeys(quarantined))
+
+def repair_amxx_content(sid:int, aggressive:bool=False):
+    require_root(); c=load_server(sid); path=Path(c['path'])
+    if not path.is_dir(): raise RuntimeError(f'Server directory missing: {path}')
+    actions=[]
+    pr=_sanitize_all_plugin_lists(c)
+    if pr: actions.append('repaired malformed/duplicate AMXX plugin lists')
+    mr=_sanitize_modules_ini(c)
+    if mr.get('changed'): actions.append('removed duplicate AMXX module entries')
+    mm=_sanitize_metamod_plugins(c)
+    if mm.get('changed'): actions.append('cleaned Metamod plugins.ini')
+    log=_recent_failure_log(sid,180)
+    broken,assets=_parse_plugin_failures(log)
+    q=[]
+    if broken:
+        q+=_quarantine_plugins(c,broken,'plugin load error')
+    for asset in assets:
+        refs=_find_plugins_referencing_asset(c,asset)
+        if refs:
+            q+=_quarantine_plugins(c,refs,f'missing asset {asset}')
+            actions.append(f'missing resource {asset}: quarantined '+', '.join(refs))
+        else:
+            actions.append(f'missing resource detected: {asset}')
+    q=list(dict.fromkeys(q))
+    if q: actions.append('quarantined broken plugins: '+', '.join(q))
+    if aggressive and (assets or broken) and not q:
+        safe=_safe_mode_custom_plugins(c,'unresolved startup crash')
+        if safe:
+            q+=safe; actions.append('safe mode quarantined custom plugins: '+', '.join(safe))
+    normalize_permissions(path)
+    report={'ok':True,'id':sid,'actions':actions,'plugin_repairs':pr,'module_repairs':mr,
+            'metamod_repairs':mm,'quarantined':list(dict.fromkeys(q)),'missing_assets':assets}
+    rp=STATE_ROOT/'servers'/f'{sid}.repair.json'
+    try:
+        rp.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+        shutil.chown(rp,user='root',group='cs16'); os.chmod(rp,0o640)
+    except Exception: pass
+    return report
 
 def _disable_yapb_for_recovery(c:dict):
     p=Path(c['path'])/'cstrike/addons/metamod/plugins.ini'
@@ -795,10 +1052,12 @@ def _disable_zp_for_recovery(c:dict):
 
 
 def recover_server(sid:int, automatic:bool=False):
-    """Bring a broken server back online without hiding engine crashes behind hlds_run."""
+    """Bring a broken server back online and quarantine only content that crashes GoldSrc."""
     require_root(); c=load_server(sid); path=Path(c['path']); actions=[]
     if not path.is_dir(): raise RuntimeError(f'Server directory missing: {path}')
     backup=_recovery_backup(sid,c)
+    pre=repair_amxx_content(sid,False)
+    actions.extend(pre.get('actions',[]))
     safe_map=_choose_safe_map(c)
     if safe_map!=str(c.get('start_map') or ''):
         c['start_map']=safe_map; actions.append(f'fallback map -> {safe_map}')
@@ -846,8 +1105,36 @@ def recover_server(sid:int, automatic:bool=False):
         if ok:
             return {'ok':True,'id':sid,'recovered':True,'automatic':automatic,'actions':actions,'backup':str(backup),'service':'active','udp_listening':True,'detail':detail,'warning':'Zombie Plague was disabled because it prevented HLDS from starting'}
 
+    targeted=repair_amxx_content(sid,True)
+    for a in targeted.get('actions',[]):
+        if a not in actions: actions.append(a)
+    if targeted.get('quarantined') or targeted.get('missing_assets'):
+        save_server(c); normalize_permissions(path)
+        run(['systemctl','reset-failed',f'hyper-cs16@{sid}.service'],check=False)
+        run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
+        ok,detail=wait_server_ready(c,25.0)
+        if ok:
+            return {'ok':True,'id':sid,'recovered':True,'automatic':automatic,'actions':actions,'backup':str(backup),
+                    'service':'active','udp_listening':True,'detail':detail,
+                    'warning':'Broken custom AMXX content was quarantined so the game server could start.',
+                    'quarantined':targeted.get('quarantined',[]),'missing_assets':targeted.get('missing_assets',[])}
+
+    safe=_safe_mode_custom_plugins(c,'HLDS fatal startup crash')
+    if safe:
+        actions.append('last-resort AMXX safe mode: '+', '.join(safe))
+        if (path/'cstrike/maps/de_dust2.bsp').is_file(): c['start_map']='de_dust2'
+        save_server(c); db_update_start_map(sid,str(c['start_map'])); normalize_permissions(path)
+        run(['systemctl','reset-failed',f'hyper-cs16@{sid}.service'],check=False)
+        run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
+        ok,detail=wait_server_ready(c,25.0)
+        if ok:
+            return {'ok':True,'id':sid,'recovered':True,'automatic':automatic,'actions':actions,'backup':str(backup),
+                    'service':'active','udp_listening':True,'detail':detail,
+                    'warning':'Server started in safe AMXX mode. Custom plugins were disabled, not deleted.',
+                    'quarantined':safe}
+
     run(['systemctl','stop',f'hyper-cs16@{sid}.service'],check=False)
-    raise RuntimeError('HLDS could not be recovered automatically. Last journal output:\n'+_recent_failure_log(sid,120))
+    raise RuntimeError('HLDS could not be recovered automatically. Last journal output:\n'+_recent_failure_log(sid,160))
 
 
 def service_action(sid:int,action:str):
@@ -958,6 +1245,15 @@ def status_json(sid:int,include_players=True):
         data['query_state']='no_udp'; data['query_error']=f'UDP {port} is not listening'
     elif svc in {'active','activating','failed'}:
         data['query_state']='engine_down'; data['query_error']='hlds_linux is not running'
+    rp=STATE_ROOT/'servers'/f'{sid}.repair.json'
+    if rp.is_file():
+        try:
+            rr=json.loads(rp.read_text(encoding='utf-8'))
+            data['repair_report']=rr if isinstance(rr,dict) else {}
+        except Exception:
+            data['repair_report']={}
+    else:
+        data['repair_report']={}
     return data
 
 def rcon_cmd(sid:int,command:str):
@@ -1110,8 +1406,14 @@ def config_read(sid:int,name:str):
 def config_write(sid:int,name:str,content:str):
     require_root(); c,p=config_file(sid,name)
     if len(content.encode('utf-8'))>512*1024: raise RuntimeError('Config is too large')
-    p.parent.mkdir(parents=True,exist_ok=True); p.write_text(content.replace('\r\n','\n'),encoding='utf-8'); normalize_permissions(Path(c['path']))
-    return {'ok':True,'name':name}
+    p.parent.mkdir(parents=True,exist_ok=True); p.write_text(content.replace('\r\n','\n'),encoding='utf-8')
+    repairs={}
+    if name=='plugins.ini':
+        repairs=_sanitize_plugin_file(p,Path(c['path'])/'cstrike/addons/amxmodx/plugins')
+    elif name=='modules.ini':
+        repairs=_sanitize_modules_ini(c)
+    normalize_permissions(Path(c['path']))
+    return {'ok':True,'name':name,'repairs':repairs}
 
 
 
@@ -1500,6 +1802,7 @@ def install_zp43(sid:int):
         # AMXX automatically loads plugins-*.ini. Make sure the file is not disabled/renamed.
         pass
     c['game_mode']='zp43'; save_server(c); db_update_mode(sid,'zp43',int(c.get('bots_enabled',0)),int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
+    _sanitize_all_plugin_lists(c); _sanitize_modules_ini(c); _sanitize_metamod_plugins(c)
     normalize_permissions(path); restart=service_action(sid,'restart')
     current=load_server(sid)
     return {'ok':True,'mode':str(current.get('game_mode','classic')),'backup':str(backup),'restart':restart,'warning':restart.get('warning','')}
@@ -1669,7 +1972,7 @@ def main():
     sp.add_parser('base-install')
     sp.add_parser('base-maps')
     c=sp.add_parser('server-create'); c.add_argument('id',type=int); c.add_argument('--name',required=True); c.add_argument('--port',type=int,required=True); c.add_argument('--slots',type=int,default=16); c.add_argument('--map',default='de_dust2'); c.add_argument('--hostname',required=True); c.add_argument('--password',default=''); c.add_argument('--profile',choices=['classic','rehlds'],default='classic')
-    for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','ftp-repair','ftp-test','network','delete','repair-runtime','mods-status','nat-upnp','network-fix']:
+    for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','ftp-repair','ftp-test','network','delete','repair-runtime','mods-status','nat-upnp','network-fix','repair-content']:
         q=sp.add_parser(a); q.add_argument('id',type=int)
     q=sp.add_parser('recover'); q.add_argument('id',type=int); q.add_argument('--auto',action='store_true')
     q=sp.add_parser('rcon'); q.add_argument('id',type=int); q.add_argument('command')
@@ -1736,6 +2039,7 @@ def main():
         elif args.cmd=='mods-status': result=mods_status(args.id)
         elif args.cmd=='nat-upnp': result=nat_upnp(args.id)
         elif args.cmd=='network-fix': result=network_fix(args.id)
+        elif args.cmd=='repair-content': result=repair_amxx_content(args.id,True)
         elif args.cmd=='bots-install': result=install_yapb(args.id,args.quota,args.difficulty)
         elif args.cmd=='bots-config': result=configure_yapb(args.id,args.quota,args.difficulty)
         elif args.cmd=='bots-disable': result=disable_yapb(args.id)
