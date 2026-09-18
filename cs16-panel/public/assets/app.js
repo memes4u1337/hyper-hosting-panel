@@ -50,6 +50,14 @@
       setHealthPill('#healthService',j.running?'ok':'bad',`Процесс ${j.running?'ON':'OFF'}`);
       setHealthPill('#healthUdp',j.udp_listening?'ok':'bad',`UDP ${j.udp_listening?'ON':'OFF'}`);
       setHealthPill('#healthQuery',j.query_state==='ok'?'ok':(j.udp_listening?'warn':'bad'),`A2S ${j.query_state==='ok'?'OK':(j.udp_listening?'RETRY':'OFF')}`);
+      const badge=$('#liveStatusBadge');
+      if(badge){
+        let state='FAILED', cls='danger';
+        if(j.running&&j.udp_listening){state='ONLINE';cls='success'}
+        else if(j.running){state='STARTING';cls='warning'}
+        else if(['inactive','deactivating'].includes(String(j.service||''))){state='OFFLINE';cls='secondary'}
+        badge.innerHTML=`<span class="badge text-bg-${cls} status-badge">${state}</span>`;
+      }
     }catch(e){ /* keep cached values */ }
   }
   loadStatus(); setInterval(loadStatus, 10000);

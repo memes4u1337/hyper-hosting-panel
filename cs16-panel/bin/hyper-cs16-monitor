@@ -11,6 +11,10 @@ try:
 except Exception as exc:
     print(f'PyMySQL unavailable: {exc}',file=sys.stderr); raise SystemExit(2)
 
+FAIL_COUNTS={}
+LAST_RECOVER={}
+RECOVER_COOLDOWN=300
+
 
 def runtime(): return json.loads((ETC/'runtime.json').read_text(encoding='utf-8'))
 def conn():
@@ -31,6 +35,19 @@ def pid(sid):
     cp=subprocess.run(['systemctl','show',f'hyper-cs16@{sid}.service','-p','MainPID','--value'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
     try:return int(cp.stdout.strip())
     except:return 0
+
+def actual_hlds_pid(sid):
+    p=pid(sid)
+    if p<=0:return 0
+    try:
+        raw=Path(f'/proc/{p}/cmdline').read_bytes().replace(b'\0',b' ').decode('utf-8','replace')
+        if f'/srv/hyper-cs16/servers/{sid}/hlds_linux' in raw:return p
+    except Exception: pass
+    cp=subprocess.run(['pgrep','-u','cs16','-f',f'/srv/hyper-cs16/servers/{sid}/hlds_linux'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+    for tok in (cp.stdout or '').split():
+        try:return int(tok)
+        except:pass
+    return 0
 
 def proc_metrics(p):
     if p<=0:return 0.0,0.0,0
@@ -72,7 +89,7 @@ def rcon_player_rows(c):
     return rows
 
 def one(db,row,store_stats=False,store_players=False):
-    sid=int(row['id']); c=scfg(sid); svc=service(sid); p=pid(sid); cpu,mem,uptime=proc_metrics(p)
+    sid=int(row['id']); c=scfg(sid); svc=service(sid); p=actual_hlds_pid(sid); cpu,mem,uptime=proc_metrics(p)
     # Keep the last good query values. A single dropped A2S packet must never turn a
     # healthy HLDS process into a scary "NO QUERY" state in the panel.
     map_name=str(row.get('current_map') or row.get('start_map') or '')
@@ -83,12 +100,14 @@ def one(db,row,store_stats=False,store_players=False):
     port=int((c or {}).get('port') or row.get('port') or 0)
     udp=bool(port and udp_listening(port))
 
-    if svc!='active':
-        status='offline' if svc in {'inactive','failed','deactivating'} else 'starting'
-    elif not c:
+    if not c:
+        status='failed'
+    elif svc!='active':
+        status='offline' if svc in {'inactive','deactivating'} else ('failed' if svc=='failed' else 'starting')
+    elif p<=0:
         status='failed'
     elif not udp:
-        status='starting' if uptime < 90 else 'failed'
+        status='starting' if uptime < 30 else 'failed'
     else:
         # UDP socket is the authoritative liveness signal. A2S is statistics only.
         status='online'
@@ -108,6 +127,24 @@ def one(db,row,store_stats=False,store_players=False):
                         if cand: pl.update(cand.pop(0))
                 else:
                     plist=[dict(rr,duration=0) for rr in status_rows]
+
+    # Self-heal only after three consecutive 10s checks without a real UDP socket.
+    # Cooldown prevents loops. Recovery itself backs up configs and can disable a crashing
+    # optional mod while keeping the CS server available.
+    now=time.time()
+    if c and status in {'failed','starting'} and not udp and svc not in {'inactive','deactivating'}:
+        FAIL_COUNTS[sid]=FAIL_COUNTS.get(sid,0)+1
+        if FAIL_COUNTS[sid]>=3 and now-LAST_RECOVER.get(sid,0)>=RECOVER_COOLDOWN:
+            LAST_RECOVER[sid]=now; FAIL_COUNTS[sid]=0
+            try:
+                cp=subprocess.run(['/usr/local/sbin/hyper-cs16-ctl','recover',str(sid),'--auto'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=95)
+                print(f'auto-recover server {sid}: {(cp.stdout or "").strip()[-2000:]}',file=sys.stderr)
+                if cp.returncode==0:
+                    svc=service(sid); p=actual_hlds_pid(sid); cpu,mem,uptime=proc_metrics(p); udp=bool(port and udp_listening(port)); status='online' if udp else 'starting'
+            except Exception as exc:
+                print(f'auto-recover server {sid} failed: {exc}',file=sys.stderr)
+    else:
+        FAIL_COUNTS[sid]=0
 
     d=disk(c['path']) if c else 0.0
     with db.cursor() as cur:

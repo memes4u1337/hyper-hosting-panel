@@ -12,12 +12,37 @@ if not cfg.exists():
 try: c=json.loads(cfg.read_text(encoding='utf-8'))
 except Exception as exc:
     print(f'Cannot read {cfg}: {exc}',file=sys.stderr); raise SystemExit(2)
+
 path=Path(c.get('path','')).resolve(); root=Path('/srv/hyper-cs16/servers').resolve()
-if root not in path.parents or not (path/'hlds_run').exists():
+engine=path/'hlds_linux'
+if root not in path.parents or not engine.is_file():
     print('Unsafe or incomplete server path',file=sys.stderr); raise SystemExit(2)
+
 port=int(c.get('port',27015)); slots=int(c.get('slots',16)); start_map=str(c.get('start_map','de_dust2'))
 if not (27015<=port<=27100 and 1<=slots<=32 and re.fullmatch(r'[A-Za-z0-9_-]{1,64}',start_map)):
     print('Invalid server launch config (GoldSrc supports 1..32 clients)',file=sys.stderr); raise SystemExit(2)
+
+# Never let a stale/missing selected map trap HLDS in a restart loop.
+map_dir=path/'cstrike/maps'
+if not (map_dir/(start_map+'.bsp')).is_file():
+    candidates=[]
+    if (map_dir/'de_dust2.bsp').is_file(): candidates.append('de_dust2')
+    candidates += sorted(p.stem for p in map_dir.glob('*.bsp') if re.fullmatch(r'[A-Za-z0-9_-]{1,64}',p.stem))
+    if not candidates:
+        print(f'No playable BSP maps found in {map_dir}',file=sys.stderr); raise SystemExit(2)
+    fallback=candidates[0]
+    print(f'[HYPER-HOST] start map {start_map!r} is missing; safe fallback -> {fallback}',file=sys.stderr)
+    start_map=fallback
+
 os.chdir(path)
-cmd=[str(path/'hlds_run'),'-game','cstrike','-console','-noipx','-pingboost','3','+ip','0.0.0.0','+port',str(port),'+maxplayers',str(slots),'+map',start_map,'+sv_lan','0','+exec','server.cfg']
-os.execv(cmd[0],cmd)
+env=os.environ.copy()
+env['HOME']='/srv/hyper-cs16'
+env['USER']='cs16'; env['LOGNAME']='cs16'
+env['SteamAppId']='10'; env['SteamGameId']='10'
+old_ld=env.get('LD_LIBRARY_PATH','')
+env['LD_LIBRARY_PATH']=str(path)+((':'+old_ld) if old_ld else '')
+
+# Run the real engine as systemd MainPID. Using hlds_run here hides engine crashes
+# behind a sleeping shell, which previously produced "Process ON / UDP OFF" forever.
+cmd=[str(engine),'-game','cstrike','-console','-noipx','-pingboost','3','+ip','0.0.0.0','+port',str(port),'+maxplayers',str(slots),'+map',start_map,'+sv_lan','0','+exec','server.cfg']
+os.execve(cmd[0],cmd,env)

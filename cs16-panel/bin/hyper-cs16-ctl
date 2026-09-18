@@ -711,11 +711,161 @@ def server_create(args):
     return {'ok':True,'id':args.id,'path':str(path),'rcon_password':rcon,'ftp_user':user,'ftp_password':pw,'ftp_warning':ftp_warning,'ftp_test':ftp_diag,'service':'active'}
 
 
+def _recent_failure_log(sid:int, lines:int=100):
+    cp=run(['journalctl','-u',f'hyper-cs16@{sid}.service','-n',str(max(20,min(300,lines))),'--no-pager','-o','cat'],check=False)
+    return (cp.stdout or '')[-12000:]
+
+
+def actual_hlds_pid(sid:int):
+    """Return the real hlds_linux pid, never the legacy hlds_run shell wrapper."""
+    main=get_pid(sid)
+    candidates=[]
+    if main>0: candidates.append(main)
+    cp=run(['pgrep','-u','cs16','-f',f'/srv/hyper-cs16/servers/{sid}/hlds_linux'],check=False)
+    for token in (cp.stdout or '').split():
+        try:
+            x=int(token)
+            if x not in candidates: candidates.append(x)
+        except Exception: pass
+    root=str(safe_server_path(sid)/'hlds_linux')
+    for pidv in candidates:
+        try:
+            raw=Path(f'/proc/{pidv}/cmdline').read_bytes().replace(b'\0',b' ').decode('utf-8','replace')
+            if root in raw: return pidv
+        except Exception: pass
+    return 0
+
+
+def _choose_safe_map(c:dict):
+    maps=Path(c['path'])/'cstrike/maps'
+    requested=str(c.get('start_map') or '')
+    if requested and (maps/(requested+'.bsp')).is_file(): return requested
+    if (maps/'de_dust2.bsp').is_file(): return 'de_dust2'
+    found=sorted(p.stem for p in maps.glob('*.bsp') if SAFE_MAP.fullmatch(p.stem)) if maps.is_dir() else []
+    if found: return found[0]
+    raise RuntimeError('No playable .bsp maps are installed on this server')
+
+
+def _recovery_backup(sid:int, c:dict):
+    stamp=time.strftime('%Y%m%d-%H%M%S')
+    dst=STATE_ROOT/'backups'/f'autorecover-{sid}-{stamp}'
+    dst.mkdir(parents=True,exist_ok=True)
+    root=Path(c['path']); rels=[
+        'cstrike/server.cfg','cstrike/liblist.gam','cstrike/addons/metamod/plugins.ini',
+        'cstrike/addons/amxmodx/configs/plugins.ini','cstrike/addons/amxmodx/configs/plugins-zplague.ini',
+        'cstrike/addons/amxmodx/configs/disabled-zplague.ini']
+    for rel in rels:
+        src=root/rel
+        if src.is_file():
+            target=dst/rel; target.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,target)
+    state=cfg_path(sid)
+    if state.is_file(): shutil.copy2(state,dst/'server-state.json')
+    return dst
+
+
+def _disable_yapb_for_recovery(c:dict):
+    p=Path(c['path'])/'cstrike/addons/metamod/plugins.ini'
+    changed=False
+    if p.is_file():
+        lines=[]
+        for line in p.read_text(encoding='utf-8',errors='ignore').splitlines():
+            if 'addons/yapb/bin/yapb.so' in line.lower() and not line.lstrip().startswith(';'):
+                line='; HYPER-HOST auto-recovery: '+line; changed=True
+            lines.append(line)
+        if changed: p.write_text('\n'.join(lines).rstrip()+'\n',encoding='utf-8')
+    if changed:
+        c['bots_enabled']=0
+        try: db_update_mode(int(c['id']),str(c.get('game_mode','classic')),0,int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
+        except Exception: pass
+    return changed
+
+
+def _disable_zp_for_recovery(c:dict):
+    cfg=Path(c['path'])/'cstrike/addons/amxmodx/configs'
+    enabled=cfg/'plugins-zplague.ini'; disabled=cfg/'disabled-zplague.ini'
+    changed=False
+    if enabled.exists():
+        if disabled.exists(): disabled.unlink()
+        enabled.rename(disabled); changed=True
+    if str(c.get('game_mode','classic'))=='zp43':
+        c['game_mode']='classic'; changed=True
+        try: db_update_mode(int(c['id']),'classic',int(c.get('bots_enabled',0)),int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
+        except Exception: pass
+    return changed
+
+
+def recover_server(sid:int, automatic:bool=False):
+    """Bring a broken server back online without hiding engine crashes behind hlds_run."""
+    require_root(); c=load_server(sid); path=Path(c['path']); actions=[]
+    if not path.is_dir(): raise RuntimeError(f'Server directory missing: {path}')
+    backup=_recovery_backup(sid,c)
+    safe_map=_choose_safe_map(c)
+    if safe_map!=str(c.get('start_map') or ''):
+        c['start_map']=safe_map; actions.append(f'fallback map -> {safe_map}')
+    # Classic Metamod cannot parse the old Metamod-R config syntax.
+    if str(c.get('profile','classic'))!='rehlds':
+        stale=path/'cstrike/addons/metamod/config.ini'
+        if stale.exists():
+            stale.unlink(missing_ok=True); actions.append('removed stale Metamod-R config.ini')
+    (path/'cstrike/banned.cfg').touch(exist_ok=True); (path/'cstrike/listip.cfg').touch(exist_ok=True)
+    rt=load_runtime(); steam=Path(rt.get('steamcmd','/opt/steamcmd/steamcmd.sh'))
+    ensure_steam_runtime(steam)
+    _set_cfg_cvar(path/'cstrike/server.cfg','sv_lan','0'); save_server(c); db_update_start_map(sid,str(c['start_map'])); normalize_permissions(path)
+    run(['systemctl','reset-failed',f'hyper-cs16@{sid}.service'],check=False)
+    run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
+    ok,detail=wait_server_ready(c,20.0)
+    if ok:
+        return {'ok':True,'id':sid,'recovered':True,'automatic':automatic,'actions':actions,'backup':str(backup),'service':'active','udp_listening':True,'detail':detail}
+
+    # A corrupt/incompatible custom BSP can crash GoldSrc before the UDP socket opens.
+    # Try the known-good stock map before touching any user's plugins.
+    if str(c.get('start_map') or '')!='de_dust2' and (path/'cstrike/maps/de_dust2.bsp').is_file():
+        failed_map=str(c.get('start_map') or '')
+        c['start_map']='de_dust2'; actions.append(f'bad startup map {failed_map} -> de_dust2')
+        save_server(c); db_update_start_map(sid,'de_dust2'); normalize_permissions(path)
+        run(['systemctl','reset-failed',f'hyper-cs16@{sid}.service'],check=False); run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
+        ok,detail=wait_server_ready(c,20.0)
+        if ok:
+            return {'ok':True,'id':sid,'recovered':True,'automatic':automatic,'actions':actions,'backup':str(backup),'service':'active','udp_listening':True,'detail':detail,'warning':f'Map {failed_map} prevented HLDS from starting; server was restored on de_dust2'}
+
+    # Optional third-party mods must never be able to keep the paid game service down.
+    if _disable_yapb_for_recovery(c):
+        actions.append('temporarily disabled YaPB after startup crash')
+        save_server(c); normalize_permissions(path)
+        run(['systemctl','reset-failed',f'hyper-cs16@{sid}.service'],check=False); run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
+        ok,detail=wait_server_ready(c,20.0)
+        if ok:
+            return {'ok':True,'id':sid,'recovered':True,'automatic':automatic,'actions':actions,'backup':str(backup),'service':'active','udp_listening':True,'detail':detail,'warning':'YaPB was disabled because it prevented HLDS from starting'}
+
+    if _disable_zp_for_recovery(c):
+        actions.append('temporarily disabled Zombie Plague after startup crash')
+        if (path/'cstrike/maps/de_dust2.bsp').is_file(): c['start_map']='de_dust2'; actions.append('safe map -> de_dust2')
+        _set_cfg_cvar(path/'cstrike/server.cfg','sv_lan','0'); save_server(c); db_update_start_map(sid,str(c['start_map'])); normalize_permissions(path)
+        run(['systemctl','reset-failed',f'hyper-cs16@{sid}.service'],check=False); run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
+        ok,detail=wait_server_ready(c,22.0)
+        if ok:
+            return {'ok':True,'id':sid,'recovered':True,'automatic':automatic,'actions':actions,'backup':str(backup),'service':'active','udp_listening':True,'detail':detail,'warning':'Zombie Plague was disabled because it prevented HLDS from starting'}
+
+    run(['systemctl','stop',f'hyper-cs16@{sid}.service'],check=False)
+    raise RuntimeError('HLDS could not be recovered automatically. Last journal output:\n'+_recent_failure_log(sid,120))
+
+
 def service_action(sid:int,action:str):
-    require_root(); load_server(sid)
+    require_root(); c=load_server(sid)
     if action not in {'start','stop','restart'}: raise RuntimeError('Invalid action')
+    if action=='stop':
+        cp=run(['systemctl','stop',f'hyper-cs16@{sid}.service'],check=False)
+        return {'ok':cp.returncode==0,'action':'stop','service':service_status(sid),'running':False,'udp_listening':False}
+    run(['systemctl','reset-failed',f'hyper-cs16@{sid}.service'],check=False)
     cp=run(['systemctl',action,f'hyper-cs16@{sid}.service'],check=False)
-    return {'ok':cp.returncode==0,'output':(cp.stdout or '').strip(),'service':service_status(sid)}
+    if cp.returncode!=0:
+        return {'ok':False,'action':action,'service':service_status(sid),'error':(cp.stdout or '').strip() or 'systemd command failed'}
+    ok,detail=wait_server_ready(c,25.0)
+    if ok:
+        return {'ok':True,'action':action,'service':'active','running':True,'udp_listening':True,'detail':detail,'recovered':False}
+    result=recover_server(sid,False)
+    result['action']=action; result['initial_failure']=str(detail)
+    return result
 
 
 def service_status(sid:int):
@@ -773,13 +923,13 @@ def rcon_status_players(c):
     return rows
 
 def status_json(sid:int,include_players=True):
-    c=load_server(sid); svc=service_status(sid); pid=get_pid(sid); pm=proc_metrics(pid); path=Path(c['path']); port=int(c['port'])
-    udp=udp_listening(port) if svc=='active' else False
-    data={'ok':True,'id':sid,'service':svc,'running':svc=='active','udp_listening':udp,'pid':pid,'cpu_percent':pm['cpu_percent'],'memory_mb':pm['memory_mb'],
+    c=load_server(sid); svc=service_status(sid); pid=actual_hlds_pid(sid); pm=proc_metrics(pid); path=Path(c['path']); port=int(c['port'])
+    running=pid>0 and svc=='active'; udp=udp_listening(port) if running else False
+    data={'ok':True,'id':sid,'service':svc,'running':running,'udp_listening':udp,'pid':pid,'cpu_percent':pm['cpu_percent'],'memory_mb':pm['memory_mb'],
           'uptime_seconds':pm['uptime_seconds'],'disk_mb':disk_mb(path),'port':port,'slots':c['slots'],'hostname':c['hostname'],
           'public_ip':c.get('public_ip',''),'start_map':c['start_map'],'profile':c.get('profile','classic'),'ftp_user':c.get('ftp_user',''),
           'ftp_password':c.get('ftp_password',''),'query':None,'query_ok':False,'query_state':'offline','players':[],'query_error':''}
-    if svc=='active' and udp:
+    if running and udp:
         qi,qerr=query_info_retry(port,2)
         if qi:
             data['query']=qi; data['query_ok']=True; data['query_state']='ok'
@@ -804,8 +954,10 @@ def status_json(sid:int,include_players=True):
             data['query_state']='retrying'; data['query_error']=qerr
             if include_players:
                 data['players']=rcon_status_players(c)
-    elif svc=='active':
+    elif running:
         data['query_state']='no_udp'; data['query_error']=f'UDP {port} is not listening'
+    elif svc in {'active','activating','failed'}:
+        data['query_state']='engine_down'; data['query_error']='hlds_linux is not running'
     return data
 
 def rcon_cmd(sid:int,command:str):
@@ -835,80 +987,74 @@ def map_list(sid:int):
     return {'ok':True,'maps':maps,'current_map':current,'start_map':str(c.get('start_map') or '')}
 
 
+def _persist_start_map(c:dict,map_name:str):
+    # Changing a map must never overwrite the user's server.cfg. The map is a
+    # launch/runtime property stored in state JSON + SQL and applied via RCON.
+    c['start_map']=map_name
+    save_server(c)
+    db_update_start_map(int(c['id']),map_name)
+
+
+def _verify_map_live(c:dict,map_name:str,timeout:float=18.0):
+    deadline=time.time()+timeout; last=''; last_q={}
+    while time.time()<deadline:
+        if service_status(int(c['id']))!='active' or not udp_listening(int(c['port'])):
+            last='engine/UDP not ready'; time.sleep(.6); continue
+        rmap,_=rcon_current_map(c)
+        if rmap==map_name: return True,{'verified_by':'rcon','query':last_q}
+        qi,qerr=query_info_retry(int(c['port']),1)
+        if qi:
+            last_q=qi
+            if str(qi.get('map') or '')==map_name: return True,{'verified_by':'a2s','query':qi}
+            last=f'current map is {qi.get("map") or "unknown"}'
+        elif qerr: last=qerr
+        time.sleep(1.0)
+    return False, last or 'map verification timeout'
+
+
 def activate_map(sid:int,map_name:str):
     require_root(); c=load_server(sid)
     if not SAFE_MAP.fullmatch(map_name): raise RuntimeError('Invalid map')
     bsp=Path(c['path'])/'cstrike/maps'/(map_name+'.bsp')
     if not bsp.is_file(): raise RuntimeError(f'Map is not installed on this server: {map_name}')
 
-    # Persist first: if a restart is ever needed, HLDS comes back on the selected map.
-    c['start_map']=map_name
-    write_server_cfg(Path(c['path']),c); save_server(c); normalize_permissions(Path(c['path'])); db_update_start_map(sid,map_name)
+    old_map=str(c.get('start_map') or '')
+    if old_map==map_name and service_status(sid)=='active' and udp_listening(int(c['port'])):
+        live,_=rcon_current_map(c)
+        if live==map_name:
+            db_update_current_map(sid,map_name)
+            return {'ok':True,'map':map_name,'current_map':map_name,'mode':'already_active','service':'active','verified_by':'rcon'}
 
-    service=service_status(sid); mode='changelevel'; output=''; last_error=''
-    if service!='active' or not udp_listening(int(c['port'])):
-        run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
-        mode='start'
-        ok,detail=wait_server_ready(c,30.0)
-        if not ok: raise RuntimeError(f'HLDS failed to start on {map_name}: {detail}')
-    else:
+    # Healthy server: change live map first. Persist only after the engine confirms it.
+    if service_status(sid)=='active' and udp_listening(int(c['port'])):
         try:
             output=query_rcon(query_host(c),int(c['port']),str(c.get('rcon_password','')),'changelevel '+map_name,3.0)
+            ok,detail=_verify_map_live(c,map_name,20.0)
+            if ok:
+                _persist_start_map(c,map_name); db_update_current_map(sid,map_name)
+                return {'ok':True,'map':map_name,'current_map':map_name,'mode':'changelevel','service':'active','output':output,**detail}
         except Exception as exc:
-            last_error='RCON changelevel failed: '+str(exc)
-            mode='restart_fallback'
-            run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
+            detail='RCON changelevel failed: '+str(exc)
+    else:
+        detail='server was not healthy before map change'
 
-    # GoldSrc can briefly suppress A2S during map load. Verify by RCON first and query
-    # A2S only at a low rate so our own panel never triggers query flood protection.
-    deadline=time.time()+20.0; next_a2s=0.0; last_q=None
-    while time.time()<deadline:
-        if service_status(sid)!='active' or not udp_listening(int(c['port'])):
-            time.sleep(.8); continue
-        rmap,_=rcon_current_map(c)
-        if rmap==map_name:
-            qi,qerr=query_info_retry(int(c['port']),1)
-            if qi: last_q=qi
+    # Start/restart on the requested map. If it crashes, roll back automatically so a
+    # bad map/mod combination can never leave the whole server at Process ON / UDP OFF.
+    _persist_start_map(c,map_name)
+    run(['systemctl','reset-failed',f'hyper-cs16@{sid}.service'],check=False)
+    run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
+    ok,ready=wait_server_ready(c,25.0)
+    if ok:
+        vm,vdetail=_verify_map_live(c,map_name,12.0)
+        if vm:
             db_update_current_map(sid,map_name)
-            return {'ok':True,'map':map_name,'current_map':map_name,'mode':mode,'service':'active','query':last_q or {},'output':output,'verified_by':'rcon'}
-        now=time.time()
-        if now>=next_a2s:
-            qi,qerr=query_info_retry(int(c['port']),1); next_a2s=now+2.0
-            if qi:
-                last_q=qi
-                current=str(qi.get('map') or '')
-                if current==map_name:
-                    db_update_current_map(sid,map_name)
-                    return {'ok':True,'map':map_name,'current_map':current,'mode':mode,'service':'active','query':qi,'output':output,'verified_by':'a2s'}
-                last_error=f'current map is {current or "unknown"}'
-            elif qerr:
-                last_error=qerr
-        time.sleep(.75)
+            return {'ok':True,'map':map_name,'current_map':map_name,'mode':'restart','service':'active',**vdetail}
 
-    # Restart only when the map really did not change. Never restart merely because A2S
-    # timed out while RCON/UDP still show a healthy server.
-    if mode=='changelevel':
-        rmap,_=rcon_current_map(c)
-        if rmap and rmap!=map_name:
-            run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
-            mode='restart_fallback'
-            ok,detail=wait_server_ready(c,30.0)
-            if not ok: raise RuntimeError(f'HLDS restart failed while activating {map_name}: {detail}')
-            deadline=time.time()+12.0
-            while time.time()<deadline:
-                rmap,_=rcon_current_map(c)
-                if rmap==map_name:
-                    db_update_current_map(sid,map_name)
-                    return {'ok':True,'map':map_name,'current_map':map_name,'mode':mode,'service':'active','query':{},'output':output,'verified_by':'rcon'}
-                time.sleep(1.0)
-
-    # If UDP remains live, do not poison the whole server state with a false NO QUERY.
-    if service_status(sid)=='active' and udp_listening(int(c['port'])):
-        rmap,_=rcon_current_map(c)
-        if rmap==map_name:
-            db_update_current_map(sid,map_name)
-            return {'ok':True,'map':map_name,'current_map':map_name,'mode':mode,'service':'active','query':{},'output':output,'verified_by':'rcon'}
-    raise RuntimeError(f'Failed to activate map {map_name}: {last_error or "map verification failed"}')
+    rollback=old_map if old_map and (Path(c['path'])/'cstrike/maps'/(old_map+'.bsp')).is_file() else _choose_safe_map(c)
+    c['start_map']=rollback
+    _persist_start_map(c,rollback)
+    recovery=recover_server(sid,False)
+    raise RuntimeError(f'Map {map_name} could not be started safely. Server was automatically restored on {rollback}. Reason: {detail}; recovery actions: {", ".join(recovery.get("actions",[])) or "safe restart"}')
 
 def plugins_list(sid:int):
     c=load_server(sid); root=Path(c['path'])/'cstrike/addons/amxmodx'; pin=root/'configs/plugins.ini'; plugdir=root/'plugins'
@@ -1295,8 +1441,9 @@ def install_yapb(sid:int,quota:int=9,difficulty:int=3):
     normalize_permissions(path)
     c['bots_enabled']=1; c['bots_quota']=quota; c['bots_difficulty']=difficulty; save_server(c)
     db_update_mode(sid,str(c.get('game_mode','classic')),1,quota,difficulty)
-    run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
-    return {'ok':True,'id':sid,'bots':'YaPB','quota':quota,'difficulty':difficulty}
+    restart=service_action(sid,'restart')
+    current=load_server(sid)
+    return {'ok':True,'id':sid,'bots':'YaPB','quota':quota,'difficulty':difficulty,'bots_enabled':bool(current.get('bots_enabled',0)),'restart':restart,'warning':restart.get('warning','')}
 
 
 def configure_yapb(sid:int,quota:int,difficulty:int):
@@ -1320,8 +1467,8 @@ def disable_yapb(sid:int):
             lines.append(line)
         p.write_text('\n'.join(lines).rstrip()+'\n',encoding='utf-8')
     c['bots_enabled']=0; save_server(c); db_update_mode(sid,str(c.get('game_mode','classic')),0,int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
-    run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
-    return {'ok':True,'bots_enabled':False}
+    restart=service_action(sid,'restart')
+    return {'ok':True,'bots_enabled':False,'restart':restart,'warning':restart.get('warning','')}
 
 
 def install_zp43(sid:int):
@@ -1353,8 +1500,9 @@ def install_zp43(sid:int):
         # AMXX automatically loads plugins-*.ini. Make sure the file is not disabled/renamed.
         pass
     c['game_mode']='zp43'; save_server(c); db_update_mode(sid,'zp43',int(c.get('bots_enabled',0)),int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
-    normalize_permissions(path); run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
-    return {'ok':True,'mode':'zp43','backup':str(backup)}
+    normalize_permissions(path); restart=service_action(sid,'restart')
+    current=load_server(sid)
+    return {'ok':True,'mode':str(current.get('game_mode','classic')),'backup':str(backup),'restart':restart,'warning':restart.get('warning','')}
 
 
 def set_game_mode(sid:int,mode:str):
@@ -1372,8 +1520,9 @@ def set_game_mode(sid:int,mode:str):
             if disabled.exists(): disabled.unlink()
             zplist.rename(disabled)
     c['game_mode']=mode; save_server(c); db_update_mode(sid,mode,int(c.get('bots_enabled',0)),int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
-    run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False)
-    return {'ok':True,'mode':mode}
+    restart=service_action(sid,'restart')
+    current=load_server(sid)
+    return {'ok':True,'mode':str(current.get('game_mode',mode)),'restart':restart,'warning':restart.get('warning','')}
 
 
 def mods_status(sid:int):
@@ -1522,6 +1671,7 @@ def main():
     c=sp.add_parser('server-create'); c.add_argument('id',type=int); c.add_argument('--name',required=True); c.add_argument('--port',type=int,required=True); c.add_argument('--slots',type=int,default=16); c.add_argument('--map',default='de_dust2'); c.add_argument('--hostname',required=True); c.add_argument('--password',default=''); c.add_argument('--profile',choices=['classic','rehlds'],default='classic')
     for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','ftp-repair','ftp-test','network','delete','repair-runtime','mods-status','nat-upnp','network-fix']:
         q=sp.add_parser(a); q.add_argument('id',type=int)
+    q=sp.add_parser('recover'); q.add_argument('id',type=int); q.add_argument('--auto',action='store_true')
     q=sp.add_parser('rcon'); q.add_argument('id',type=int); q.add_argument('command')
     q=sp.add_parser('change-map'); q.add_argument('id',type=int); q.add_argument('map')
     q=sp.add_parser('activate-map'); q.add_argument('id',type=int); q.add_argument('map')
@@ -1551,6 +1701,7 @@ def main():
         elif args.cmd=='server-create': result=server_create(args)
         elif args.cmd in {'start','stop','restart'}: result=service_action(args.id,args.cmd)
         elif args.cmd=='status': result=status_json(args.id,True)
+        elif args.cmd=='recover': result=recover_server(args.id,args.auto)
         elif args.cmd=='players': result={'ok':True,'players':status_json(args.id,True).get('players',[])}
         elif args.cmd=='maps': result=map_list(args.id)
         elif args.cmd=='plugins': result=plugins_list(args.id)
