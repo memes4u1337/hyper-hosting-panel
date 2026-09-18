@@ -172,19 +172,42 @@ def install_rehlds(path:Path):
 def ensure_base(profile='classic'):
     require_root(); rt=load_runtime(); base=Path(rt.get('base_game_dir','/srv/hyper-cs16/base-hlds'))
     marker=base/'.hyper-cs16-ready'
-    if marker.exists() and (base/'hlds_run').exists(): return {'ok':True,'path':str(base),'cached':True}
+    required=[base/'hlds_run',base/'hlds_linux',base/'cstrike/liblist.gam',base/'cstrike/dlls/cs.so',base/'cstrike/maps/de_dust2.bsp']
+    if marker.exists() and all(x.exists() for x in required): return {'ok':True,'path':str(base),'cached':True}
     base.parent.mkdir(parents=True,exist_ok=True); base.mkdir(parents=True,exist_ok=True)
     run(['chown','cs16:www-data',str(base)],check=False); os.chmod(base,0o2775)
     steam=Path(rt.get('steamcmd','/opt/steamcmd/steamcmd.sh'))
     if not steam.exists(): raise RuntimeError(f'SteamCMD missing: {steam}')
-    # app 90 sometimes needs several passes to fetch complete cstrike content.
+    log_dir=APP_ROOT/'logs'; log_dir.mkdir(parents=True,exist_ok=True)
+    log_file=log_dir/'steamcmd-base.log'
     cmd=[str(steam),'+force_install_dir',str(base),'+login','anonymous','+app_set_config','90','mod','cstrike','+app_update','90','-beta','steam_legacy','validate','+quit']
-    logs=[]
-    for _ in range(3): logs.append(run_as_cs16(cmd,check=False,timeout=1800).stdout or '')
-    if not (base/'hlds_run').exists() or not (base/'cstrike').is_dir():
-        raise RuntimeError('HLDS installation incomplete. Last SteamCMD output: '+logs[-1][-3000:])
+    attempts=[]
+    for attempt in range(1,6):
+        try:
+            cp=run_as_cs16(cmd,check=False,timeout=1800)
+            output=cp.stdout or ''
+            attempts.append(output)
+            with log_file.open('a',encoding='utf-8') as fh:
+                fh.write(f'\n===== SteamCMD pass {attempt} @ {time.strftime("%F %T")} rc={cp.returncode} =====\n')
+                fh.write(output[-200000:])
+        except subprocess.TimeoutExpired as exc:
+            output=(exc.stdout or '') if isinstance(exc.stdout,str) else ''
+            attempts.append(output+'\nTIMEOUT')
+            with log_file.open('a',encoding='utf-8') as fh:
+                fh.write(f'\n===== SteamCMD pass {attempt} TIMEOUT @ {time.strftime("%F %T")} =====\n{output[-50000:]}\n')
+        if all(x.exists() for x in required): break
+        time.sleep(2)
+    if not all(x.exists() for x in required):
+        missing=', '.join(str(x.relative_to(base)) for x in required if not x.exists())
+        tail=(attempts[-1] if attempts else '')[-3000:]
+        raise RuntimeError(f'HLDS installation incomplete; missing: {missing}. SteamCMD log: {log_file}. Last output: {tail}')
+    # Steam networking library expected by old GoldSrc dedicated servers.
+    steamclient=steam.parent/'linux32/steamclient.so'
+    if steamclient.exists():
+        sdk=Path('/srv/hyper-cs16/.steam/sdk32'); sdk.mkdir(parents=True,exist_ok=True)
+        shutil.copy2(steamclient,sdk/'steamclient.so')
+        shutil.chown(sdk/'steamclient.so',user='cs16',group='cs16')
     install_metamod_amxx(base)
-    # ReHLDS files are optional in template; individual profile can overlay them.
     marker.write_text(f'classic + Metamod-R {METAMOD_VERSION} + AMXX 1.9 build {AMXX_BUILD}\n',encoding='utf-8')
     shutil.chown(base,user='cs16',group='www-data')
     for root,dirs,files in os.walk(base):
@@ -196,7 +219,7 @@ def ensure_base(profile='classic'):
             except Exception: pass
     for exe in ['hlds_run','hlds_linux']:
         if (base/exe).exists(): os.chmod(base/exe,0o775)
-    return {'ok':True,'path':str(base),'cached':False}
+    return {'ok':True,'path':str(base),'cached':False,'steamcmd_log':str(log_file)}
 
 
 def write_server_cfg(path:Path,c:dict):
@@ -218,28 +241,65 @@ def normalize_permissions(path:Path):
 
 
 def setup_ftp(c:dict,path:Path,password:str|None=None):
+    """Create FTP account and bind the game directory into the FTP chroot.
+
+    HYPER-HOST deliberately supports systems where /etc/fstab is read-only, so
+    CS16 never persists mounts there. Reboot persistence is handled by the
+    hyper-cs16-ftp-restore systemd service via the ftp-restore controller command.
+    FTP problems are returned as a warning and never prevent HLDS from starting.
+    """
     user=c.get('ftp_user') or f'cs16_{c["id"]}'
     password=password or secrets.token_urlsafe(12)
     ctl=shutil.which('hyper-host-ctl') or '/usr/local/sbin/hyper-host-ctl'
     if not Path(ctl).exists():
-        return user,password,'HYPER-HOST FTP runtime not found; FTP account was not created'
-    run([ctl,'create-ftp',user,password,'files'],timeout=180)
-    home=Path('/var/www/hyper-host-ftp')/user/'uploads'; home.mkdir(parents=True,exist_ok=True)
-    # Remove old mount if any, then expose server root as FTP root.
-    run(['umount','-lf',str(home)],check=False)
-    run(['mount','--bind',str(path),str(home)])
-    fstab=Path('/etc/fstab')
-    line=f'{path} {home} none bind,nofail 0 0'
-    text=fstab.read_text(encoding='utf-8',errors='ignore') if fstab.exists() else ''
-    text='\n'.join(x for x in text.splitlines() if f' {home} ' not in x)
-    fstab.write_text(text.rstrip()+'\n'+line+'\n',encoding='utf-8')
+        return user,password,'HYPER-HOST FTP runtime not found; game server was created without FTP'
+    warnings=[]
+    try:
+        run([ctl,'create-ftp',user,password,'files'],timeout=180)
+    except Exception as exc:
+        return user,password,f'FTP account creation failed: {exc}'
+    home=Path('/var/www/hyper-host-ftp')/user/'uploads'
+    try:
+        home.mkdir(parents=True,exist_ok=True)
+        run(['umount','-lf',str(home)],check=False)
+        cp=run(['mount','--bind',str(path),str(home)],check=False)
+        if cp.returncode!=0:
+            warnings.append((cp.stdout or 'bind mount failed').strip())
+    except Exception as exc:
+        warnings.append(str(exc))
     c['ftp_user']=user; c['ftp_password']=password
-    return user,password,''
+    return user,password,'; '.join(x for x in warnings if x)
+
+
+def ftp_restore():
+    """Restore CS16 FTP bind mounts after reboot without touching /etc/fstab."""
+    require_root(); restored=[]; warnings=[]
+    for p in sorted(SERVER_CFG_DIR.glob('*.json')):
+        try:
+            c=json.loads(p.read_text(encoding='utf-8'))
+            user=str(c.get('ftp_user') or '')
+            path=Path(str(c.get('path') or ''))
+            if not user or not path.is_dir():
+                continue
+            home=Path('/var/www/hyper-host-ftp')/user/'uploads'
+            home.mkdir(parents=True,exist_ok=True)
+            # If already mounted with the correct source, leave it alone.
+            cp=run(['findmnt','-rn','-o','SOURCE','--target',str(home)],check=False)
+            current=(cp.stdout or '').strip()
+            if current and Path(current).resolve()==path.resolve():
+                restored.append(int(c.get('id',0))); continue
+            run(['umount','-lf',str(home)],check=False)
+            cp=run(['mount','--bind',str(path),str(home)],check=False)
+            if cp.returncode==0: restored.append(int(c.get('id',0)))
+            else: warnings.append(f'{c.get("id")}: {(cp.stdout or "mount failed").strip()}')
+        except Exception as exc:
+            warnings.append(f'{p.name}: {exc}')
+    return {'ok':not warnings,'restored':restored,'warnings':warnings}
 
 
 def server_create(args):
     require_root()
-    if not (1<=args.slots<=32): raise RuntimeError('Slots must be 1..32')
+    if not (1<=args.slots<=32): raise RuntimeError('Slots must be 1..32 (GoldSrc protocol limit)')
     if not (27015<=args.port<=27100): raise RuntimeError('Port must be 27015..27100')
     if not SAFE_MAP.fullmatch(args.map): raise RuntimeError('Invalid start map')
     if not SAFE_NAME.fullmatch(args.name): raise RuntimeError('Invalid server name')
@@ -259,12 +319,19 @@ def server_create(args):
        'profile':args.profile,'public_ip':rt.get('public_ip',''),'rcon_password':rcon,'server_password':args.password or '',
        'path':str(path),'ftp_user':'','ftp_password':''}
     write_server_cfg(path,c); normalize_permissions(path)
-    user,pw,ftp_warning=setup_ftp(c,path)
+    # Save config and start HLDS before optional FTP setup. FTP must never block game deployment.
     save_server(c)
     run(['systemctl','daemon-reload'],check=False)
     run(['systemctl','enable',f'hyper-cs16@{args.id}.service'],check=False)
-    run(['systemctl','restart',f'hyper-cs16@{args.id}.service'],check=False)
-    return {'ok':True,'id':args.id,'path':str(path),'rcon_password':rcon,'ftp_user':user,'ftp_password':pw,'ftp_warning':ftp_warning}
+    cp=run(['systemctl','restart',f'hyper-cs16@{args.id}.service'],check=False)
+    time.sleep(2)
+    active=service_status(args.id)
+    if active!='active':
+        journal=run(['journalctl','-u',f'hyper-cs16@{args.id}.service','-n','80','--no-pager'],check=False).stdout or ''
+        raise RuntimeError('HLDS failed to start. '+journal[-5000:])
+    user,pw,ftp_warning=setup_ftp(c,path)
+    save_server(c)
+    return {'ok':True,'id':args.id,'path':str(path),'rcon_password':rcon,'ftp_user':user,'ftp_password':pw,'ftp_warning':ftp_warning,'service':'active'}
 
 
 def service_action(sid:int,action:str):
@@ -543,9 +610,6 @@ def server_delete(sid:int):
     run(['systemctl','disable','--now',f'hyper-cs16@{sid}.service'],check=False)
     if user:
         home=Path('/var/www/hyper-host-ftp')/user/'uploads'; run(['umount','-lf',str(home)],check=False)
-        fstab=Path('/etc/fstab')
-        if fstab.exists():
-            text='\n'.join(x for x in fstab.read_text(encoding='utf-8',errors='ignore').splitlines() if f' {home} ' not in x)+'\n'; fstab.write_text(text,encoding='utf-8')
         ctl=shutil.which('hyper-host-ctl') or '/usr/local/sbin/hyper-host-ctl'; run([ctl,'delete-ftp',user],check=False,timeout=120)
     if path.exists(): shutil.rmtree(path)
     try: cfg_path(sid).unlink()
@@ -557,7 +621,8 @@ def doctor():
     rt=load_runtime(); checks={}
     for name,cmd in {'steamcmd':[rt.get('steamcmd','/opt/steamcmd/steamcmd.sh'),'+quit'], 'nginx':['nginx','-t'], 'mariadb':['systemctl','is-active','mariadb'], 'ftp':['ss','-ltn','sport = :21']}.items():
         cp=run(cmd,check=False,timeout=30); checks[name]={'ok':cp.returncode==0,'output':(cp.stdout or '').strip()[-500:]}
-    checks['base_game']={'ok':Path(rt.get('base_game_dir','/srv/hyper-cs16/base-hlds')).joinpath('hlds_run').exists()}
+    checks['base_game']={'ok':Path(rt.get('base_game_dir','/srv/hyper-cs16/base-hlds')).joinpath('hlds_run').exists() and Path(rt.get('base_game_dir','/srv/hyper-cs16/base-hlds')).joinpath('cstrike/maps/de_dust2.bsp').exists()}
+    checks['ftp_restore_service']={'ok':run(['systemctl','is-enabled','hyper-cs16-ftp-restore.service'],check=False).returncode==0}
     return {'ok':all(v.get('ok') for v in checks.values()),'checks':checks}
 
 
@@ -578,6 +643,7 @@ def main():
     q=sp.add_parser('logs'); q.add_argument('id',type=int); q.add_argument('--lines',type=int,default=160)
     q=sp.add_parser('map-upload'); q.add_argument('id',type=int); q.add_argument('token'); q.add_argument('map_name')
     q=sp.add_parser('plugin-upload'); q.add_argument('id',type=int); q.add_argument('token'); q.add_argument('plugin_name')
+    sp.add_parser('ftp-restore')
     sp.add_parser('doctor')
     args=p.parse_args()
     try:
@@ -608,6 +674,7 @@ def main():
         elif args.cmd=='map-upload': result=map_upload(args.id,args.token,args.map_name)
         elif args.cmd=='plugin-upload': result=plugin_upload(args.id,args.token,args.plugin_name)
         elif args.cmd=='delete': result=server_delete(args.id)
+        elif args.cmd=='ftp-restore': result=ftp_restore()
         elif args.cmd=='doctor': result=doctor()
         else: raise RuntimeError('Unknown command')
         out(result,0 if result.get('ok',True) else 1)

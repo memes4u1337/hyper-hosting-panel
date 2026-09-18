@@ -14,7 +14,7 @@ if root not in path.parents or not (path/'hlds_run').exists():
     print('Unsafe or incomplete server path',file=sys.stderr); raise SystemExit(2)
 port=int(c.get('port',27015)); slots=int(c.get('slots',16)); start_map=str(c.get('start_map','de_dust2'))
 if not (27015<=port<=27100 and 1<=slots<=32 and re.fullmatch(r'[A-Za-z0-9_-]{1,64}',start_map)):
-    print('Invalid server launch config',file=sys.stderr); raise SystemExit(2)
+    print('Invalid server launch config (GoldSrc supports 1..32 clients)',file=sys.stderr); raise SystemExit(2)
 os.chdir(path)
 cmd=[str(path/'hlds_run'),'-game','cstrike','-console','-noipx','-pingboost','3','-ip','0.0.0.0','-port',str(port),'+maxplayers',str(slots),'+map',start_map,'+sv_lan','0','+exec','server.cfg']
 os.execv(cmd[0],cmd)

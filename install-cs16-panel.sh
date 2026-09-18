@@ -89,6 +89,7 @@ install -m 0755 "$SRC_DIR/bin/hyper-cs16-monitor" /usr/local/sbin/hyper-cs16-mon
 install -m 0644 "$SRC_DIR/lib/csquery.py" "$BASE/lib/csquery.py"
 install -m 0644 "$SRC_DIR/systemd/hyper-cs16@.service" /etc/systemd/system/hyper-cs16@.service
 install -m 0644 "$SRC_DIR/systemd/hyper-cs16-monitor.service" /etc/systemd/system/hyper-cs16-monitor.service
+install -m 0644 "$SRC_DIR/systemd/hyper-cs16-ftp-restore.service" /etc/systemd/system/hyper-cs16-ftp-restore.service
 
 cat >/etc/sudoers.d/hyper-cs16-panel <<'SUDOERS'
 # HYPER-HOST CS 1.6 panel: all privileged operations go through a validating controller.
@@ -133,7 +134,7 @@ UHEX="$(hex "$ADMIN_USER")"; HHEX="$(hex "$ADMIN_HASH")"
 mysql --protocol=socket -uroot "$DB_NAME" <<SQL
 INSERT INTO users(username,password_hash,role) VALUES(CONVERT(0x$UHEX USING utf8mb4),CONVERT(0x$HHEX USING utf8mb4),'admin')
 ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash),role='admin';
-INSERT INTO settings(setting_key,setting_value) VALUES('panel_version','1.0.0') ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value);
+INSERT INTO settings(setting_key,setting_value) VALUES('panel_version','1.1.0') ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value);
 SQL
 
 log "Writing runtime configuration..."
@@ -196,9 +197,10 @@ if command -v ufw >/dev/null 2>&1; then
 fi
 systemctl daemon-reload
 systemctl enable --now hyper-cs16-monitor.service >/dev/null 2>&1 || warn 'Monitor will start after MariaDB/network is ready.'
+systemctl enable hyper-cs16-ftp-restore.service >/dev/null 2>&1 || true
 
 if [[ "$SKIP_GAME" != "1" ]]; then
-  log "Downloading the base Counter-Strike 1.6 server via SteamCMD (first install only)..."
+  log "Downloading/repairing base Counter-Strike 1.6 via SteamCMD. This can take several passes; do not interrupt it."
   if ! /usr/local/sbin/hyper-cs16-ctl base-install; then
     warn 'Base HLDS download failed. The web panel is installed; retry later with: sudo hyper-cs16-ctl base-install'
   elif [[ "$CREATE_DEFAULT" == "1" ]]; then
@@ -232,6 +234,7 @@ else
 fi
 
 systemctl restart hyper-cs16-monitor.service >/dev/null 2>&1 || true
+systemctl start hyper-cs16-ftp-restore.service >/dev/null 2>&1 || true
 
 echo
 printf '\033[1;32mHYPER-HOST CS 1.6 PANEL INSTALLED\033[0m\n'

@@ -1,0 +1,12 @@
+[Unit]
+Description=HYPER-HOST CS 1.6 FTP bind mount restore
+After=local-fs.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hyper-cs16-ctl ftp-restore
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
