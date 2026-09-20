@@ -6,13 +6,13 @@ $id=(int)($_REQUEST['server_id']??$_REQUEST['id']??0);
 $view=(string)($_REQUEST['view']??'status');
 try {
     if($_SERVER['REQUEST_METHOD']==='POST'){
-        check_csrf(); if($id<1) json_out(['ok'=>false,'error'=>'server_id required'],400); server_row($id);
+        check_csrf(); if($id<1) json_out(['ok'=>false,'error'=>'server_id required'],400); server_row($id); $postPerm=['rcon'=>'server.config','change-map'=>'server.map','kick'=>'server.players','ban'=>'server.players','plugin-toggle'=>'server.plugins','admin-save'=>'server.admins','admin-delete'=>'server.admins','config-save'=>'server.config'][$view]??'servers.view'; require_perm($postPerm,$id,true);
         if($view==='rcon'){
             $cmd=trim((string)($_POST['command']??'')); if($cmd===''||strlen($cmd)>512)throw new RuntimeException('Некорректная команда');$r=ctl(['rcon',$id,$cmd],20);audit('rcon',$cmd,$id);json_out($r,empty($r['ok'])?400:200);
         }
         if($view==='change-map'){
             $map=trim((string)($_POST['map']??''));if(!preg_match('/^[A-Za-z0-9_-]{1,64}$/',$map))throw new RuntimeException('Некорректная карта');
-            $r=ctl(['activate-map',$id,$map],45);if(empty($r['ok']))throw new RuntimeException((string)($r['error']??'Не удалось запустить карту'));
+            $r=ctl(['activate-map',$id,$map],45);if(empty($r['ok'])){event_log('map_failed','Не удалось запустить карту '.$map,$id,'danger',['error'=>$r['error']??'']);throw new RuntimeException((string)($r['error']??'Не удалось запустить карту'));}
             db()->prepare('UPDATE servers SET start_map=?,current_map=? WHERE id=?')->execute([$map,$map,$id]);
             audit('change_map',$map.' ['.(string)($r['mode']??'changelevel').']',$id);json_out($r,200);
         }
@@ -23,7 +23,7 @@ try {
             $uid=(int)($_POST['userid']??-1);$minutes=max(0,min(10080,(int)($_POST['minutes']??30)));$r=ctl(['ban',$id,$uid,'--minutes',$minutes],20);audit('player_ban','#'.$uid.' '.$minutes.'m',$id);json_out($r,empty($r['ok'])?400:200);
         }
         if($view==='plugin-toggle'){
-            $plugin=(string)($_POST['plugin']??'');$state=(string)($_POST['state']??'off');$r=ctl(['plugin-toggle',$id,$plugin,$state==='on'?'on':'off'],30);audit('plugin_toggle',$plugin.'='.$state,$id);json_out($r,empty($r['ok'])?400:200);
+            $plugin=(string)($_POST['plugin']??'');$state=(string)($_POST['state']??'off');$r=ctl(['plugin-toggle',$id,$plugin,$state==='on'?'on':'off'],30);audit('plugin_toggle',$plugin.'='.$state,$id);if($state!=='on'&&!empty($r['ok']))event_log('plugin_disabled','Плагин '.$plugin.' отключён',$id,'warning');json_out($r,empty($r['ok'])?400:200);
         }
         if($view==='admin-save'){
             $identity=trim((string)($_POST['identity']??''));$authType=(string)($_POST['auth_type']??'steamid');$flags=(string)($_POST['access_flags']??'');$password=(string)($_POST['password']??'');$index=(int)($_POST['index']??-1);$generate=(string)($_POST['generate_password']??'0')==='1';
@@ -42,7 +42,7 @@ try {
         json_out(['ok'=>false,'error'=>'Unknown API action'],404);
     }
     if($id<1 && $view!=='doctor') json_out(['ok'=>false,'error'=>'server_id required'],400);
-    if($id>0) server_row($id);
+    if($id>0){server_row($id);$getPerm=['plugins'=>'server.plugins','admins'=>'server.admins','config'=>'server.config','ftp-test'=>'server.ftp'][$view]??'servers.view';require_perm($getPerm,$id,true);}
     if($view==='status') json_out(ctl(['status',$id],10));
     if($view==='players') json_out(ctl(['players',$id],10));
     if($view==='maps') json_out(ctl(['maps',$id],10));
@@ -60,6 +60,6 @@ try {
     if($view==='player-history'){
         $st=db()->prepare('SELECT name,steam_id,last_seen,first_seen,visits FROM player_history WHERE server_id=? ORDER BY last_seen DESC LIMIT 200');$st->execute([$id]);json_out(['ok'=>true,'rows'=>$st->fetchAll()]);
     }
-    if($view==='doctor') json_out(ctl(['doctor'],40));
+    if($view==='doctor'){require_perm('resources.manage',null,true);json_out(ctl(['doctor'],40));}
     json_out(['ok'=>false,'error'=>'Unknown view'],404);
 } catch(Throwable $ex){ json_out(['ok'=>false,'error'=>$ex->getMessage()],400); }

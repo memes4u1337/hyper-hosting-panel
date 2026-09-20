@@ -2,99 +2,119 @@ CREATE TABLE IF NOT EXISTS users (
   id INT UNSIGNED NOT NULL AUTO_INCREMENT,
   username VARCHAR(64) NOT NULL,
   password_hash VARCHAR(255) NOT NULL,
-  role ENUM('admin','operator') NOT NULL DEFAULT 'admin',
+  role ENUM('owner','admin','support','client') NOT NULL DEFAULT 'client',
+  balance DECIMAL(12,2) NOT NULL DEFAULT 0,
+  active TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (id),
-  UNIQUE KEY uq_users_username (username)
+  PRIMARY KEY (id), UNIQUE KEY uq_users_username (username)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS servers (
   id INT UNSIGNED NOT NULL AUTO_INCREMENT,
-  name VARCHAR(96) NOT NULL,
-  hostname VARCHAR(160) NOT NULL,
-  public_ip VARCHAR(64) NOT NULL DEFAULT '',
-  port SMALLINT UNSIGNED NOT NULL,
-  slots TINYINT UNSIGNED NOT NULL DEFAULT 16,
-  start_map VARCHAR(64) NOT NULL DEFAULT 'de_dust2',
-  build_profile ENUM('classic','rehlds') NOT NULL DEFAULT 'classic',
-  installed TINYINT(1) NOT NULL DEFAULT 0,
-  enabled TINYINT(1) NOT NULL DEFAULT 1,
-  status_cache VARCHAR(24) NOT NULL DEFAULT 'unknown',
-  current_map VARCHAR(64) NOT NULL DEFAULT '',
-  players_online SMALLINT UNSIGNED NOT NULL DEFAULT 0,
-  max_players SMALLINT UNSIGNED NOT NULL DEFAULT 0,
-  cpu_percent DECIMAL(7,2) NOT NULL DEFAULT 0,
-  memory_mb DECIMAL(10,2) NOT NULL DEFAULT 0,
-  disk_mb DECIMAL(12,2) NOT NULL DEFAULT 0,
-  uptime_seconds BIGINT UNSIGNED NOT NULL DEFAULT 0,
-  ping_ms DECIMAL(8,2) NOT NULL DEFAULT 0,
-  ftp_user VARCHAR(64) NOT NULL DEFAULT '',
-  ftp_password VARCHAR(255) NOT NULL DEFAULT '',
-  game_mode VARCHAR(32) NOT NULL DEFAULT 'classic',
-  bots_enabled TINYINT(1) NOT NULL DEFAULT 0,
-  bots_quota TINYINT UNSIGNED NOT NULL DEFAULT 9,
-  bots_difficulty TINYINT UNSIGNED NOT NULL DEFAULT 3,
-  last_query_at DATETIME NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  owner_user_id INT UNSIGNED NULL,
+  name VARCHAR(96) NOT NULL, hostname VARCHAR(160) NOT NULL, public_ip VARCHAR(64) NOT NULL DEFAULT '',
+  port SMALLINT UNSIGNED NOT NULL, slots TINYINT UNSIGNED NOT NULL DEFAULT 16, start_map VARCHAR(64) NOT NULL DEFAULT 'de_dust2',
+  build_profile ENUM('classic','rehlds') NOT NULL DEFAULT 'classic', installed TINYINT(1) NOT NULL DEFAULT 0, enabled TINYINT(1) NOT NULL DEFAULT 1,
+  status_cache VARCHAR(24) NOT NULL DEFAULT 'unknown', current_map VARCHAR(64) NOT NULL DEFAULT '', players_online SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  max_players SMALLINT UNSIGNED NOT NULL DEFAULT 0, cpu_percent DECIMAL(7,2) NOT NULL DEFAULT 0, memory_mb DECIMAL(10,2) NOT NULL DEFAULT 0,
+  cpu_limit_percent DECIMAL(7,2) NOT NULL DEFAULT 100, memory_limit_mb INT UNSIGNED NOT NULL DEFAULT 1024,
+  disk_mb DECIMAL(12,2) NOT NULL DEFAULT 0, disk_limit_mb INT UNSIGNED NOT NULL DEFAULT 10240, ftp_limit_mb INT UNSIGNED NOT NULL DEFAULT 10240,
+  over_limit TINYINT(1) NOT NULL DEFAULT 0, limit_message VARCHAR(255) NOT NULL DEFAULT '', uptime_seconds BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  ping_ms DECIMAL(8,2) NOT NULL DEFAULT 0, ftp_user VARCHAR(64) NOT NULL DEFAULT '', ftp_password VARCHAR(255) NOT NULL DEFAULT '',
+  game_mode VARCHAR(32) NOT NULL DEFAULT 'classic', bots_enabled TINYINT(1) NOT NULL DEFAULT 0, bots_quota TINYINT UNSIGNED NOT NULL DEFAULT 9,
+  bots_difficulty TINYINT UNSIGNED NOT NULL DEFAULT 3, last_query_at DATETIME NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (id),
-  UNIQUE KEY uq_servers_port (port),
-  KEY idx_servers_status (status_cache),
-  KEY idx_servers_updated (updated_at)
+  PRIMARY KEY (id), UNIQUE KEY uq_servers_port (port), KEY idx_servers_status (status_cache), KEY idx_servers_updated (updated_at), KEY idx_servers_owner(owner_user_id),
+  CONSTRAINT fk_servers_owner FOREIGN KEY(owner_user_id) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS server_users (
+  server_id INT UNSIGNED NOT NULL,user_id INT UNSIGNED NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(server_id,user_id),KEY idx_su_user(user_id),
+  CONSTRAINT fk_su_server FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE,
+  CONSTRAINT fk_su_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS server_stats (
-  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  server_id INT UNSIGNED NOT NULL,
-  recorded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  players SMALLINT UNSIGNED NOT NULL DEFAULT 0,
-  max_players SMALLINT UNSIGNED NOT NULL DEFAULT 0,
-  cpu_percent DECIMAL(7,2) NOT NULL DEFAULT 0,
-  memory_mb DECIMAL(10,2) NOT NULL DEFAULT 0,
-  disk_mb DECIMAL(12,2) NOT NULL DEFAULT 0,
-  ping_ms DECIMAL(8,2) NOT NULL DEFAULT 0,
-  map_name VARCHAR(64) NOT NULL DEFAULT '',
-  PRIMARY KEY (id),
-  KEY idx_stats_server_time (server_id, recorded_at),
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, server_id INT UNSIGNED NOT NULL, recorded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  players SMALLINT UNSIGNED NOT NULL DEFAULT 0, max_players SMALLINT UNSIGNED NOT NULL DEFAULT 0, cpu_percent DECIMAL(7,2) NOT NULL DEFAULT 0,
+  memory_mb DECIMAL(10,2) NOT NULL DEFAULT 0, disk_mb DECIMAL(12,2) NOT NULL DEFAULT 0, ping_ms DECIMAL(8,2) NOT NULL DEFAULT 0,
+  map_name VARCHAR(64) NOT NULL DEFAULT '', PRIMARY KEY (id), KEY idx_stats_server_time (server_id, recorded_at),
   CONSTRAINT fk_stats_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS player_history (
-  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  server_id INT UNSIGNED NOT NULL,
-  name VARCHAR(128) NOT NULL DEFAULT '',
-  steam_id VARCHAR(64) NOT NULL DEFAULT '',
-  score INT NOT NULL DEFAULT 0,
-  connected_seconds INT UNSIGNED NOT NULL DEFAULT 0,
-  address VARCHAR(64) NOT NULL DEFAULT '',
-  first_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  visits INT UNSIGNED NOT NULL DEFAULT 1,
-  PRIMARY KEY (id),
-  UNIQUE KEY uq_player_identity (server_id, steam_id, name),
-  KEY idx_players_server_time (server_id, last_seen),
-  KEY idx_players_steam (steam_id),
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, server_id INT UNSIGNED NOT NULL, name VARCHAR(128) NOT NULL DEFAULT '', steam_id VARCHAR(64) NOT NULL DEFAULT '',
+  score INT NOT NULL DEFAULT 0, connected_seconds INT UNSIGNED NOT NULL DEFAULT 0, address VARCHAR(64) NOT NULL DEFAULT '', first_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, visits INT UNSIGNED NOT NULL DEFAULT 1, PRIMARY KEY (id), UNIQUE KEY uq_player_identity (server_id, steam_id, name),
+  KEY idx_players_server_time (server_id, last_seen), KEY idx_players_steam (steam_id),
   CONSTRAINT fk_players_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS audit_logs (
-  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  user_id INT UNSIGNED NULL,
-  server_id INT UNSIGNED NULL,
-  action VARCHAR(64) NOT NULL,
-  details TEXT NOT NULL,
-  ip VARCHAR(64) NOT NULL DEFAULT '',
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (id),
-  KEY idx_audit_created (created_at),
-  KEY idx_audit_server (server_id, created_at),
-  CONSTRAINT fk_audit_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, user_id INT UNSIGNED NULL, server_id INT UNSIGNED NULL, action VARCHAR(64) NOT NULL, details TEXT NOT NULL,
+  ip VARCHAR(64) NOT NULL DEFAULT '', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (id), KEY idx_audit_created (created_at),
+  KEY idx_audit_server (server_id, created_at), CONSTRAINT fk_audit_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
   CONSTRAINT fk_audit_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS settings (
-  setting_key VARCHAR(96) NOT NULL,
-  setting_value TEXT NOT NULL,
-  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  setting_key VARCHAR(96) NOT NULL, setting_value TEXT NOT NULL, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (setting_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS panel_events (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,server_id INT UNSIGNED NULL,user_id INT UNSIGNED NULL,event_type VARCHAR(64) NOT NULL,
+  severity ENUM('info','warning','danger','success') NOT NULL DEFAULT 'info',message VARCHAR(500) NOT NULL,meta_json TEXT NOT NULL,
+  telegram_status ENUM('pending','sent','disabled','error') NOT NULL DEFAULT 'pending',telegram_error VARCHAR(500) NOT NULL DEFAULT '',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,sent_at DATETIME NULL,PRIMARY KEY(id),KEY idx_pe_pending(telegram_status,created_at),KEY idx_pe_server(server_id,created_at),
+  CONSTRAINT fk_pe_server FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE SET NULL,CONSTRAINT fk_pe_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS player_reports (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,server_id INT UNSIGNED NOT NULL,player_name VARCHAR(128) NOT NULL DEFAULT '',steam_id VARCHAR(64) NOT NULL DEFAULT '',
+  reason VARCHAR(255) NOT NULL,details TEXT NOT NULL,status ENUM('new','review','closed') NOT NULL DEFAULT 'new',created_by INT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY(id),KEY idx_reports(server_id,status,created_at),CONSTRAINT fk_rep_server FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE,
+  CONSTRAINT fk_rep_user FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS plans (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,name VARCHAR(96) NOT NULL,price_monthly DECIMAL(12,2) NOT NULL DEFAULT 0,max_servers INT UNSIGNED NOT NULL DEFAULT 1,
+  slots_limit TINYINT UNSIGNED NOT NULL DEFAULT 32,cpu_limit_percent DECIMAL(7,2) NOT NULL DEFAULT 100,memory_limit_mb INT UNSIGNED NOT NULL DEFAULT 1024,
+  disk_limit_mb INT UNSIGNED NOT NULL DEFAULT 10240,ftp_limit_mb INT UNSIGNED NOT NULL DEFAULT 10240,enabled TINYINT(1) NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS subscriptions (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,user_id INT UNSIGNED NOT NULL,server_id INT UNSIGNED NOT NULL,plan_id INT UNSIGNED NOT NULL,
+  status ENUM('active','suspended','expired','cancelled') NOT NULL DEFAULT 'active',started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,expires_at DATETIME NOT NULL,
+  auto_renew TINYINT(1) NOT NULL DEFAULT 0,last_renewed_at DATETIME NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(id),UNIQUE KEY uq_sub_server(server_id),KEY idx_sub_user(user_id),KEY idx_sub_exp(expires_at,status),
+  CONSTRAINT fk_sub_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,CONSTRAINT fk_sub_server FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE,
+  CONSTRAINT fk_sub_plan FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS billing_transactions (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,user_id INT UNSIGNED NOT NULL,amount DECIMAL(12,2) NOT NULL,
+  type ENUM('topup','charge','refund','promo','adjustment') NOT NULL DEFAULT 'adjustment',description VARCHAR(255) NOT NULL DEFAULT '',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(id),KEY idx_bt_user(user_id,created_at),CONSTRAINT fk_bt_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS promo_codes (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,code VARCHAR(64) NOT NULL,bonus_amount DECIMAL(12,2) NOT NULL DEFAULT 0,bonus_days INT UNSIGNED NOT NULL DEFAULT 0,
+  discount_percent TINYINT UNSIGNED NOT NULL DEFAULT 0,max_uses INT UNSIGNED NOT NULL DEFAULT 0,used_count INT UNSIGNED NOT NULL DEFAULT 0,
+  expires_at DATETIME NULL,active TINYINT(1) NOT NULL DEFAULT 1,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(id),UNIQUE KEY uq_promo_code(code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS promo_redemptions (
+  promo_id INT UNSIGNED NOT NULL,user_id INT UNSIGNED NOT NULL,subscription_id BIGINT UNSIGNED NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(promo_id,user_id),CONSTRAINT fk_pr_promo FOREIGN KEY(promo_id) REFERENCES promo_codes(id) ON DELETE CASCADE,
+  CONSTRAINT fk_pr_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,CONSTRAINT fk_pr_sub FOREIGN KEY(subscription_id) REFERENCES subscriptions(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,user_id INT UNSIGNED NOT NULL,name VARCHAR(96) NOT NULL,token_hash CHAR(64) NOT NULL,token_prefix VARCHAR(16) NOT NULL,
+  enabled TINYINT(1) NOT NULL DEFAULT 1,last_used_at DATETIME NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(id),UNIQUE KEY uq_api_hash(token_hash),KEY idx_api_user(user_id),CONSTRAINT fk_api_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

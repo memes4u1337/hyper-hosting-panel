@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import json, subprocess, sys, time, re, socket
+import json, subprocess, sys, time, re, socket, urllib.request, urllib.parse
 from pathlib import Path
 
 APP=Path('/opt/hyper-cs16'); ETC=Path('/etc/hyper-cs16'); STATE=Path('/var/lib/hyper-cs16')
@@ -14,6 +14,89 @@ except Exception as exc:
 FAIL_COUNTS={}
 LAST_RECOVER={}
 RECOVER_COOLDOWN=300
+
+
+def get_settings(db):
+    try:
+        with db.cursor() as cur:
+            cur.execute('SELECT setting_key,setting_value FROM settings')
+            return {str(r['setting_key']):str(r['setting_value']) for r in cur.fetchall()}
+    except Exception:
+        return {}
+
+def event_enabled(settings,event_type):
+    m={
+      'server_down':'notify_server_down','server_recovered':'notify_recovered','plugin_disabled':'notify_plugin_disabled',
+      'map_failed':'notify_map_failed','resource_high':'notify_resource_high','player_report':'notify_report',
+      'billing_expired':'notify_billing','billing_renewed':'notify_billing','billing_soon':'notify_billing'
+    }
+    k=m.get(event_type)
+    return settings.get(k,'1')=='1' if k else True
+
+def queue_event(db,settings,event_type,message,server_id=None,severity='info',meta=None,dedupe_minutes=0):
+    try:
+        with db.cursor() as cur:
+            if dedupe_minutes>0:
+                cur.execute('SELECT 1 FROM panel_events WHERE event_type=%s AND server_id <=> %s AND created_at>=NOW()-INTERVAL %s MINUTE LIMIT 1',(event_type,server_id,int(dedupe_minutes)))
+                if cur.fetchone(): return
+            tg='pending' if settings.get('telegram_enabled','0')=='1' and event_enabled(settings,event_type) else 'disabled'
+            cur.execute('INSERT INTO panel_events(server_id,user_id,event_type,severity,message,meta_json,telegram_status) VALUES(%s,NULL,%s,%s,%s,%s,%s)',
+                        (server_id,event_type,severity,str(message)[:500],json.dumps(meta or {},ensure_ascii=False,separators=(',',':')),tg))
+    except Exception as exc:
+        print(f'event queue failed: {exc}',file=sys.stderr)
+
+def flush_telegram(db,settings):
+    if settings.get('telegram_enabled','0')!='1':
+        try:
+            with db.cursor() as cur: cur.execute("UPDATE panel_events SET telegram_status='disabled' WHERE telegram_status='pending'")
+        except Exception: pass
+        return
+    token=settings.get('telegram_bot_token','').strip(); chat=settings.get('telegram_chat_id','').strip()
+    if not token or not chat: return
+    try:
+        with db.cursor() as cur:
+            cur.execute("SELECT e.id,e.event_type,e.severity,e.message,e.server_id,s.name server_name FROM panel_events e LEFT JOIN servers s ON s.id=e.server_id WHERE e.telegram_status='pending' ORDER BY e.id ASC LIMIT 20")
+            rows=cur.fetchall()
+    except Exception: return
+    icons={'danger':'🔴','warning':'🟠','success':'🟢','info':'🔵'}
+    for row in rows:
+        text=f"{icons.get(row.get('severity'),'🔵')} HYPER-HOST CS 1.6\n{row.get('message','')}"
+        if row.get('server_name'): text+=f"\nСервер: {row['server_name']} (#{row['server_id']})"
+        data=urllib.parse.urlencode({'chat_id':chat,'text':text,'disable_web_page_preview':'true'}).encode()
+        try:
+            req=urllib.request.Request(f'https://api.telegram.org/bot{token}/sendMessage',data=data,method='POST')
+            with urllib.request.urlopen(req,timeout=8) as resp: ok=200<=getattr(resp,'status',200)<300
+            with db.cursor() as cur:
+                cur.execute("UPDATE panel_events SET telegram_status=%s,telegram_error='',sent_at=IF(%s='sent',NOW(),sent_at) WHERE id=%s",('sent' if ok else 'error','sent' if ok else 'error',row['id']))
+        except Exception as exc:
+            with db.cursor() as cur: cur.execute("UPDATE panel_events SET telegram_status='error',telegram_error=%s WHERE id=%s",(str(exc)[:500],row['id']))
+
+def billing_tick(db,settings):
+    try:
+        with db.cursor() as cur:
+            cur.execute("SELECT sub.*,p.price_monthly,p.name plan_name,u.balance,s.name server_name FROM subscriptions sub JOIN plans p ON p.id=sub.plan_id JOIN users u ON u.id=sub.user_id JOIN servers s ON s.id=sub.server_id WHERE sub.status='active' ORDER BY sub.expires_at")
+            rows=cur.fetchall()
+        now=time.time()
+        for sub in rows:
+            # MySQL gives datetime objects; compare using timestamp.
+            exp=sub['expires_at'].timestamp() if hasattr(sub['expires_at'],'timestamp') else now+99999
+            sid=int(sub['server_id']); uid=int(sub['user_id']); price=float(sub.get('price_monthly') or 0); bal=float(sub.get('balance') or 0)
+            if exp<=now:
+                if int(sub.get('auto_renew') or 0) and bal>=price:
+                    with db.cursor() as cur:
+                        cur.execute('UPDATE users SET balance=balance-%s WHERE id=%s AND balance>=%s',(price,uid,price))
+                        if cur.rowcount:
+                            cur.execute("UPDATE subscriptions SET expires_at=DATE_ADD(GREATEST(expires_at,NOW()),INTERVAL 30 DAY),last_renewed_at=NOW(),status='active' WHERE id=%s",(sub['id'],))
+                            cur.execute("INSERT INTO billing_transactions(user_id,amount,type,description) VALUES(%s,%s,'charge',%s)",(uid,-price,f"Автопродление {sub['plan_name']} / сервер #{sid}"))
+                            queue_event(db,settings,'billing_renewed',f"Тариф {sub['plan_name']} автоматически продлён на 30 дней",sid,'success',dedupe_minutes=5)
+                            continue
+                with db.cursor() as cur: cur.execute("UPDATE subscriptions SET status='expired' WHERE id=%s",(sub['id'],))
+                subprocess.run(['systemctl','stop',f'hyper-cs16@{sid}.service'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+                queue_event(db,settings,'billing_expired',f"Срок аренды сервера #{sid} закончился. Сервер остановлен.",sid,'danger',dedupe_minutes=60)
+            elif exp-now<=3*86400:
+                queue_event(db,settings,'billing_soon',f"До окончания аренды сервера #{sid} осталось меньше 3 дней",sid,'warning',dedupe_minutes=720)
+    except Exception as exc:
+        print(f'billing tick: {exc}',file=sys.stderr)
 
 
 def runtime(): return json.loads((ETC/'runtime.json').read_text(encoding='utf-8'))
@@ -88,8 +171,8 @@ def rcon_player_rows(c):
         if m: rows.append({'name':m.group(2),'steam_id':m.group(4),'score':int(m.group(5)),'time':m.group(6),'address':m.group(9).strip()})
     return rows
 
-def one(db,row,store_stats=False,store_players=False):
-    sid=int(row['id']); c=scfg(sid); svc=service(sid); p=actual_hlds_pid(sid); cpu,mem,uptime=proc_metrics(p)
+def one(db,row,settings,store_stats=False,store_players=False):
+    sid=int(row['id']); old_status=str(row.get('status_cache') or 'unknown'); recovered=False; c=scfg(sid); svc=service(sid); p=actual_hlds_pid(sid); cpu,mem,uptime=proc_metrics(p)
     # Keep the last good query values. A single dropped A2S packet must never turn a
     # healthy HLDS process into a scary "NO QUERY" state in the panel.
     map_name=str(row.get('current_map') or row.get('start_map') or '')
@@ -140,6 +223,19 @@ def one(db,row,store_stats=False,store_players=False):
                 cp=subprocess.run(['/usr/local/sbin/hyper-cs16-ctl','recover',str(sid),'--auto'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=95)
                 print(f'auto-recover server {sid}: {(cp.stdout or "").strip()[-2000:]}',file=sys.stderr)
                 if cp.returncode==0:
+                    recovered=True
+                    try:
+                        rr=json.loads((cp.stdout or '').strip().splitlines()[-1])
+                        actions=rr.get('actions') or []
+                        quarantined=rr.get('quarantined') or []
+                        if quarantined or any('disabled' in str(a).lower() or 'quarantined' in str(a).lower() for a in actions):
+                            msg='Автовосстановление отключило проблемный контент'
+                            if quarantined: msg+=': '+', '.join(map(str,quarantined[:8]))
+                            queue_event(db,settings,'plugin_disabled',msg,sid,'warning',{'actions':actions,'quarantined':quarantined},5)
+                        for a in actions:
+                            if 'map' in str(a).lower() and ('fallback' in str(a).lower() or 'bad startup map' in str(a).lower()):
+                                queue_event(db,settings,'map_failed','Проблемная карта была автоматически заменена: '+str(a),sid,'warning',{'action':a},5); break
+                    except Exception: pass
                     svc=service(sid); p=actual_hlds_pid(sid); cpu,mem,uptime=proc_metrics(p); udp=bool(port and udp_listening(port)); status='online' if udp else 'starting'
             except Exception as exc:
                 print(f'auto-recover server {sid} failed: {exc}',file=sys.stderr)
@@ -147,17 +243,30 @@ def one(db,row,store_stats=False,store_players=False):
         FAIL_COUNTS[sid]=0
 
     d=disk(c['path']) if c else 0.0
+    cpu_limit=float(row.get('cpu_limit_percent') or 0); mem_limit=float(row.get('memory_limit_mb') or 0); disk_limit=float(row.get('disk_limit_mb') or 0); ftp_limit=float(row.get('ftp_limit_mb') or 0)
+    warnings=[]
+    alert_cpu=float(settings.get('resource_alert_cpu','90') or 90); alert_ram=float(settings.get('resource_alert_ram','90') or 90); alert_disk=float(settings.get('resource_alert_disk','90') or 90)
+    if cpu_limit>0 and cpu>=cpu_limit*(alert_cpu/100.0): warnings.append(f'CPU {cpu:.1f}% / {cpu_limit:.0f}%')
+    if mem_limit>0 and mem>=mem_limit*(alert_ram/100.0): warnings.append(f'RAM {mem:.0f} / {mem_limit:.0f} MB')
+    if disk_limit>0 and d>=disk_limit*(alert_disk/100.0): warnings.append(f'Диск {d:.0f} / {disk_limit:.0f} MB')
+    if ftp_limit>0 and d>=ftp_limit*(alert_disk/100.0): warnings.append(f'FTP/root {d:.0f} / {ftp_limit:.0f} MB')
+    over=1 if warnings else 0; limit_message=', '.join(warnings)[:255]
+    if warnings: queue_event(db,settings,'resource_high','Высокая нагрузка: '+limit_message,sid,'warning',{'cpu':cpu,'ram':mem,'disk':d},30)
     with db.cursor() as cur:
         if query_ok:
-            cur.execute("UPDATE servers SET status_cache=%s,current_map=%s,players_online=%s,max_players=%s,cpu_percent=%s,memory_mb=%s,disk_mb=%s,uptime_seconds=%s,ping_ms=%s,last_query_at=NOW() WHERE id=%s",(status,map_name,online,maxp,cpu,mem,d,uptime,ping,sid))
+            cur.execute("UPDATE servers SET status_cache=%s,current_map=%s,players_online=%s,max_players=%s,cpu_percent=%s,memory_mb=%s,disk_mb=%s,uptime_seconds=%s,ping_ms=%s,over_limit=%s,limit_message=%s,last_query_at=NOW() WHERE id=%s",(status,map_name,online,maxp,cpu,mem,d,uptime,ping,over,limit_message,sid))
         else:
             # Preserve last_query_at and last known map/player values on transient A2S loss.
-            cur.execute("UPDATE servers SET status_cache=%s,cpu_percent=%s,memory_mb=%s,disk_mb=%s,uptime_seconds=%s WHERE id=%s",(status,cpu,mem,d,uptime,sid))
+            cur.execute("UPDATE servers SET status_cache=%s,cpu_percent=%s,memory_mb=%s,disk_mb=%s,uptime_seconds=%s,over_limit=%s,limit_message=%s WHERE id=%s",(status,cpu,mem,d,uptime,over,limit_message,sid))
         if store_stats:
             cur.execute("INSERT INTO server_stats(server_id,players,max_players,cpu_percent,memory_mb,disk_mb,ping_ms,map_name) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",(sid,online,maxp,cpu,mem,d,ping,map_name))
         if store_players:
             for pl in plist:
                 cur.execute("INSERT INTO player_history(server_id,name,steam_id,score,connected_seconds,address,first_seen,last_seen,visits) VALUES(%s,%s,%s,%s,%s,%s,NOW(),NOW(),1) ON DUPLICATE KEY UPDATE score=VALUES(score),connected_seconds=VALUES(connected_seconds),address=VALUES(address),visits=visits+IF(last_seen < NOW() - INTERVAL 2 MINUTE,1,0),last_seen=NOW()",(sid,str(pl.get('name',''))[:128],str(pl.get('steam_id',''))[:64],int(pl.get('score',0)),int(float(pl.get('duration',0))),str(pl.get('address',''))[:64]))
+    if old_status=='online' and status in {'failed','offline'}:
+        queue_event(db,settings,'server_down',f'Сервер #{sid} перестал отвечать ({status})',sid,'danger',{'old':old_status,'new':status},5)
+    elif status=='online' and old_status in {'failed','offline','starting','installing','unreachable'}:
+        queue_event(db,settings,'server_recovered',f'Сервер #{sid} снова ONLINE'+(' после автовосстановления' if recovered else ''),sid,'success',{'old':old_status,'new':status},5)
 
 def main():
     tick=0
@@ -165,16 +274,20 @@ def main():
         try:
             db=conn()
             with db.cursor() as cur:
-                cur.execute("SELECT id,port,slots,start_map,current_map,players_online,max_players,ping_ms FROM servers WHERE enabled=1 ORDER BY id"); rows=cur.fetchall()
-            store_stats=(tick%6==0); store_players=(tick%6==0)
+                cur.execute("SELECT id,port,slots,start_map,current_map,players_online,max_players,ping_ms,status_cache,cpu_limit_percent,memory_limit_mb,disk_limit_mb,ftp_limit_mb FROM servers WHERE enabled=1 ORDER BY id"); rows=cur.fetchall()
+            settings=get_settings(db); store_stats=(tick%6==0); store_players=(tick%6==0)
             for row in rows:
-                try: one(db,row,store_stats,store_players)
+                try: one(db,row,settings,store_stats,store_players)
                 except Exception as exc: print(f'server {row.get("id")}: {exc}',file=sys.stderr)
+            if tick%6==0:
+                billing_tick(db,settings)
+            flush_telegram(db,settings)
             if tick%360==0:
                 with db.cursor() as cur:
                     cur.execute("DELETE FROM server_stats WHERE recorded_at < NOW() - INTERVAL 90 DAY")
                     cur.execute("DELETE FROM player_history WHERE last_seen < NOW() - INTERVAL 180 DAY")
-                    cur.execute("DELETE FROM audit_logs WHERE created_at < NOW() - INTERVAL 180 DAY")
+                    cur.execute("DELETE FROM audit_logs WHERE created_at < NOW() - INTERVAL 365 DAY")
+                    cur.execute("DELETE FROM panel_events WHERE created_at < NOW() - INTERVAL 180 DAY")
             db.close()
         except Exception as exc:
             print(f'monitor loop: {exc}',file=sys.stderr)

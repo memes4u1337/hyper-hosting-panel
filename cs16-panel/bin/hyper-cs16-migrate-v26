@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import json, sys
+from pathlib import Path
+
+RUNTIME=Path('/etc/hyper-cs16/runtime.json')
+
+def main():
+    if not RUNTIME.is_file():
+        print('[v2.6 migrate] runtime.json not found; skip')
+        return 0
+    rt=json.loads(RUNTIME.read_text(encoding='utf-8'))
+    import pymysql
+    con=pymysql.connect(host=rt.get('db_host','127.0.0.1'),port=int(rt.get('db_port',3306)),user=rt['db_user'],password=rt['db_password'],database=rt['db_name'],charset='utf8mb4',autocommit=True,cursorclass=pymysql.cursors.DictCursor)
+    db=rt['db_name']
+    def col(table,name):
+        with con.cursor() as c:
+            c.execute('SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND COLUMN_NAME=%s LIMIT 1',(db,table,name))
+            return bool(c.fetchone())
+    def table(name):
+        with con.cursor() as c:
+            c.execute('SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s LIMIT 1',(db,name))
+            return bool(c.fetchone())
+    def exec(sql,args=None):
+        with con.cursor() as c: c.execute(sql,args or ())
+
+    # Roles / balances. Change enum first; preserve old admin/operator values.
+    if table('users'):
+        exec("ALTER TABLE users MODIFY role ENUM('owner','admin','support','client','operator') NOT NULL DEFAULT 'client'")
+        exec("UPDATE users SET role='support' WHERE role='operator'")
+        if not col('users','balance'): exec("ALTER TABLE users ADD COLUMN balance DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER role")
+        if not col('users','active'): exec("ALTER TABLE users ADD COLUMN active TINYINT(1) NOT NULL DEFAULT 1 AFTER balance")
+        # First account becomes owner if no owner exists.
+        with con.cursor() as c:
+            c.execute("SELECT COUNT(*) n FROM users WHERE role='owner'"); has=int(c.fetchone()['n'])
+            if not has:
+                c.execute('SELECT id FROM users ORDER BY id ASC LIMIT 1'); row=c.fetchone()
+                if row: c.execute("UPDATE users SET role='owner' WHERE id=%s",(row['id'],))
+        exec("ALTER TABLE users MODIFY role ENUM('owner','admin','support','client') NOT NULL DEFAULT 'client'")
+
+    for name,ddl in {
+      'server_users':"""CREATE TABLE server_users (
+        server_id INT UNSIGNED NOT NULL,user_id INT UNSIGNED NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(server_id,user_id),KEY idx_su_user(user_id),
+        CONSTRAINT fk_su_server FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE,
+        CONSTRAINT fk_su_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+      'plans':"""CREATE TABLE plans (
+        id INT UNSIGNED NOT NULL AUTO_INCREMENT,name VARCHAR(96) NOT NULL,price_monthly DECIMAL(12,2) NOT NULL DEFAULT 0,
+        max_servers INT UNSIGNED NOT NULL DEFAULT 1,slots_limit TINYINT UNSIGNED NOT NULL DEFAULT 32,
+        cpu_limit_percent DECIMAL(7,2) NOT NULL DEFAULT 100,memory_limit_mb INT UNSIGNED NOT NULL DEFAULT 1024,
+        disk_limit_mb INT UNSIGNED NOT NULL DEFAULT 10240,ftp_limit_mb INT UNSIGNED NOT NULL DEFAULT 10240,
+        enabled TINYINT(1) NOT NULL DEFAULT 1,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+      'subscriptions':"""CREATE TABLE subscriptions (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,user_id INT UNSIGNED NOT NULL,server_id INT UNSIGNED NOT NULL,plan_id INT UNSIGNED NOT NULL,
+        status ENUM('active','suspended','expired','cancelled') NOT NULL DEFAULT 'active',started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        expires_at DATETIME NOT NULL,auto_renew TINYINT(1) NOT NULL DEFAULT 0,last_renewed_at DATETIME NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(id),UNIQUE KEY uq_sub_server(server_id),KEY idx_sub_user(user_id),KEY idx_sub_exp(expires_at,status),
+        CONSTRAINT fk_sub_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+        CONSTRAINT fk_sub_server FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE,
+        CONSTRAINT fk_sub_plan FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE RESTRICT
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+      'billing_transactions':"""CREATE TABLE billing_transactions (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,user_id INT UNSIGNED NOT NULL,amount DECIMAL(12,2) NOT NULL,
+        type ENUM('topup','charge','refund','promo','adjustment') NOT NULL DEFAULT 'adjustment',description VARCHAR(255) NOT NULL DEFAULT '',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(id),KEY idx_bt_user(user_id,created_at),
+        CONSTRAINT fk_bt_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+      'promo_codes':"""CREATE TABLE promo_codes (
+        id INT UNSIGNED NOT NULL AUTO_INCREMENT,code VARCHAR(64) NOT NULL,bonus_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+        bonus_days INT UNSIGNED NOT NULL DEFAULT 0,discount_percent TINYINT UNSIGNED NOT NULL DEFAULT 0,max_uses INT UNSIGNED NOT NULL DEFAULT 0,
+        used_count INT UNSIGNED NOT NULL DEFAULT 0,expires_at DATETIME NULL,active TINYINT(1) NOT NULL DEFAULT 1,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(id),UNIQUE KEY uq_promo_code(code)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+      'promo_redemptions':"""CREATE TABLE promo_redemptions (
+        promo_id INT UNSIGNED NOT NULL,user_id INT UNSIGNED NOT NULL,subscription_id BIGINT UNSIGNED NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(promo_id,user_id),CONSTRAINT fk_pr_promo FOREIGN KEY(promo_id) REFERENCES promo_codes(id) ON DELETE CASCADE,
+        CONSTRAINT fk_pr_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+        CONSTRAINT fk_pr_sub FOREIGN KEY(subscription_id) REFERENCES subscriptions(id) ON DELETE SET NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+      'panel_events':"""CREATE TABLE panel_events (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,server_id INT UNSIGNED NULL,user_id INT UNSIGNED NULL,event_type VARCHAR(64) NOT NULL,
+        severity ENUM('info','warning','danger','success') NOT NULL DEFAULT 'info',message VARCHAR(500) NOT NULL,meta_json TEXT NOT NULL,
+        telegram_status ENUM('pending','sent','disabled','error') NOT NULL DEFAULT 'pending',telegram_error VARCHAR(500) NOT NULL DEFAULT '',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,sent_at DATETIME NULL,PRIMARY KEY(id),KEY idx_pe_pending(telegram_status,created_at),
+        KEY idx_pe_server(server_id,created_at),CONSTRAINT fk_pe_server FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE SET NULL,
+        CONSTRAINT fk_pe_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+      'player_reports':"""CREATE TABLE player_reports (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,server_id INT UNSIGNED NOT NULL,player_name VARCHAR(128) NOT NULL DEFAULT '',steam_id VARCHAR(64) NOT NULL DEFAULT '',
+        reason VARCHAR(255) NOT NULL,details TEXT NOT NULL,status ENUM('new','review','closed') NOT NULL DEFAULT 'new',created_by INT UNSIGNED NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY(id),KEY idx_reports(server_id,status,created_at),CONSTRAINT fk_rep_server FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE,
+        CONSTRAINT fk_rep_user FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE SET NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+      'api_tokens':"""CREATE TABLE api_tokens (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,user_id INT UNSIGNED NOT NULL,name VARCHAR(96) NOT NULL,token_hash CHAR(64) NOT NULL,token_prefix VARCHAR(16) NOT NULL,
+        enabled TINYINT(1) NOT NULL DEFAULT 1,last_used_at DATETIME NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(id),UNIQUE KEY uq_api_hash(token_hash),KEY idx_api_user(user_id),CONSTRAINT fk_api_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+    }.items():
+        if not table(name): exec(ddl)
+
+    for name,sql in [
+        ('owner_user_id',"ALTER TABLE servers ADD COLUMN owner_user_id INT UNSIGNED NULL AFTER id"),
+        ('cpu_limit_percent',"ALTER TABLE servers ADD COLUMN cpu_limit_percent DECIMAL(7,2) NOT NULL DEFAULT 100 AFTER memory_mb"),
+        ('memory_limit_mb',"ALTER TABLE servers ADD COLUMN memory_limit_mb INT UNSIGNED NOT NULL DEFAULT 1024 AFTER cpu_limit_percent"),
+        ('disk_limit_mb',"ALTER TABLE servers ADD COLUMN disk_limit_mb INT UNSIGNED NOT NULL DEFAULT 10240 AFTER disk_mb"),
+        ('ftp_limit_mb',"ALTER TABLE servers ADD COLUMN ftp_limit_mb INT UNSIGNED NOT NULL DEFAULT 10240 AFTER disk_limit_mb"),
+        ('over_limit',"ALTER TABLE servers ADD COLUMN over_limit TINYINT(1) NOT NULL DEFAULT 0 AFTER ftp_limit_mb"),
+        ('limit_message',"ALTER TABLE servers ADD COLUMN limit_message VARCHAR(255) NOT NULL DEFAULT '' AFTER over_limit"),
+    ]:
+        if not col('servers',name): exec(sql)
+    # FK for owner_user_id may already exist in later installs. Check by name.
+    with con.cursor() as c:
+        c.execute("SELECT 1 FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=%s AND TABLE_NAME='servers' AND CONSTRAINT_NAME='fk_servers_owner' LIMIT 1",(db,))
+        if not c.fetchone():
+            try: c.execute('ALTER TABLE servers ADD CONSTRAINT fk_servers_owner FOREIGN KEY(owner_user_id) REFERENCES users(id) ON DELETE SET NULL')
+            except Exception: pass
+
+    # Seed a simple tariff if none exists.
+    with con.cursor() as c:
+        c.execute('SELECT COUNT(*) n FROM plans'); n=int(c.fetchone()['n'])
+        if n==0:
+            c.execute("INSERT INTO plans(name,price_monthly,max_servers,slots_limit,cpu_limit_percent,memory_limit_mb,disk_limit_mb,ftp_limit_mb,enabled) VALUES('START',299,1,32,100,1024,10240,10240,1)")
+    # Existing servers belong to the owner by default and are accessible to that owner.
+    with con.cursor() as c:
+        c.execute("SELECT id FROM users WHERE role='owner' ORDER BY id LIMIT 1"); owner=c.fetchone()
+        if owner:
+            oid=int(owner['id'])
+            c.execute('UPDATE servers SET owner_user_id=%s WHERE owner_user_id IS NULL',(oid,))
+            c.execute('INSERT IGNORE INTO server_users(server_id,user_id) SELECT id,%s FROM servers',(oid,))
+    exec("INSERT INTO settings(setting_key,setting_value) VALUES('panel_version','2.6.0') ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)")
+    defaults={
+      'telegram_enabled':'0','telegram_bot_token':'','telegram_chat_id':'',
+      'notify_server_down':'1','notify_recovered':'1','notify_plugin_disabled':'1','notify_map_failed':'1',
+      'notify_resource_high':'1','notify_report':'1','notify_billing':'1',
+      'resource_alert_cpu':'90','resource_alert_ram':'90','resource_alert_disk':'90'
+    }
+    with con.cursor() as c:
+        for k,v in defaults.items(): c.execute('INSERT IGNORE INTO settings(setting_key,setting_value) VALUES(%s,%s)',(k,v))
+    con.close(); print('[v2.6 migrate] OK')
+    return 0
+
+if __name__=='__main__': raise SystemExit(main())

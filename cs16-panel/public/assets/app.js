@@ -1,6 +1,7 @@
 (() => {
   const cfg = window.CS16 || {};
   const sid = cfg.serverId;
+  const canAdmins = !!cfg.canAdmins;
   const $ = (s, root=document) => root.querySelector(s);
   const $$ = (s, root=document) => [...root.querySelectorAll(s)];
   const esc = (s='') => String(s).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
@@ -109,6 +110,7 @@
   }
 
   async function loadAdmins(){
+    if(!canAdmins){adminRows=[];return adminRows;}
     const body=$('#adminsBody');
     try{
       const j=await api('admins'); adminRows=j.admins||[];
@@ -130,7 +132,7 @@
       body.innerHTML=rows.map((p,i)=>{
         const ident=isSteamId(p.steam_id)?p.steam_id:(p.name||''); const adm=adminByIdentity(ident);
         const rights=adm?`<span class="admin-online"><i class="fa-solid fa-shield-halved"></i> ${esc(adm.access_flags)}</span>`:'<span class="text-secondary">игрок</span>';
-        const adminBtn=adm?`<button class="btn btn-sm btn-soft player-admin-edit" data-admin-index="${Number(adm.index)}" title="Изменить права"><i class="fa-solid fa-user-shield"></i></button>`:`<button class="btn btn-sm btn-primary player-admin-add" data-identity="${esc(ident)}" data-name="${esc(p.name||'')}" data-auth="${isSteamId(p.steam_id)?'steamid':'name'}" title="Сделать админом"><i class="fa-solid fa-user-plus"></i></button>`;
+        const adminBtn=!canAdmins?'':adm?`<button class="btn btn-sm btn-soft player-admin-edit" data-admin-index="${Number(adm.index)}" title="Изменить права"><i class="fa-solid fa-user-shield"></i></button>`:`<button class="btn btn-sm btn-primary player-admin-add" data-identity="${esc(ident)}" data-name="${esc(p.name||'')}" data-auth="${isSteamId(p.steam_id)?'steamid':'name'}" title="Сделать админом"><i class="fa-solid fa-user-plus"></i></button>`;
         return `<tr><td>${esc(p.slot ?? p.index ?? i+1)}</td><td><b>${esc(p.name||'Player')}</b></td><td><code>${esc(p.steam_id||'—')}</code></td><td><code>${esc(p.address||'—')}</code></td><td>${esc(p.score??0)}</td><td>${esc(p.ping??'—')}</td><td>${esc(p.time||dur(p.duration||0))}</td><td>${rights}</td><td class="text-end">${adminBtn} ${p.userid!==undefined?`<button class="btn btn-sm btn-soft player-kick" data-userid="${Number(p.userid)}">Kick</button> <button class="btn btn-sm btn-danger-soft player-ban" data-userid="${Number(p.userid)}">Ban 30m</button>`:'<span class="text-secondary">userid нет</span>'}</td></tr>`;
       }).join('');
       $$('.player-admin-add',body).forEach(b=>b.onclick=()=>openAdminModal({identity:b.dataset.identity,authType:b.dataset.auth}));
@@ -143,7 +145,7 @@
     const body=$('#historyPlayersBody'); if(!body)return;
     try{
       const j=await api('player-history');const rows=j.rows||[];
-      body.innerHTML=rows.map(r=>{const can=isSteamId(r.steam_id);const adm=can?adminByIdentity(r.steam_id):null;return `<tr><td><b>${esc(r.name||'Player')}</b></td><td><code>${esc(r.steam_id||'—')}</code></td><td>${esc(r.first_seen||'—')}</td><td>${esc(r.last_seen||'—')}</td><td>${esc(r.visits??1)}</td><td class="text-end">${adm?`<button type="button" class="btn btn-sm btn-soft history-admin-edit" data-index="${Number(adm.index)}"><i class="fa-solid fa-user-shield me-1"></i>Права</button>`:can?`<button type="button" class="btn btn-sm btn-primary history-admin-add" data-steam="${esc(r.steam_id)}"><i class="fa-solid fa-user-plus me-1"></i>Админ</button>`:'<span class="text-secondary">SteamID нет</span>'}</td></tr>`}).join('')||'<tr><td colspan="6" class="text-secondary">История пока пуста</td></tr>';
+      body.innerHTML=rows.map(r=>{const can=isSteamId(r.steam_id);const adm=canAdmins&&can?adminByIdentity(r.steam_id):null;const action=!canAdmins?'':(adm?`<button type="button" class="btn btn-sm btn-soft history-admin-edit" data-index="${Number(adm.index)}"><i class="fa-solid fa-user-shield me-1"></i>Права</button>`:can?`<button type="button" class="btn btn-sm btn-primary history-admin-add" data-steam="${esc(r.steam_id)}"><i class="fa-solid fa-user-plus me-1"></i>Админ</button>`:'<span class="text-secondary">SteamID нет</span>');return `<tr><td><b>${esc(r.name||'Player')}</b></td><td><code>${esc(r.steam_id||'—')}</code></td><td>${esc(r.first_seen||'—')}</td><td>${esc(r.last_seen||'—')}</td><td>${esc(r.visits??1)}</td><td class="text-end">${action}</td></tr>`}).join('')||'<tr><td colspan="6" class="text-secondary">История пока пуста</td></tr>';
       $$('.history-admin-add',body).forEach(b=>b.onclick=()=>openAdminModal({identity:b.dataset.steam,authType:'steamid'}));
       $$('.history-admin-edit',body).forEach(b=>b.onclick=()=>{const row=adminRows.find(a=>Number(a.index)===Number(b.dataset.index));if(row)openAdminModal({row})});
     }catch(e){body.innerHTML=`<tr><td colspan="6" class="text-danger">${esc(e.message)}</td></tr>`;}

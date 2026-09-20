@@ -1589,6 +1589,28 @@ def server_config_set(args):
     return {'ok':True,'server':{k:c.get(k) for k in ['id','hostname','slots','start_map','server_password']}}
 
 
+
+def server_limits_set(sid:int,cpu:float,memory:int):
+    """Apply per-server CPU/RAM limits without changing game files.
+    Persistent limits are stored as a systemd drop-in; runtime values are applied immediately when possible.
+    """
+    require_root(); load_server(sid)
+    cpu=max(0.0,min(float(cpu),800.0)); memory=max(0,min(int(memory),262144))
+    drop=Path(f'/etc/systemd/system/hyper-cs16@{sid}.service.d')
+    drop.mkdir(parents=True,exist_ok=True)
+    lines=['[Service]']
+    lines.append('CPUQuota=infinity' if cpu<=0 else f'CPUQuota={cpu:.2f}%')
+    lines.append('MemoryMax=infinity' if memory<=0 else f'MemoryMax={memory}M')
+    (drop/'limits.conf').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+    run(['systemctl','daemon-reload'],check=False)
+    unit=f'hyper-cs16@{sid}.service'
+    if service_status(sid)=='active':
+        props=[]
+        props.append('CPUQuota=infinity' if cpu<=0 else f'CPUQuota={cpu:.2f}%')
+        props.append('MemoryMax=infinity' if memory<=0 else f'MemoryMax={memory}M')
+        run(['systemctl','set-property','--runtime',unit]+props,check=False,timeout=30)
+    return {'ok':True,'id':sid,'cpu_limit_percent':cpu,'memory_limit_mb':memory,'persistent':str(drop/'limits.conf')}
+
 def logs(sid:int,lines:int=160):
     load_server(sid); lines=max(10,min(lines,1000))
     cp=run(['journalctl','-u',f'hyper-cs16@{sid}.service','-n',str(lines),'--no-pager','-o','short-iso'],check=False)
@@ -1987,6 +2009,7 @@ def main():
     q=sp.add_parser('config-read'); q.add_argument('id',type=int); q.add_argument('name',choices=sorted(ALLOWED_CONFIGS))
     q=sp.add_parser('config-write'); q.add_argument('id',type=int); q.add_argument('name',choices=sorted(ALLOWED_CONFIGS))
     q=sp.add_parser('config-set'); q.add_argument('id',type=int); q.add_argument('--port',type=int); q.add_argument('--slots',type=int); q.add_argument('--map'); q.add_argument('--hostname'); q.add_argument('--password'); q.add_argument('--rcon')
+    q=sp.add_parser('limits-set'); q.add_argument('id',type=int); q.add_argument('--cpu',type=float,default=0); q.add_argument('--memory',type=int,default=0)
     q=sp.add_parser('logs'); q.add_argument('id',type=int); q.add_argument('--lines',type=int,default=160)
     q=sp.add_parser('map-upload'); q.add_argument('id',type=int); q.add_argument('token'); q.add_argument('map_name')
     q=sp.add_parser('plugin-upload'); q.add_argument('id',type=int); q.add_argument('token'); q.add_argument('plugin_name')
@@ -2029,6 +2052,7 @@ def main():
             if len(raw)>512*1024: raise RuntimeError('Config is too large')
             result=config_write(args.id,args.name,raw.decode('utf-8','replace'))
         elif args.cmd=='config-set': result=server_config_set(args)
+        elif args.cmd=='limits-set': result=server_limits_set(args.id,args.cpu,args.memory)
         elif args.cmd=='logs': result=logs(args.id,args.lines)
         elif args.cmd=='update': result=server_update(args.id)
         elif args.cmd=='reinstall': result=server_reinstall(args.id)
