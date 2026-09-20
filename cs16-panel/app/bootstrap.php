@@ -7,7 +7,7 @@ ini_set('session.cookie_samesite', 'Lax');
 if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ini_set('session.cookie_secure', '1');
 session_start();
 date_default_timezone_set('Europe/Moscow');
-const HYPER_CS16_PANEL_BUILD = '3.0.2-lite';
+const HYPER_CS16_PANEL_BUILD = '3.0.3-lite';
 
 $configFile = '/etc/hyper-cs16/panel.php';
 if (!is_file($configFile)) { http_response_code(500); exit('CS16 panel is not installed. Run install-cs16-panel.sh'); }

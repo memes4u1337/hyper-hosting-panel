@@ -2026,6 +2026,10 @@ def _overlay_cstrike_content(payload:Path, stage_cstrike:Path):
         'liblist.gam','dlls/***','cl_dlls/***','logs/***','manual/***',
         'addons/metamod/dlls/***','addons/metamod/plugins.ini',
         'addons/amxmodx/dlls/***','addons/amxmodx/modules/***',
+        # core.ini from old Windows/public packs often contains CRLF paths.
+        # With Linux AMXX that can become e.g. modules.ini\r and then AMXX sees
+        # neither modules.ini nor plugins.ini. Always keep the known-good 1.9 core.ini.
+        'addons/amxmodx/configs/core.ini',
         'addons/dproto/***','addons/reunion/***','addons/localizebugfix/***',
     ]
     cmd=['rsync','-a']
@@ -2067,6 +2071,47 @@ def _overlay_cstrike_content(payload:Path, stage_cstrike:Path):
             if key not in known:
                 lines.append(st); known.add(key)
         dstmeta.write_text('\n'.join(lines).rstrip()+'\n',encoding='utf-8')
+
+
+def _normalize_imported_text_configs(server_root:Path):
+    """Normalize DOS/legacy CR line endings in imported text configs without recoding them.
+
+    Old CS 1.6 packs are commonly prepared on Windows. AMXX on Linux can preserve the
+    trailing carriage return from core/config path values, turning
+    `addons/amxmodx/configs/modules.ini` into `modules.ini\\r`. The result is exactly
+    what looks like a healthy AMXX load followed by "Modules list not found" and
+    `0 plugins, 0 running`.
+
+    Work on raw bytes so CP1251/Russian comments and any non-UTF8 content are kept
+    byte-for-byte; only CRLF / lone CR are converted to LF.
+    """
+    cstrike=server_root/'cstrike'
+    candidates=[]
+    for rel in ['server.cfg','mapcycle.txt','motd.txt','banned.cfg','listip.cfg']:
+        p=cstrike/rel
+        if p.is_file(): candidates.append(p)
+    cfgdir=cstrike/'addons/amxmodx/configs'
+    if cfgdir.is_dir():
+        for p in cfgdir.rglob('*'):
+            if p.is_file() and p.suffix.lower() in {'.ini','.cfg','.txt'}:
+                candidates.append(p)
+    meta=cstrike/'addons/metamod/plugins.ini'
+    if meta.is_file(): candidates.append(meta)
+    changed=[]; failed=[]
+    seen=set()
+    for p in candidates:
+        try:
+            rp=str(p.resolve())
+            if rp in seen: continue
+            seen.add(rp)
+            data=p.read_bytes()
+            fixed=data.replace(b'\r\n',b'\n').replace(b'\r',b'\n')
+            if fixed!=data:
+                p.write_bytes(fixed)
+                changed.append(str(p.relative_to(cstrike)))
+        except Exception as exc:
+            failed.append({'file':str(p),'error':str(exc)})
+    return {'changed':changed,'failed':failed}
 
 
 def _preserve_server_identity_files(old_root:Path, new_root:Path):
@@ -2162,7 +2207,7 @@ def _adopt_imported_cfg(path:Path,c:dict):
 
     Previous versions intentionally re-wrote hostname/password/settings from the old
     panel state after import. That made a successful ZIP/RAR install look as if
-    nothing changed. v3.0.2 adopts the uploaded hostname/config and touches only the
+    nothing changed. v3.0.3 adopts the uploaded hostname/config and touches only the
     minimum directives needed by the hosting panel: sv_lan=0 and a usable RCON key.
     """
     cfg=path/'cstrike/server.cfg'
@@ -2201,26 +2246,52 @@ def _adopt_imported_cfg(path:Path,c:dict):
 
 
 def _runtime_mod_report(c:dict, expect_zp:bool=False):
-    """Verify that AMXX actually loaded the imported mode, not merely that files exist."""
-    report={'ok':True,'zp_runtime':False,'plugin_errors':[],'amxx_plugins':''}
+    """Verify that AMXX/Metamod and an imported ZP core actually loaded.
+
+    `zp_on` is not a reliable success probe by itself: many ZP 4.3 builds return no
+    text for a valid command. The authoritative check is the AMXX runtime plugin list.
+    """
+    report={'ok':True,'zp_runtime':False,'plugin_errors':[],'amxx_plugins':'','amxx_modules':'','meta_list':''}
+    raw=''
     try:
-        raw=query_rcon('127.0.0.1',int(c['port']),str(c.get('rcon_password','')),'amxx plugins',3.5)
-        report['amxx_plugins']=raw[-12000:]
+        raw=query_rcon('127.0.0.1',int(c['port']),str(c.get('rcon_password','')),'amxx plugins',4.0)
+        report['amxx_plugins']=raw[-16000:]
+        lowraw=raw.lower()
         for line in raw.splitlines():
             low=line.lower()
             if 'bad load' in low or re.search(r'\berror\b',low) or 'load fails' in low:
                 report['plugin_errors'].append(line.strip())
+        # AMXX console columns can truncate the filename, so accept either the
+        # canonical ZP core filename/prefix or the displayed plugin name.
+        zp_markers=('zombie_plague40','zombie plague','zombie_plague','zp50_core','zp core')
+        zp_lines=[ln for ln in raw.splitlines() if any(m in ln.lower() for m in zp_markers)]
+        report['zp_plugin_lines']=zp_lines[-20:]
+        report['zp_plugin_running']=any(('running' in ln.lower() or 'debug' in ln.lower()) and 'bad load' not in ln.lower() for ln in zp_lines)
+        if re.search(r'(?im)^\s*0\s+plugins,\s*0\s+running',raw):
+            report['plugin_errors'].append('AMXX loaded 0 plugins; check core.ini/config paths')
     except Exception as exc:
         report['ok']=False; report['amxx_error']=str(exc)
+    try:
+        mods=query_rcon('127.0.0.1',int(c['port']),str(c.get('rcon_password','')),'amxx modules',3.0)
+        report['amxx_modules']=mods[-8000:]
+        if 'modules list not found' in mods.lower(): report['plugin_errors'].append('AMXX modules list not found')
+    except Exception as exc:
+        report['amxx_modules_error']=str(exc)
+    try:
+        meta=query_rcon('127.0.0.1',int(c['port']),str(c.get('rcon_password','')),'meta list',3.0)
+        report['meta_list']=meta[-8000:]
+    except Exception as exc:
+        report['meta_error']=str(exc)
     if expect_zp:
         try:
             zp=query_rcon('127.0.0.1',int(c['port']),str(c.get('rcon_password','')),'zp_on',2.5)
-            low=zp.lower()
             report['zp_query']=zp[-2000:]
-            report['zp_runtime']=('zp_on' in low and 'unknown command' not in low and 'not found' not in low)
+            low=zp.lower()
+            report['zp_command_rejected']=('unknown command' in low or 'not found' in low or 'invalid command' in low)
         except Exception as exc:
             report['zp_query_error']=str(exc)
-            report['zp_runtime']=False
+            report['zp_command_rejected']=True
+        report['zp_runtime']=bool(report.get('zp_plugin_running'))
     return report
 
 
@@ -2282,6 +2353,9 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload',preferre
             _overlay_cstrike_content(payload,stage/'cstrike')
         if old_existed:
             _preserve_server_identity_files(path,stage)
+        text_normalization=_normalize_imported_text_configs(stage)
+        if text_normalization.get('failed'):
+            raise RuntimeError('Failed to normalize imported text configs: '+json.dumps(text_normalization['failed'][:8],ensure_ascii=False))
         if not (stage/'hlds_linux').is_file(): raise RuntimeError('Fresh HLDS engine is missing after assembly preparation')
         if not (stage/'cstrike').is_dir(): raise RuntimeError('cstrike directory is missing after assembly preparation')
         for exe in ['hlds_linux','hlds_run']:
@@ -2336,9 +2410,13 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload',preferre
         if detected.get('zp_active') and not runtime_report.get('zp_runtime'):
             journal=_recent_failure_log(sid,180)
             plugout=str(runtime_report.get('amxx_plugins') or '')[-6000:]
+            modsout=str(runtime_report.get('amxx_modules') or runtime_report.get('amxx_modules_error') or '')[-3000:]
+            metaout=str(runtime_report.get('meta_list') or runtime_report.get('meta_error') or '')[-3000:]
             zpout=str(runtime_report.get('zp_query') or runtime_report.get('zp_query_error') or '')[-1500:]
             raise RuntimeError('Zombie Plague files were installed but the mode did not load at runtime. '
-                               +'zp_on check: '+zpout+' AMXX: '+plugout+' LOG: '+journal[-6000:])
+                               +'ZP plugin lines: '+json.dumps(runtime_report.get('zp_plugin_lines') or [],ensure_ascii=False)
+                               +' | zp_on: '+zpout+' | AMXX plugins: '+plugout+' | AMXX modules: '+modsout
+                               +' | Metamod: '+metaout+' | LOG: '+journal[-6000:])
 
         _prune_build_backups(backup_root,sid,3)
         warnings=[]
@@ -2349,7 +2427,7 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload',preferre
         result={'ok':True,'id':sid,'archive_type':kind,'layout':layout,'start_map':c['start_map'],'backup':str(backup) if old_existed else '', 'source':source_label,'query':detail,
                 'hostname':c.get('hostname',''),'game_mode':c.get('game_mode','classic'),'detected_mod':detected.get('detected_mod_name',''),'worldarena_installed':bool(detected.get('worldarena_installed')),
                 'plugin_repairs':plugin_repairs,'module_repairs':module_repairs,'metamod_repairs':metamod_repairs,'zp_repairs':zp_repairs,
-                'imported_config':imported_cfg,'runtime_mod':runtime_report}
+                'text_normalization':text_normalization,'imported_config':imported_cfg,'runtime_mod':runtime_report}
         if warnings: result['warning']=' '.join(warnings)
         return result
     except Exception as exc:
