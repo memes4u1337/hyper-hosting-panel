@@ -13,6 +13,9 @@ STAGING_ROOT=Path('/var/tmp/hyper-cs16-panel')
 STAGING_DIR=STAGING_ROOT/'uploads'
 DELETED_DIR=STATE_ROOT/'deleted'
 BUILD_BACKUP_DIR_NAME='_build_backups'
+FASTDL_ROOT=Path('/srv/hyper-cs16/fastdl')
+FASTDL_DOMAIN='www.avito.hyper-host.pw'
+FASTDL_DIRS=('maps','models','sound','sprites','gfx','resource','overviews','events','media')
 LIB_DIR=APP_ROOT/'lib'
 if str(LIB_DIR) not in sys.path: sys.path.insert(0,str(LIB_DIR))
 try:
@@ -690,11 +693,205 @@ def ensure_base(profile='classic'):
     return {'ok':True,'path':str(base),'cached':False,'steamcmd_log':str(log_file)}
 
 
+
+def _fastdl_url(c:dict)->str:
+    """Stable per-server FastDL URL.
+
+    GoldSrc is most reliable with a plain HTTP endpoint. Prefer the public IPv4
+    already configured for the hosting node; fall back to the panel hostname.
+    Port 80 is already the web port of the host, so no extra game-port mapping is
+    required beyond the web service that already serves the panel.
+    """
+    sid=int(c.get('id') or 0)
+    public=''
+    try:
+        rt=load_runtime(); public=str(rt.get('public_ip') or c.get('public_ip') or '').strip()
+    except Exception:
+        public=str(c.get('public_ip') or '').strip()
+    try:
+        ip=ipaddress.ip_address(public)
+        if ip.version==4 and not ip.is_unspecified:
+            return f'http://{public}/fastdl/{sid}'
+    except Exception:
+        pass
+    return f'https://{FASTDL_DOMAIN}/fastdl/{sid}'
+
+
+def _fastdl_apply_cfg(c:dict, root:Path|None=None)->dict:
+    """Install one canonical FastDL block at the end of server.cfg.
+
+    Imported packs often contain old third-party sv_downloadurl values.  Leaving
+    several copies in the same cfg makes the effective value depend on order, so
+    v3.2 removes only the FastDL transport cvars and writes one managed block.  No
+    gameplay cvars, hostname, ZP settings, rates, map settings or plugin execs are
+    rewritten.
+    """
+    root=Path(root or c['path'])
+    cfg=root/'cstrike/server.cfg'; cfg.parent.mkdir(parents=True,exist_ok=True)
+    text=cfg.read_text(encoding='utf-8',errors='ignore') if cfg.exists() else ''
+    text=text.replace('\r\n','\n').replace('\r','\n')
+    begin='// HYPER-HOST FASTDL BEGIN'
+    end='// HYPER-HOST FASTDL END'
+    text=re.sub(r'(?ims)^\s*// HYPER-HOST FASTDL BEGIN\s*$.*?^\s*// HYPER-HOST FASTDL END\s*$\n?', '', text)
+    managed={'sv_downloadurl','sv_allowdownload','sv_allowupload','sv_send_resources','sv_allow_dlfile'}
+    kept=[]; replaced=[]
+    for line in text.splitlines():
+        m=re.match(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s+',line)
+        if m and m.group(1).lower() in managed:
+            replaced.append(line.strip())
+            continue
+        kept.append(line)
+    url=_fastdl_url(c)
+    block=[
+        begin,
+        '// Managed automatically by HYPER-HOST. Keep this block at the end of server.cfg.',
+        'sv_allowdownload 1',
+        'sv_allowupload 1',
+        'sv_send_resources 1',
+        'sv_allow_dlfile 1',
+        f'sv_downloadurl "{url}"',
+        end,
+    ]
+    content='\n'.join(kept).rstrip()+'\n\n'+'\n'.join(block)+'\n'
+    cfg.write_text(content,encoding='utf-8')
+    return {'ok':True,'url':url,'config':str(cfg),'replaced':replaced}
+
+
+def _fastdl_copy_tree(src:Path,dst:Path):
+    if not src.is_dir():
+        if dst.exists(): shutil.rmtree(dst,ignore_errors=True)
+        return
+    dst.mkdir(parents=True,exist_ok=True)
+    cp=run(['rsync','-a','--delete','--safe-links',str(src)+'/',str(dst)+'/'],check=False,timeout=1200)
+    if cp.returncode!=0:
+        raise RuntimeError('FastDL rsync failed for '+str(src)+': '+(cp.stdout or '')[-2500:])
+
+
+def fastdl_sync(sid:int, configure:bool=True):
+    """Mirror only client-downloadable game assets to the web FastDL tree."""
+    require_root(); c=load_server(sid); root=Path(c['path']); cstrike=root/'cstrike'
+    if not cstrike.is_dir(): raise RuntimeError(f'cstrike directory is missing: {cstrike}')
+    FASTDL_ROOT.mkdir(parents=True,exist_ok=True)
+    dest=FASTDL_ROOT/str(sid); dest.mkdir(parents=True,exist_ok=True)
+    copied_dirs=[]
+    for name in FASTDL_DIRS:
+        src=cstrike/name; dd=dest/name
+        _fastdl_copy_tree(src,dd)
+        if src.is_dir(): copied_dirs.append(name)
+    # Root WADs are requested by their cstrike-relative filename, not from a subdir.
+    source_wads={p.name:p for p in cstrike.iterdir() if p.is_file() and p.suffix.lower()=='.wad'}
+    for old in dest.glob('*.wad'):
+        if old.name not in source_wads:
+            try: old.unlink()
+            except OSError: pass
+    for name,src in source_wads.items():
+        shutil.copy2(src,dest/name)
+    cfg_result=_fastdl_apply_cfg(c,root) if configure else {'url':_fastdl_url(c)}
+    # Public static files: nginx runs as www-data on this host. Keep them read-only.
+    run(['chown','-R','root:www-data',str(dest)],check=False)
+    run(['find',str(dest),'-type','d','-exec','chmod','0755','{}','+'],check=False)
+    run(['find',str(dest),'-type','f','-exec','chmod','0644','{}','+'],check=False)
+    files=0; total=0
+    for fp in dest.rglob('*'):
+        try:
+            if fp.is_file(): files+=1; total+=fp.stat().st_size
+        except OSError: pass
+    c['fastdl_url']=cfg_result.get('url') or _fastdl_url(c)
+    c['fastdl_last_sync']=int(time.time()); c['fastdl_files']=files; c['fastdl_bytes']=total
+    save_server(c)
+    runtime_applied=False; runtime_errors=[]
+    if service_status(sid)=='active' and udp_listening(int(c.get('port') or 0)):
+        for cmd in ['sv_allowdownload 1','sv_allowupload 1','sv_send_resources 1','sv_allow_dlfile 1',f'sv_downloadurl "{c["fastdl_url"]}"']:
+            try: query_rcon('127.0.0.1',int(c['port']),str(c.get('rcon_password','')),cmd,2.0)
+            except Exception as exc: runtime_errors.append(str(exc))
+        runtime_applied=not runtime_errors
+    return {'ok':True,'id':sid,'url':c['fastdl_url'],'root':str(dest),'files':files,'bytes':total,'dirs':copied_dirs,'config':cfg_result,'runtime_applied':runtime_applied,'runtime_errors':runtime_errors[:5]}
+
+
+def fastdl_status(sid:int):
+    c=load_server(sid); dest=FASTDL_ROOT/str(sid); cfg=Path(c['path'])/'cstrike/server.cfg'
+    url=_fastdl_url(c); files=0; total=0
+    if dest.is_dir():
+        for fp in dest.rglob('*'):
+            try:
+                if fp.is_file(): files+=1; total+=fp.stat().st_size
+            except OSError: pass
+    current=''
+    if cfg.is_file():
+        try:
+            m=re.findall(r'(?im)^\s*sv_downloadurl\s+"?([^"\r\n]+)',cfg.read_text(encoding='utf-8',errors='ignore'))
+            if m: current=m[-1].strip()
+        except Exception: pass
+    return {'ok':True,'id':sid,'url':url,'configured_url':current,'configured':current.rstrip('/')==url.rstrip('/'),'root':str(dest),'exists':dest.is_dir(),'files':files,'bytes':total,'last_sync':int(c.get('fastdl_last_sync') or 0)}
+
+
+def _extract_external_fastdl_url(server_root:Path)->str:
+    cfg=server_root/'cstrike/server.cfg'
+    if not cfg.is_file(): return ''
+    try: text=cfg.read_text(encoding='utf-8',errors='ignore')
+    except Exception: return ''
+    vals=[]
+    for m in re.finditer(r'(?im)^\s*sv_downloadurl\s+"?([^"\r\n;]+)',text):
+        v=m.group(1).strip().rstrip('/')
+        if re.match(r'^https?://',v,re.I): vals.append(v)
+    return vals[-1] if vals else ''
+
+
+def _safe_resource_rel(rel:str)->str:
+    rel=urllib.parse.unquote(str(rel or '')).replace('\\','/').strip().lstrip('/')
+    rel=re.sub(r'/+','/',rel)
+    if not rel or rel.startswith('.') or '..' in Path(rel).parts: return ''
+    if len(rel)>260: return ''
+    if not re.fullmatch(r'[A-Za-z0-9_./+()\-\[\] ]+',rel): return ''
+    return rel
+
+
+def _download_fastdl_resource(base_url:str, rel:str, dst_root:Path, max_bytes:int=64*1024*1024)->bool:
+    rel=_safe_resource_rel(rel)
+    if not base_url or not rel: return False
+    dst=(dst_root/'cstrike'/rel).resolve(); croot=(dst_root/'cstrike').resolve()
+    if croot!=dst and croot not in dst.parents: return False
+    if dst.is_file(): return True
+    url=base_url.rstrip('/')+'/'+urllib.parse.quote(rel,safe='/._-+()[]')
+    dst.parent.mkdir(parents=True,exist_ok=True)
+    tmp=dst.with_name('.'+dst.name+'.fastdl-'+secrets.token_hex(4))
+    cp=run(['curl','--proto','=http,https','-fL','--retry','2','--connect-timeout','7','--max-time','35','--max-filesize',str(max_bytes),'-A','HYPER-HOST-CS16/3.2','-o',str(tmp),url],check=False,timeout=45)
+    if cp.returncode!=0 or not tmp.is_file() or tmp.stat().st_size<1:
+        try: tmp.unlink()
+        except OSError: pass
+        return False
+    os.replace(tmp,dst)
+    return True
+
+
+def _hydrate_resources_from_external_fastdl(server_root:Path, base_url:str, rels:list[str])->list[str]:
+    got=[]
+    if not base_url: return got
+    for rel in list(dict.fromkeys(_safe_resource_rel(x) for x in rels))[:120]:
+        if rel and _download_fastdl_resource(base_url,rel,server_root): got.append(rel)
+    return got
+
+
+def _res_declared_resources(server_root:Path)->list[str]:
+    maps=server_root/'cstrike/maps'; out=[]
+    if not maps.is_dir(): return out
+    for res in maps.glob('*.res'):
+        try: lines=res.read_text(encoding='latin1',errors='ignore').splitlines()
+        except Exception: continue
+        for raw in lines:
+            st=raw.strip().strip('"')
+            if not st or st.startswith(('/', ';', '#')): continue
+            st=st.split(';',1)[0].strip().strip('"')
+            rel=_safe_resource_rel(st)
+            if rel: out.append(rel)
+    return list(dict.fromkeys(out))[:600]
+
 def write_server_cfg(path:Path,c:dict):
     cfg=path/'cstrike/server.cfg'; cfg.parent.mkdir(parents=True,exist_ok=True)
     def q(v): return str(v).replace('"','').replace('\n',' ').replace('\r',' ')
     content=f'''// HYPER-HOST CS 1.6 managed configuration\nhostname "{q(c['hostname'])}"\nrcon_password "{q(c['rcon_password'])}"\nsv_password "{q(c.get('server_password',''))}"\nsv_lan 0\nsv_region 255\nsv_contact ""\nsv_aim 0\nsv_cheats 0\nsv_allowupload 1\nsv_allowdownload 1\nsv_downloadurl ""\nsv_maxrate 100000\nsv_minrate 25000\nsv_maxupdaterate 102\nsv_minupdaterate 30\nsys_ticrate 1000\npausable 0\nlog on\nmp_autokick 0\nmp_autoteambalance 1\nmp_buytime 1.5\nmp_c4timer 35\nmp_chattime 10\nmp_flashlight 1\nmp_freezetime 3\nmp_friendlyfire 0\nmp_hostagepenalty 2\nmp_limitteams 2\nmp_maxrounds 0\nmp_roundtime 2.0\nmp_startmoney 800\nmp_timelimit 25\nmp_tkpunish 0\nexec banned.cfg\nexec listip.cfg\n'''
     cfg.write_text(content,encoding='utf-8')
+    _fastdl_apply_cfg(c,path)
     mapcycle=path/'cstrike/mapcycle.txt'
     if not mapcycle.exists(): mapcycle.write_text('de_dust2\nde_inferno\nde_nuke\nde_train\ncs_office\ncs_italy\n',encoding='utf-8')
 
@@ -937,6 +1134,8 @@ def server_create(args):
         c=load_server(args.id)
     except Exception as exc:
         sql_info={'ok':False,'error':str(exc)}; sql_warning='Automatic SQL setup failed: '+str(exc)
+    fastdl_info=fastdl_sync(args.id,True)
+    c=load_server(args.id)
     run(['systemctl','daemon-reload'],check=False)
     run(['systemctl','enable',f'hyper-cs16@{args.id}.service'],check=False)
     run(['systemctl','restart',f'hyper-cs16@{args.id}.service'],check=False)
@@ -950,7 +1149,7 @@ def server_create(args):
         raise RuntimeError(f'HLDS failed health check: {detail}. '+journal[-7000:]+debug)
     ftp_diag=ftp_test(args.id) if not ftp_warning else {'ok':False,'error':ftp_warning}
     if not ftp_diag.get('ok') and not ftp_warning: ftp_warning=str(ftp_diag.get('error') or 'FTP self-test failed')
-    return {'ok':True,'id':args.id,'path':str(path),'rcon_password':rcon,'ftp_user':user,'ftp_password':pw,'ftp_warning':ftp_warning,'ftp_test':ftp_diag,'service':'active','sql':sql_info,'sql_warning':sql_warning}
+    return {'ok':True,'id':args.id,'path':str(path),'rcon_password':rcon,'ftp_user':user,'ftp_password':pw,'ftp_warning':ftp_warning,'ftp_test':ftp_diag,'service':'active','sql':sql_info,'sql_warning':sql_warning,'fastdl':fastdl_info}
 
 
 def _recent_failure_log(sid:int, lines:int=100):
@@ -1406,15 +1605,24 @@ def service_action(sid:int,action:str):
     if action=='stop':
         cp=run(['systemctl','stop',f'hyper-cs16@{sid}.service'],check=False)
         return {'ok':cp.returncode==0,'action':'stop','service':service_status(sid),'running':False,'udp_listening':False}
+    fastdl_info={}; fastdl_warning=''
+    try:
+        fastdl_info=fastdl_sync(sid,True)
+        c=load_server(sid)
+    except Exception as exc:
+        fastdl_warning='FastDL sync failed: '+str(exc)
     run(['systemctl','reset-failed',f'hyper-cs16@{sid}.service'],check=False)
     cp=run(['systemctl',action,f'hyper-cs16@{sid}.service'],check=False)
     if cp.returncode!=0:
         return {'ok':False,'action':action,'service':service_status(sid),'error':(cp.stdout or '').strip() or 'systemd command failed'}
     ok,detail=wait_server_ready(c,25.0)
     if ok:
-        return {'ok':True,'action':action,'service':'active','running':True,'udp_listening':True,'detail':detail,'recovered':False}
+        result={'ok':True,'action':action,'service':'active','running':True,'udp_listening':True,'detail':detail,'recovered':False,'fastdl':fastdl_info}
+        if fastdl_warning: result['warning']=fastdl_warning
+        return result
     result=recover_server(sid,False)
-    result['action']=action; result['initial_failure']=str(detail)
+    result['action']=action; result['initial_failure']=str(detail); result['fastdl']=fastdl_info
+    if fastdl_warning: result['warning']=(str(result.get('warning') or '')+' '+fastdl_warning).strip()
     return result
 
 
@@ -1735,8 +1943,12 @@ def config_write(sid:int,name:str,content:str):
         repairs=_sanitize_plugin_file(p,Path(c['path'])/'cstrike/addons/amxmodx/plugins')
     elif name=='modules.ini':
         repairs=_sanitize_modules_ini(c)
+    fastdl={}
+    if name=='server.cfg':
+        fastdl=fastdl_sync(sid,True)
+        c=load_server(sid)
     normalize_permissions(Path(c['path']))
-    return {'ok':True,'name':name,'repairs':repairs}
+    return {'ok':True,'name':name,'repairs':repairs,'fastdl':fastdl}
 
 
 
@@ -1922,7 +2134,8 @@ def server_config_set(args):
             _set_cfg_cvar(cfg,'rcon_password','"'+_clean_cfg_value(str(c.get('rcon_password') or ''),96)+'"')
         _set_cfg_cvar(cfg,'sv_lan','0')
     save_server(c); db_update_identity(args.id,str(c.get('hostname') or '')); db_update_start_map(args.id,str(c.get('start_map') or 'de_dust2')); normalize_permissions(root)
-    return {'ok':True,'server':{k:c.get(k) for k in ['id','hostname','slots','start_map','server_password']},'config_preserved':True}
+    fastdl=fastdl_sync(args.id,True)
+    return {'ok':True,'server':{k:c.get(k) for k in ['id','hostname','slots','start_map','server_password']},'config_preserved':True,'fastdl':fastdl}
 
 
 
@@ -1984,13 +2197,14 @@ def server_update(sid:int):
         else:
             dst.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,dst)
     ensure_steam_runtime(Path(steam)); normalize_permissions(path)
+    fastdl=fastdl_sync(sid,True); c=load_server(sid)
     ok,detail=_restart_strict(sid,c,45.0)
     if not ok:
         journal=_recent_failure_log(sid,160)
         raise RuntimeError(f'Steam update finished, but the preserved build did not restart: {detail}. {journal[-6000:]}')
     try: shutil.rmtree(keep)
     except OSError: pass
-    return {'ok':True,'output':(result.stdout or '')[-4000:],'custom_build_preserved':True,'query':detail}
+    return {'ok':True,'output':(result.stdout or '')[-4000:],'custom_build_preserved':True,'query':detail,'fastdl':fastdl}
 
 
 def server_reinstall(sid:int):
@@ -2021,12 +2235,12 @@ def server_reinstall(sid:int):
         sql_info=sql_provision(sid)
     except Exception as exc:
         sql_info={'ok':False,'error':str(exc)}; sql_warning='Automatic SQL setup failed: '+str(exc)
-    normalize_permissions(path); run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False)
+    normalize_permissions(path); fastdl=fastdl_sync(sid,True); c=load_server(sid); run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False)
     ok,detail=wait_server_ready(c,45.0)
     if not ok:
         journal=_recent_failure_log(sid,120)
         raise RuntimeError(f'Clean reinstall completed but HLDS did not become ready: {detail}. {journal[-5000:]}')
-    return {'ok':True,'backup':str(backup),'clean':True,'plugins':plugins_list(sid),'query':detail,'sql':sql_info,'sql_warning':sql_warning}
+    return {'ok':True,'backup':str(backup),'clean':True,'plugins':plugins_list(sid),'query':detail,'sql':sql_info,'sql_warning':sql_warning,'fastdl':fastdl}
 
 
 def ftp_reset(sid:int):
@@ -2076,7 +2290,8 @@ def map_upload(sid:int,token:str,map_name:str):
     if not SAFE_MAP.fullmatch(map_name): raise RuntimeError('Invalid map name')
     dst=Path(c['path'])/'cstrike/maps'/(map_name+'.bsp')
     _copy_staged(token,'.bsp',dst,256*1024*1024); normalize_permissions(Path(c['path']))
-    return {'ok':True,'map':map_name}
+    fastdl=fastdl_sync(sid,True)
+    return {'ok':True,'map':map_name,'fastdl':fastdl}
 
 
 def plugin_upload(sid:int,token:str,plugin_name:str):
@@ -2293,9 +2508,29 @@ def _preserve_server_identity_files(old_root:Path, new_root:Path):
             dst=new_root/rel; dst.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,dst)
 
 
-def _repair_zp_pack_assets(server_root:Path):
-    """Audit a ZM pack without silently rewriting its gameplay configuration."""
-    cstrike=server_root/'cstrike'; fixes=[]; warnings=[]
+def _repair_zp_pack_assets(server_root:Path, external_fastdl:str=''):
+    """Repair common resource problems in imported ZM packs.
+
+    1. If the pack points to an old external FastDL, use it as a temporary source
+       to hydrate resources that were omitted from the ZIP/RAR.
+    2. If a configured ZP sky still does not exist locally, switch only that sky
+       setting to a complete sky already shipped by the pack. This is safer than
+       letting clients fail on six missing TGA files.
+    3. The external URL is informational only; after installation HYPER-HOST writes
+       its own per-server FastDL block into server.cfg.
+    """
+    cstrike=server_root/'cstrike'; fixes=[]; warnings=[]; hydrated=[]
+    if external_fastdl:
+        # Map .res manifests are the best machine-readable list of files clients
+        # must have. Pull missing ones from the old FastDL before we take ownership.
+        missing=[]
+        for rel in _res_declared_resources(server_root):
+            if not (cstrike/rel).is_file(): missing.append(rel)
+        if missing:
+            got=_hydrate_resources_from_external_fastdl(server_root,external_fastdl,missing)
+            hydrated.extend(got)
+            if got: fixes.append(f'Imported {len(got)} missing map resources from previous FastDL')
+
     ini=cstrike/'addons/amxmodx/configs/zombieplague.ini'
     if ini.is_file():
         raw=ini.read_text(encoding='utf-8',errors='ignore')
@@ -2305,23 +2540,35 @@ def _repair_zp_pack_assets(server_root:Path):
             def complete_sky(name:str):
                 return all((cstrike/'gfx/env'/f'{name}{suffix}.tga').is_file() for suffix in ['bk','dn','ft','lf','rt','up'])
             missing=[x for x in names if not complete_sky(x)]
+            if missing and external_fastdl:
+                skyrels=[f'gfx/env/{name}{suffix}.tga' for name in missing for suffix in ['bk','dn','ft','lf','rt','up']]
+                got=_hydrate_resources_from_external_fastdl(server_root,external_fastdl,skyrels)
+                hydrated.extend(got)
+                if got: fixes.append(f'Imported {len(got)} skybox files from previous FastDL')
+                missing=[x for x in names if not complete_sky(x)]
             if missing:
                 available=[]; env=cstrike/'gfx/env'
                 if env.is_dir():
+                    # Case-insensitive grouping, but preserve the on-disk basename.
                     for bk in env.glob('*bk.tga'):
                         name=bk.name[:-6]
                         if complete_sky(name): available.append(name)
-                warnings.append('Missing sky assets for: '+', '.join(missing)+(('. Available complete skies: '+', '.join(sorted(set(available))[:20])) if available else ''))
+                available=sorted(set(available),key=str.lower)
+                if available:
+                    preferred=next((x for x in available if x.lower() in {'drkg','doom1','forest','desert','snow'}),available[0])
+                    fixed=re.sub(r'(?im)^\s*SKY NAMES\s*=.*$',f'SKY NAMES = {preferred}',raw,count=1)
+                    ini.write_text(fixed,encoding='utf-8')
+                    fixes.append('Missing ZP sky '+', '.join(missing)+f' -> {preferred}')
+                else:
+                    warnings.append('Missing sky assets for: '+', '.join(missing)+'; no complete local skybox was found')
+    if external_fastdl:
+        fixes.append('Previous external FastDL detected and replaced by HYPER-HOST FastDL: '+external_fastdl[:260])
     cfg=cstrike/'server.cfg'
     if cfg.is_file():
         text=cfg.read_text(encoding='utf-8',errors='ignore')
-        m=re.search(r'(?im)^\s*sv_downloadurl\s+(.+)$',text)
-        if m and re.search(r'https?://',m.group(1),re.I):
-            warnings.append('Build contains external FastDL: '+m.group(1).strip()[:300])
         if re.search(r'(?im)^\s*sv_allowdownload\s+"?0"?',text):
-            warnings.append('Build has sv_allowdownload 0; clients may not receive custom resources')
-    return {'fixes':fixes,'warnings':warnings}
-
+            fixes.append('sv_allowdownload 0 will be overridden by managed FastDL settings')
+    return {'fixes':fixes,'warnings':warnings,'hydrated':list(dict.fromkeys(hydrated)),'previous_fastdl':external_fastdl}
 
 def _detect_mod_profile_at(server_root:Path):
     cstrike=server_root/'cstrike'; plugdir=cstrike/'addons/amxmodx/plugins'; cfgdir=cstrike/'addons/amxmodx/configs'
@@ -2532,12 +2779,17 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload',preferre
         plugin_repairs=_sanitize_all_plugin_lists(stage_cfg)
         module_repairs=_sanitize_modules_ini(stage_cfg)
         metamod_repairs=_sanitize_metamod_plugins(stage_cfg)
-        zp_repairs=_repair_zp_pack_assets(stage)
+        external_fastdl=_extract_external_fastdl_url(stage)
+        zp_repairs=_repair_zp_pack_assets(stage,external_fastdl)
         detected=_detect_mod_profile_at(stage)
         # The uploaded build is authoritative for gameplay/server.cfg. Only the
         # launch port/slots stay panel-managed because systemd passes them on the
         # command line. Adopt hostname/RCON/password from the build where present.
         imported_cfg=_adopt_imported_cfg(stage,c)
+        # FastDL is the one transport setting HYPER-HOST intentionally owns. The
+        # managed block is appended after every build directive, so a pack's old
+        # FastDL can never override the local per-server mirror.
+        fastdl_cfg=_fastdl_apply_cfg(c,stage)
         maps=stage/'cstrike/maps'; preferred=str(preferred_map_override or c.get('start_map') or '')
         if not preferred or not (maps/(preferred+'.bsp')).is_file():
             choices=sorted(p.stem for p in maps.glob('*.bsp') if SAFE_MAP.fullmatch(p.stem)) if maps.is_dir() else []
@@ -2564,19 +2816,39 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload',preferre
             sql_info={'ok':False,'error':str(sql_exc)}; sql_warning='Automatic SQL setup failed: '+str(sql_exc)
         db_update_identity(sid,str(c.get('hostname') or ''))
         db_update_mode(sid,str(c.get('game_mode','classic')),int(c.get('bots_enabled',0)),int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
+        # Mirror the final installed files before the first client can connect.
+        # This also persists the canonical sv_downloadurl block in the real server.cfg.
+        fastdl_info=fastdl_sync(sid,True)
+        c=load_server(sid)
         run(['systemctl','daemon-reload'],check=False)
         run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False,timeout=60)
         ok,detail=wait_server_ready(c,50.0)
+        runtime_hydrated=[]
         if not ok:
-            # Do NOT call recover_server() here: that routine is allowed to rename
-            # plugins-zplague.ini and leave a ZM upload running as classic. An
-            # imported build is either running as uploaded, or we rollback it.
+            # Some commercial/old packs intentionally omitted client assets from
+            # the ZIP because their previous host supplied them only over FastDL.
+            # If the crash log names such a resource, recover it from that old URL
+            # once, mirror it to our FastDL, and retry before deciding to rollback.
             journal=_recent_failure_log(sid,180)
             broken,assets=_parse_plugin_failures(journal)
-            hint=''
-            if broken: hint+=' Broken AMXX: '+', '.join(dict.fromkeys(broken))[:1400]+'.'
-            if assets: hint+=' Missing resources: '+', '.join(dict.fromkeys(assets))[:1400]+'.'
-            raise RuntimeError(f'Uploaded assembly did not start as uploaded: {detail}.{hint} {journal[-7000:]}')
+            if external_fastdl and assets:
+                runtime_hydrated=_hydrate_resources_from_external_fastdl(path,external_fastdl,assets)
+                if runtime_hydrated:
+                    fastdl_info=fastdl_sync(sid,True)
+                    run(['systemctl','reset-failed',f'hyper-cs16@{sid}.service'],check=False)
+                    run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False,timeout=60)
+                    ok,detail=wait_server_ready(c,45.0)
+            if not ok:
+                # Do NOT call recover_server() here: that routine is allowed to rename
+                # plugins-zplague.ini and leave a ZM upload running as classic. An
+                # imported build is either running as uploaded, or we rollback it.
+                journal=_recent_failure_log(sid,180)
+                broken,assets=_parse_plugin_failures(journal)
+                hint=''
+                if broken: hint+=' Broken AMXX: '+', '.join(dict.fromkeys(broken))[:1400]+'.'
+                if assets: hint+=' Missing resources: '+', '.join(dict.fromkeys(assets))[:1400]+'.'
+                if external_fastdl: hint+=' Previous FastDL checked: '+external_fastdl[:500]+'.'
+                raise RuntimeError(f'Uploaded assembly did not start as uploaded: {detail}.{hint} {journal[-7000:]}')
 
         detected=_detect_mod_profile_at(path)
         runtime_report=_runtime_mod_report(c,bool(detected.get('zp_active')))
@@ -2601,7 +2873,8 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload',preferre
         result={'ok':True,'id':sid,'archive_type':kind,'layout':layout,'start_map':c['start_map'],'backup':str(backup) if old_existed else '', 'source':source_label,'query':detail,
                 'hostname':c.get('hostname',''),'game_mode':c.get('game_mode','classic'),'detected_mod':detected.get('detected_mod_name',''),'worldarena_installed':bool(detected.get('worldarena_installed')),
                 'plugin_repairs':plugin_repairs,'module_repairs':module_repairs,'metamod_repairs':metamod_repairs,'zp_repairs':zp_repairs,
-                'text_normalization':text_normalization,'imported_config':imported_cfg,'runtime_mod':runtime_report,'sql':sql_info}
+                'text_normalization':text_normalization,'imported_config':imported_cfg,'runtime_mod':runtime_report,'sql':sql_info,
+                'fastdl':fastdl_info,'fastdl_config':fastdl_cfg,'previous_fastdl':external_fastdl,'runtime_hydrated':runtime_hydrated}
         if warnings: result['warning']=' '.join(warnings)
         return result
     except Exception as exc:
@@ -2758,6 +3031,7 @@ def install_zp43(sid:int):
     c['game_mode']='zp43'; save_server(c); db_update_mode(sid,'zp43',int(c.get('bots_enabled',0)),int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
     _sanitize_all_plugin_lists(c); _sanitize_modules_ini(c); _sanitize_metamod_plugins(c)
     normalize_permissions(path)
+    fastdl=fastdl_sync(sid,True); c=load_server(sid)
     ok,detail=_restart_strict(sid,c,45.0)
     if not ok:
         journal=_recent_failure_log(sid,180)
@@ -2769,7 +3043,7 @@ def install_zp43(sid:int):
                            +str(runtime.get('amxx_plugins') or '')[-6000:]+' LOG: '+journal[-5000:])
     warning=''
     if runtime.get('plugin_errors'): warning='AMXX plugin errors: '+' | '.join(runtime['plugin_errors'][:12])
-    return {'ok':True,'mode':'zp43','backup':str(backup),'restart':{'ok':True,'detail':detail},'runtime_mod':runtime,'warning':warning}
+    return {'ok':True,'mode':'zp43','backup':str(backup),'restart':{'ok':True,'detail':detail},'runtime_mod':runtime,'warning':warning,'fastdl':fastdl}
 
 
 def set_game_mode(sid:int,mode:str):
@@ -2968,6 +3242,10 @@ def server_delete(sid:int):
     if legacy_left:
         try: legacy_cfg_path(sid).unlink(); legacy_left=False
         except OSError: pass
+    fastdl_path=FASTDL_ROOT/str(sid)
+    if fastdl_path.exists():
+        try: shutil.rmtree(fastdl_path)
+        except OSError: pass
     backup_root=safe.parent/BUILD_BACKUP_DIR_NAME
     if backup_root.is_dir():
         for bp in backup_root.glob(f'{sid}-*'):
@@ -3030,7 +3308,7 @@ def main():
     sp.add_parser('base-install')
     sp.add_parser('base-maps')
     c=sp.add_parser('server-create'); c.add_argument('id',type=int); c.add_argument('--name',required=True); c.add_argument('--port',type=int,required=True); c.add_argument('--slots',type=int,default=16); c.add_argument('--map',default='de_dust2'); c.add_argument('--hostname',required=True); c.add_argument('--password',default=''); c.add_argument('--profile',choices=['classic','rehlds'],default='classic')
-    for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','ftp-repair','ftp-test','network','delete','repair-runtime','mods-status','nat-upnp','network-fix','repair-content','sql-status']:
+    for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','ftp-repair','ftp-test','network','delete','repair-runtime','mods-status','nat-upnp','network-fix','repair-content','sql-status','fastdl-sync','fastdl-status']:
         q=sp.add_parser(a); q.add_argument('id',type=int)
     q=sp.add_parser('sql-provision'); q.add_argument('id',type=int); q.add_argument('--rotate',action='store_true')
     q=sp.add_parser('sql-table'); q.add_argument('id',type=int); q.add_argument('table'); q.add_argument('--limit',type=int,default=100)
@@ -3060,6 +3338,7 @@ def main():
     q=sp.add_parser('mode-set'); q.add_argument('id',type=int); q.add_argument('mode',choices=['classic','zp43'])
     sp.add_parser('ftp-restore')
     sp.add_parser('staging-prepare')
+    sp.add_parser('fastdl-sync-all')
     sp.add_parser('doctor')
     args=p.parse_args()
     try:
@@ -3105,6 +3384,8 @@ def main():
         elif args.cmd=='sql-status': result=sql_status(args.id)
         elif args.cmd=='sql-provision': result=sql_provision(args.id,args.rotate)
         elif args.cmd=='sql-table': result=sql_table(args.id,args.table,args.limit)
+        elif args.cmd=='fastdl-sync': result=fastdl_sync(args.id,True)
+        elif args.cmd=='fastdl-status': result=fastdl_status(args.id)
         elif args.cmd=='nat-upnp': result=nat_upnp(args.id)
         elif args.cmd=='network-fix': result=network_fix(args.id)
         elif args.cmd=='repair-content': result=repair_amxx_content(args.id,True)
@@ -3124,6 +3405,13 @@ def main():
         elif args.cmd=='delete': result=server_delete(args.id)
         elif args.cmd=='ftp-restore': result=ftp_restore()
         elif args.cmd=='staging-prepare': result=staging_prepare()
+        elif args.cmd=='fastdl-sync-all':
+            synced=[]; errors=[]
+            for fp in sorted(SERVER_CFG_DIR.glob('*.json')):
+                try:
+                    sid=int(fp.stem); synced.append(fastdl_sync(sid,True))
+                except Exception as exc: errors.append({'id':fp.stem,'error':str(exc)})
+            result={'ok':not errors,'synced':synced,'errors':errors}
         elif args.cmd=='doctor': result=doctor()
         else: raise RuntimeError('Unknown command')
         out(result,0 if result.get('ok',True) else 1)

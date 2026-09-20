@@ -434,7 +434,16 @@ def main():
                 cur.execute("SELECT id,port,slots,start_map,current_map,players_online,max_players,ping_ms,status_cache FROM servers WHERE enabled=1 ORDER BY id"); rows=cur.fetchall()
             settings=get_settings(db); store_stats=(tick%6==0); store_players=(tick%6==0)
             for row in rows:
-                try: one(db,row,settings,store_stats,store_players)
+                try:
+                    one(db,row,settings,store_stats,store_players)
+                    # Keep FastDL in sync with files added over FTP without hammering
+                    # disk on every 10-second telemetry pass. Each server is spread
+                    # across the 5-minute window by its id.
+                    sid=int(row.get('id') or 0)
+                    if sid>0 and tick%30==sid%30:
+                        cp=subprocess.run(['/usr/local/sbin/hyper-cs16-ctl','fastdl-sync',str(sid)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=180)
+                        if cp.returncode!=0:
+                            print(f'fastdl sync server {sid}: {(cp.stdout or "").strip()[-1500:]}',file=sys.stderr)
                 except Exception as exc: print(f'server {row.get("id")}: {exc}',file=sys.stderr)
             if tick%6==0:
                 billing_tick(db,settings)
