@@ -118,3 +118,32 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   enabled TINYINT(1) NOT NULL DEFAULT 1,last_used_at DATETIME NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY(id),UNIQUE KEY uq_api_hash(token_hash),KEY idx_api_user(user_id),CONSTRAINT fk_api_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS server_sql_connections (
+  server_id INT UNSIGNED NOT NULL, db_host VARCHAR(128) NOT NULL DEFAULT '127.0.0.1', db_port SMALLINT UNSIGNED NOT NULL DEFAULT 3306,
+  db_name VARCHAR(64) NOT NULL DEFAULT '', db_user VARCHAR(64) NOT NULL DEFAULT '', config_path VARCHAR(255) NOT NULL DEFAULT '',
+  status ENUM('pending','ready','error') NOT NULL DEFAULT 'pending', last_error VARCHAR(1000) NOT NULL DEFAULT '', last_check_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY(server_id), CONSTRAINT fk_sql_server FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS player_stats (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, server_id INT UNSIGNED NOT NULL, player_key VARCHAR(160) NOT NULL,
+  name VARCHAR(128) NOT NULL DEFAULT '', steam_id VARCHAR(64) NOT NULL DEFAULT '', last_ip VARCHAR(64) NOT NULL DEFAULT '',
+  kills INT UNSIGNED NOT NULL DEFAULT 0, deaths INT UNSIGNED NOT NULL DEFAULT 0, headshots INT UNSIGNED NOT NULL DEFAULT 0, suicides INT UNSIGNED NOT NULL DEFAULT 0,
+  current_score INT NOT NULL DEFAULT 0, play_seconds BIGINT UNSIGNED NOT NULL DEFAULT 0, sessions INT UNSIGNED NOT NULL DEFAULT 0,
+  last_session_seconds INT UNSIGNED NOT NULL DEFAULT 0, first_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_snapshot_at DATETIME NULL, PRIMARY KEY(id), UNIQUE KEY uq_player_stats_identity(server_id,player_key),
+  KEY idx_player_stats_rank(server_id,kills,deaths), KEY idx_player_stats_seen(server_id,last_seen), KEY idx_player_stats_steam(steam_id),
+  CONSTRAINT fk_player_stats_server FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS game_events (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, server_id INT UNSIGNED NOT NULL, event_type VARCHAR(32) NOT NULL,
+  actor_key VARCHAR(160) NOT NULL DEFAULT '', actor_name VARCHAR(128) NOT NULL DEFAULT '', actor_steam_id VARCHAR(64) NOT NULL DEFAULT '',
+  target_key VARCHAR(160) NOT NULL DEFAULT '', target_name VARCHAR(128) NOT NULL DEFAULT '', target_steam_id VARCHAR(64) NOT NULL DEFAULT '',
+  weapon VARCHAR(64) NOT NULL DEFAULT '', headshot TINYINT(1) NOT NULL DEFAULT 0, map_name VARCHAR(64) NOT NULL DEFAULT '', meta_json TEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(id), KEY idx_game_events_server_time(server_id,created_at),
+  KEY idx_game_events_type(server_id,event_type,created_at), KEY idx_game_events_actor(server_id,actor_key,created_at),
+  CONSTRAINT fk_game_events_server FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

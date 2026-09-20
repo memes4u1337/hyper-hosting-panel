@@ -143,6 +143,159 @@ def db_connect():
         raise RuntimeError(f'Database connection failed: {exc}')
 
 
+
+def _sql_literal(value:str)->str:
+    return "'"+str(value).replace('\\','\\\\').replace("'","''")+"'"
+
+
+def _mysql_root_exec(sql:str):
+    """Run local MariaDB/MySQL administration through root's unix-socket auth."""
+    binpath=shutil.which('mariadb') or shutil.which('mysql')
+    if not binpath:
+        raise RuntimeError('MariaDB/MySQL CLI is not installed')
+    cp=run([binpath,'--protocol=socket','-uroot','--batch','--skip-column-names','-e',sql],check=False,timeout=60)
+    if cp.returncode!=0:
+        raise RuntimeError('MySQL root/socket command failed: '+(cp.stdout or '').strip()[-3000:])
+    return (cp.stdout or '').strip()
+
+
+def _server_sql_names(sid:int):
+    return f'cs16_srv_{int(sid)}', f'cs16_s{int(sid)}'
+
+
+def _write_amxx_sql_cfg(c:dict, db_name:str, db_user:str, db_password:str):
+    root=Path(c['path'])
+    cfg=root/'cstrike/addons/amxmodx/configs/sql.cfg'
+    cfg.parent.mkdir(parents=True,exist_ok=True)
+    if not cfg.exists(): cfg.write_text('',encoding='utf-8')
+    # Standard AMXX SQL cvars. Plugins using AMXX SQLX/sql.cfg inherit these
+    # automatically, while custom plugins with their own config remain untouched.
+    for key,value in [
+        ('amx_sql_host','127.0.0.1'),('amx_sql_user',db_user),('amx_sql_pass',db_password),
+        ('amx_sql_db',db_name),('amx_sql_table','admins'),('amx_sql_type','mysql')
+    ]:
+        _set_cfg_cvar(cfg,key,'"'+_clean_cfg_value(value,180)+'"')
+    marker=root/'cstrike/addons/amxmodx/configs/hyper_sql.cfg'
+    marker.write_text(
+        '; HYPER-HOST automatic SQL connection\n'
+        '; Standard AMXX plugins read configs/sql.cfg.\n'
+        f'; Database: {db_name}\n; User: {db_user}\n; Host: 127.0.0.1:3306\n',
+        encoding='utf-8'
+    )
+    modules=root/'cstrike/addons/amxmodx/configs/modules.ini'
+    modules.parent.mkdir(parents=True,exist_ok=True)
+    text=modules.read_text(encoding='utf-8',errors='ignore') if modules.exists() else ''
+    active_mysql=any(re.match(r'^\s*mysql(?:_amxx_i386\.so)?\s*$',ln,re.I) for ln in text.splitlines() if not ln.lstrip().startswith(';'))
+    if not active_mysql:
+        modules.write_text(text.rstrip()+('\n' if text.strip() else '')+'mysql\n',encoding='utf-8')
+    return str(cfg)
+
+
+def _sql_meta_update(sid:int, db_name:str='', db_user:str='', config_path:str='', status:str='pending', error:str=''):
+    try:
+        con=db_connect()
+        try:
+            with con.cursor() as cur:
+                cur.execute("""INSERT INTO server_sql_connections(server_id,db_host,db_port,db_name,db_user,config_path,status,last_error,last_check_at)
+                    VALUES(%s,'127.0.0.1',3306,%s,%s,%s,%s,%s,NOW())
+                    ON DUPLICATE KEY UPDATE db_host='127.0.0.1',db_port=3306,db_name=VALUES(db_name),db_user=VALUES(db_user),
+                    config_path=VALUES(config_path),status=VALUES(status),last_error=VALUES(last_error),last_check_at=NOW()""",
+                    (sid,db_name,db_user,config_path,status,str(error)[:1000]))
+        finally: con.close()
+    except Exception:
+        pass
+
+
+def sql_provision(sid:int, rotate:bool=False):
+    """Create a dedicated SQL database/user for one game server and wire AMXX sql.cfg.
+
+    This does not depend on a particular game mode. Universal HYPER-HOST player
+    telemetry is stored separately in the panel DB by the monitor, so even old
+    builds without SQL plugins still get online/rating/history statistics.
+    """
+    require_root(); c=load_server(sid); root=Path(c['path'])
+    if not root.is_dir(): raise RuntimeError(f'Server directory missing: {root}')
+    db_name,db_user=_server_sql_names(sid)
+    password='' if rotate else str(c.get('sql_password') or '')
+    if not password: password=secrets.token_urlsafe(18).replace("'",'A')
+    try:
+        # Names are generated locally from a numeric server id, never user input.
+        qdb='`'+db_name+'`'; quser=_sql_literal(db_user); qpass=_sql_literal(password)
+        sql=(
+            f"CREATE DATABASE IF NOT EXISTS {qdb} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+            f"CREATE USER IF NOT EXISTS {quser}@'127.0.0.1' IDENTIFIED BY {qpass};"
+            f"ALTER USER {quser}@'127.0.0.1' IDENTIFIED BY {qpass};"
+            f"CREATE USER IF NOT EXISTS {quser}@'localhost' IDENTIFIED BY {qpass};"
+            f"ALTER USER {quser}@'localhost' IDENTIFIED BY {qpass};"
+            f"GRANT ALL PRIVILEGES ON {qdb}.* TO {quser}@'127.0.0.1';"
+            f"GRANT ALL PRIVILEGES ON {qdb}.* TO {quser}@'localhost';FLUSH PRIVILEGES;"
+        )
+        _mysql_root_exec(sql)
+        cfg_path_written=_write_amxx_sql_cfg(c,db_name,db_user,password)
+        c['sql_enabled']=True; c['sql_host']='127.0.0.1'; c['sql_port']=3306
+        c['sql_db']=db_name; c['sql_user']=db_user; c['sql_password']=password; c['sql_config_path']=cfg_path_written
+        save_server(c); normalize_permissions(root)
+        # Verify using the exact game credentials, not the panel account.
+        try:
+            import pymysql
+            test=pymysql.connect(host='127.0.0.1',port=3306,user=db_user,password=password,database=db_name,connect_timeout=5,charset='utf8mb4')
+            with test.cursor() as cur: cur.execute('SELECT 1'); cur.fetchone()
+            test.close()
+        except Exception as exc:
+            raise RuntimeError('Dedicated game SQL was created but login test failed: '+str(exc))
+        _sql_meta_update(sid,db_name,db_user,cfg_path_written,'ready','')
+        return {'ok':True,'id':sid,'host':'127.0.0.1','port':3306,'database':db_name,'user':db_user,'password':password,
+                'config_path':cfg_path_written,'standard_amxx_sql':True,'telemetry':'panel-db'}
+    except Exception as exc:
+        _sql_meta_update(sid,db_name,db_user,str(root/'cstrike/addons/amxmodx/configs/sql.cfg'),'error',str(exc))
+        raise
+
+
+def sql_status(sid:int):
+    c=load_server(sid); db_name=str(c.get('sql_db') or _server_sql_names(sid)[0]); db_user=str(c.get('sql_user') or _server_sql_names(sid)[1]); pw=str(c.get('sql_password') or '')
+    cfg=Path(c['path'])/'cstrike/addons/amxmodx/configs/sql.cfg'; connected=False; error=''; tables=[]
+    if pw:
+        try:
+            import pymysql
+            con=pymysql.connect(host='127.0.0.1',port=3306,user=db_user,password=pw,database=db_name,connect_timeout=4,charset='utf8mb4',cursorclass=pymysql.cursors.DictCursor)
+            with con.cursor() as cur:
+                cur.execute('SHOW TABLES')
+                tables=[str(next(iter(r.values()))) for r in cur.fetchall()]
+            con.close(); connected=True
+        except Exception as exc: error=str(exc)
+    else: error='SQL credentials are not provisioned yet'
+    _sql_meta_update(sid,db_name,db_user,str(cfg),'ready' if connected else 'error',error)
+    return {'ok':True,'id':sid,'connected':connected,'host':'127.0.0.1','port':3306,'database':db_name,'user':db_user,
+            'password':pw,'config_path':str(cfg),'config_exists':cfg.is_file(),'tables':tables[:250],'error':error}
+
+
+def sql_table(sid:int,table:str,limit:int=100):
+    if not re.fullmatch(r'[A-Za-z0-9_]{1,64}',str(table or '')): raise RuntimeError('Invalid SQL table name')
+    c=load_server(sid); db_name=str(c.get('sql_db') or ''); db_user=str(c.get('sql_user') or ''); pw=str(c.get('sql_password') or '')
+    if not (db_name and db_user and pw): raise RuntimeError('Dedicated game SQL is not provisioned')
+    limit=max(1,min(int(limit),500))
+    try:
+        import pymysql
+        con=pymysql.connect(host='127.0.0.1',port=3306,user=db_user,password=pw,database=db_name,connect_timeout=5,charset='utf8mb4',cursorclass=pymysql.cursors.DictCursor)
+        with con.cursor() as cur:
+            cur.execute('SHOW TABLES'); allowed={str(next(iter(r.values()))) for r in cur.fetchall()}
+            if table not in allowed: raise RuntimeError('SQL table not found in this server database')
+            cur.execute('SELECT * FROM `'+table+'` LIMIT %s',(limit,))
+            raw=cur.fetchall(); cols=[d[0] for d in (cur.description or [])]
+        con.close()
+        rows=[]
+        for row in raw:
+            clean={}
+            for k,v in row.items():
+                if v is None or isinstance(v,(str,int,float,bool)): clean[str(k)]=v
+                elif isinstance(v,(bytes,bytearray)): clean[str(k)]='0x'+bytes(v).hex()[:4096]
+                else: clean[str(k)]=str(v)
+            rows.append(clean)
+        return {'ok':True,'id':sid,'database':db_name,'table':table,'columns':cols,'rows':rows,'limit':limit}
+    except RuntimeError: raise
+    except Exception as exc: raise RuntimeError('Cannot read game SQL table: '+str(exc))
+
+
 def db_server_row(sid:int):
     try:
         con=db_connect()
@@ -771,11 +924,22 @@ def server_create(args):
        'profile':args.profile,'public_ip':rt.get('public_ip',''),'rcon_password':rcon,'server_password':args.password or '',
        'path':str(path),'ftp_user':'','ftp_password':''}
     write_server_cfg(path,c); normalize_permissions(path)
-    # Save config and start HLDS before optional FTP setup. FTP must never block game deployment.
+    # Prepare integrations before the very first HLDS start so AMXX sees mysql/sql.cfg
+    # immediately. SQL/FTP failures are non-fatal and never destroy the game server.
     save_server(c)
+    user,pw,ftp_warning=setup_ftp(c,path)
+    save_server(c); time.sleep(.2)
+    sql_warning=''
+    try:
+        sql_info=sql_provision(args.id)
+        # sql_provision persists SQL credentials; reload so later state writes cannot
+        # accidentally erase them.
+        c=load_server(args.id)
+    except Exception as exc:
+        sql_info={'ok':False,'error':str(exc)}; sql_warning='Automatic SQL setup failed: '+str(exc)
     run(['systemctl','daemon-reload'],check=False)
     run(['systemctl','enable',f'hyper-cs16@{args.id}.service'],check=False)
-    cp=run(['systemctl','restart',f'hyper-cs16@{args.id}.service'],check=False)
+    run(['systemctl','restart',f'hyper-cs16@{args.id}.service'],check=False)
     ok,detail=wait_server_ready(c,30.0)
     if not ok:
         run(['systemctl','stop',f'hyper-cs16@{args.id}.service'],check=False)
@@ -784,11 +948,9 @@ def server_create(args):
         for dp in [path/'debug.log',path/'cstrike/debug.log']:
             if dp.is_file(): debug += '\n--- '+str(dp)+' ---\n'+dp.read_text(encoding='latin1',errors='replace')[-8000:]
         raise RuntimeError(f'HLDS failed health check: {detail}. '+journal[-7000:]+debug)
-    user,pw,ftp_warning=setup_ftp(c,path)
-    save_server(c); time.sleep(.4)
     ftp_diag=ftp_test(args.id) if not ftp_warning else {'ok':False,'error':ftp_warning}
     if not ftp_diag.get('ok') and not ftp_warning: ftp_warning=str(ftp_diag.get('error') or 'FTP self-test failed')
-    return {'ok':True,'id':args.id,'path':str(path),'rcon_password':rcon,'ftp_user':user,'ftp_password':pw,'ftp_warning':ftp_warning,'ftp_test':ftp_diag,'service':'active'}
+    return {'ok':True,'id':args.id,'path':str(path),'rcon_password':rcon,'ftp_user':user,'ftp_password':pw,'ftp_warning':ftp_warning,'ftp_test':ftp_diag,'service':'active','sql':sql_info,'sql_warning':sql_warning}
 
 
 def _recent_failure_log(sid:int, lines:int=100):
@@ -1853,12 +2015,18 @@ def server_reinstall(sid:int):
         dst=path/'cstrike/addons/amxmodx/configs/users.ini'; dst.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(old_users,dst)
     c['game_mode']='classic'; c['bots_enabled']=0; c.pop('custom_build_source',None); c.pop('custom_build_installed_at',None); save_server(c)
     db_update_mode(sid,'classic',0,0,int(c.get('bots_difficulty',3)))
-    write_server_cfg(path,c); normalize_permissions(path); run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False)
+    write_server_cfg(path,c)
+    sql_warning=''
+    try:
+        sql_info=sql_provision(sid)
+    except Exception as exc:
+        sql_info={'ok':False,'error':str(exc)}; sql_warning='Automatic SQL setup failed: '+str(exc)
+    normalize_permissions(path); run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False)
     ok,detail=wait_server_ready(c,45.0)
     if not ok:
         journal=_recent_failure_log(sid,120)
         raise RuntimeError(f'Clean reinstall completed but HLDS did not become ready: {detail}. {journal[-5000:]}')
-    return {'ok':True,'backup':str(backup),'clean':True,'plugins':plugins_list(sid),'query':detail}
+    return {'ok':True,'backup':str(backup),'clean':True,'plugins':plugins_list(sid),'query':detail,'sql':sql_info,'sql_warning':sql_warning}
 
 
 def ftp_reset(sid:int):
@@ -2389,6 +2557,11 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload',preferre
         if old_existed: os.replace(path,backup)
         os.replace(stage,path); swapped=True
         c['path']=str(path); c['custom_build_source']=source_label; c['custom_build_installed_at']=int(time.time()); save_server(c)
+        sql_warning=''
+        try:
+            sql_info=sql_provision(sid)
+        except Exception as sql_exc:
+            sql_info={'ok':False,'error':str(sql_exc)}; sql_warning='Automatic SQL setup failed: '+str(sql_exc)
         db_update_identity(sid,str(c.get('hostname') or ''))
         db_update_mode(sid,str(c.get('game_mode','classic')),int(c.get('bots_enabled',0)),int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
         run(['systemctl','daemon-reload'],check=False)
@@ -2424,10 +2597,11 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload',preferre
             warnings.append(str(w))
         if runtime_report.get('plugin_errors'):
             warnings.append('AMXX reports plugin errors: '+' | '.join(runtime_report['plugin_errors'][:12]))
+        if sql_warning: warnings.append(sql_warning)
         result={'ok':True,'id':sid,'archive_type':kind,'layout':layout,'start_map':c['start_map'],'backup':str(backup) if old_existed else '', 'source':source_label,'query':detail,
                 'hostname':c.get('hostname',''),'game_mode':c.get('game_mode','classic'),'detected_mod':detected.get('detected_mod_name',''),'worldarena_installed':bool(detected.get('worldarena_installed')),
                 'plugin_repairs':plugin_repairs,'module_repairs':module_repairs,'metamod_repairs':metamod_repairs,'zp_repairs':zp_repairs,
-                'text_normalization':text_normalization,'imported_config':imported_cfg,'runtime_mod':runtime_report}
+                'text_normalization':text_normalization,'imported_config':imported_cfg,'runtime_mod':runtime_report,'sql':sql_info}
         if warnings: result['warning']=' '.join(warnings)
         return result
     except Exception as exc:
@@ -2810,7 +2984,18 @@ def server_delete(sid:int):
             except OSError: pass
     run(['systemctl','daemon-reload'],check=False)
     run(['systemctl','reset-failed',f'hyper-cs16@{sid}.service'],check=False)
-    return {'ok':True,'id':sid,'deleted_path':str(path),'ftp_user':user,'legacy_state_left':legacy_left,'legacy_state':str(legacy_cfg_path(sid)) if legacy_left else ''}
+    sql_cleanup_warning=''
+    try:
+        db_name,db_user=_server_sql_names(sid)
+        _mysql_root_exec(
+            f"DROP DATABASE IF EXISTS `{db_name}`;"
+            f"DROP USER IF EXISTS {_sql_literal(db_user)}@'127.0.0.1';"
+            f"DROP USER IF EXISTS {_sql_literal(db_user)}@'localhost';FLUSH PRIVILEGES;"
+        )
+    except Exception as exc:
+        # Dedicated SQL is auxiliary; a DB outage must never block game-server deletion.
+        sql_cleanup_warning='Dedicated SQL cleanup warning: '+str(exc)
+    return {'ok':True,'id':sid,'deleted_path':str(path),'ftp_user':user,'legacy_state_left':legacy_left,'legacy_state':str(legacy_cfg_path(sid)) if legacy_left else '', 'sql_cleanup_warning':sql_cleanup_warning}
 
 
 def doctor():
@@ -2845,8 +3030,10 @@ def main():
     sp.add_parser('base-install')
     sp.add_parser('base-maps')
     c=sp.add_parser('server-create'); c.add_argument('id',type=int); c.add_argument('--name',required=True); c.add_argument('--port',type=int,required=True); c.add_argument('--slots',type=int,default=16); c.add_argument('--map',default='de_dust2'); c.add_argument('--hostname',required=True); c.add_argument('--password',default=''); c.add_argument('--profile',choices=['classic','rehlds'],default='classic')
-    for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','ftp-repair','ftp-test','network','delete','repair-runtime','mods-status','nat-upnp','network-fix','repair-content']:
+    for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','ftp-repair','ftp-test','network','delete','repair-runtime','mods-status','nat-upnp','network-fix','repair-content','sql-status']:
         q=sp.add_parser(a); q.add_argument('id',type=int)
+    q=sp.add_parser('sql-provision'); q.add_argument('id',type=int); q.add_argument('--rotate',action='store_true')
+    q=sp.add_parser('sql-table'); q.add_argument('id',type=int); q.add_argument('table'); q.add_argument('--limit',type=int,default=100)
     q=sp.add_parser('recover'); q.add_argument('id',type=int); q.add_argument('--auto',action='store_true')
     q=sp.add_parser('rcon'); q.add_argument('id',type=int); q.add_argument('command')
     q=sp.add_parser('change-map'); q.add_argument('id',type=int); q.add_argument('map')
@@ -2915,6 +3102,9 @@ def main():
         elif args.cmd=='ftp-test': result=ftp_test(args.id)
         elif args.cmd=='network': result=network_info(args.id)
         elif args.cmd=='mods-status': result=mods_status(args.id)
+        elif args.cmd=='sql-status': result=sql_status(args.id)
+        elif args.cmd=='sql-provision': result=sql_provision(args.id,args.rotate)
+        elif args.cmd=='sql-table': result=sql_table(args.id,args.table,args.limit)
         elif args.cmd=='nat-upnp': result=nat_upnp(args.id)
         elif args.cmd=='network-fix': result=network_fix(args.id)
         elif args.cmd=='repair-content': result=repair_amxx_content(args.id,True)

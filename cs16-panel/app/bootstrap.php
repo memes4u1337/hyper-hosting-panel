@@ -7,7 +7,7 @@ ini_set('session.cookie_samesite', 'Lax');
 if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ini_set('session.cookie_secure', '1');
 session_start();
 date_default_timezone_set('Europe/Moscow');
-const HYPER_CS16_PANEL_BUILD = '3.0.3-lite';
+const HYPER_CS16_PANEL_BUILD = '3.1-sql';
 
 $configFile = '/etc/hyper-cs16/panel.php';
 if (!is_file($configFile)) { http_response_code(500); exit('CS16 panel is not installed. Run install-cs16-panel.sh'); }
@@ -40,9 +40,9 @@ function require_auth(bool $json=false): array { $u=current_user(); if(!$u){ if(
 function role_label(string $role): string { return ['owner'=>'Владелец','admin'=>'Администратор','support'=>'Техподдержка','client'=>'Клиент'][$role]??$role; }
 function role_permissions(string $role): array {
     if($role==='owner') return ['*'];
-    if($role==='admin') return ['servers.view','servers.create','server.power','server.map','server.players','server.logs','server.plugins','server.admins','server.config','server.ftp','server.maintenance','server.delete','users.manage','resources.manage','billing.manage','billing.view','notifications.manage','history.view','api.manage','reports.create','reports.manage'];
-    if($role==='support') return ['servers.view','server.power','server.map','server.players','server.logs','server.plugins','history.view','reports.create','reports.manage'];
-    return ['servers.view','server.power','server.map','server.players','server.logs','billing.view','history.view','api.manage','reports.create'];
+    if($role==='admin') return ['servers.view','servers.create','server.power','server.map','server.players','server.logs','server.plugins','server.admins','server.config','server.ftp','server.maintenance','server.delete','users.manage','resources.manage','billing.manage','billing.view','notifications.manage','history.view','api.manage','reports.create','reports.manage','sql.view','sql.manage'];
+    if($role==='support') return ['servers.view','server.power','server.map','server.players','server.logs','server.plugins','history.view','reports.create','reports.manage','sql.view'];
+    return ['servers.view','server.power','server.map','server.players','server.logs','billing.view','history.view','api.manage','reports.create','sql.view'];
 }
 function user_has_server(int $userId,int $serverId): bool {
     $st=db()->prepare('SELECT 1 FROM server_users WHERE user_id=? AND server_id=? LIMIT 1');$st->execute([$userId,$serverId]);return (bool)$st->fetchColumn();

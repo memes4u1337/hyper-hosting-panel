@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import json, subprocess, sys, time, re, socket, urllib.request, urllib.parse, shutil
+import json, subprocess, sys, time, re, socket, urllib.request, urllib.parse, shutil, hashlib
 from pathlib import Path
 
 APP=Path('/opt/hyper-cs16'); ETC=Path('/etc/hyper-cs16'); STATE=Path('/var/lib/hyper-cs16')
@@ -184,6 +184,143 @@ def rcon_player_rows(c):
         if m: rows.append({'name':m.group(2),'steam_id':m.group(4),'score':int(m.group(5)),'time':m.group(6),'address':m.group(9).strip()})
     return rows
 
+
+CURSOR_DIR=STATE/'stats-cursors'
+KILL_RE=re.compile(r'"(?P<killer>.*?)<\d+><(?P<ksteam>[^>]*)><[^>]*>" killed "(?P<victim>.*?)<\d+><(?P<vsteam>[^>]*)><[^>]*>" with "(?P<weapon>[^"]+)"(?P<tail>.*)$')
+CONNECT_RE=re.compile(r'"(?P<name>.*?)<\d+><(?P<steam>[^>]*)><[^>]*>" connected, address "(?P<address>[^"]+)"')
+DISCONNECT_RE=re.compile(r'"(?P<name>.*?)<\d+><(?P<steam>[^>]*)><[^>]*>" disconnected')
+MAP_RE=re.compile(r'Mapchange to\s+([A-Za-z0-9_-]{1,64})',re.I)
+
+
+def player_key(name,steam,address=''):
+    steam=str(steam or '').strip().upper()
+    if steam=='BOT': return ''
+    if re.fullmatch(r'STEAM_[0-5]:[01]:\d+',steam,re.I): return 'steam:'+steam
+    addr=str(address or '').strip()
+    ip=addr.rsplit(':',1)[0] if ':' in addr else addr
+    if ip and ip not in {'127.0.0.1','0.0.0.0'}:
+        return 'ip:'+ip
+    n=' '.join(str(name or '').strip().casefold().split())
+    return 'name:'+hashlib.sha1(n.encode('utf-8','ignore')).hexdigest()[:24] if n else ''
+
+
+def ensure_player_stat(db,sid,name,steam,address=''):
+    key=player_key(name,steam,address)
+    if not key: return ''
+    ip=(str(address or '').rsplit(':',1)[0] if ':' in str(address or '') else str(address or ''))[:64]
+    with db.cursor() as cur:
+        cur.execute("""INSERT INTO player_stats(server_id,player_key,name,steam_id,last_ip,first_seen,last_seen,sessions)
+            VALUES(%s,%s,%s,%s,%s,NOW(),NOW(),1)
+            ON DUPLICATE KEY UPDATE name=VALUES(name),steam_id=IF(VALUES(steam_id)<>'',VALUES(steam_id),steam_id),last_ip=IF(VALUES(last_ip)<>'',VALUES(last_ip),last_ip),last_seen=NOW()""",
+            (sid,key,str(name)[:128],str(steam)[:64],ip))
+    return key
+
+
+def snapshot_player_stat(db,sid,pl):
+    name=str(pl.get('name',''))[:128]; steam=str(pl.get('steam_id',''))[:64]; address=str(pl.get('address',''))[:64]
+    key=player_key(name,steam,address)
+    if not key: return
+    try: duration=max(0,int(float(pl.get('duration',0) or 0)))
+    except Exception: duration=0
+    score=int(pl.get('score',0) or 0); ip=(address.rsplit(':',1)[0] if ':' in address else address)[:64]
+    with db.cursor() as cur:
+        cur.execute('SELECT last_session_seconds,last_seen,sessions FROM player_stats WHERE server_id=%s AND player_key=%s LIMIT 1',(sid,key))
+        old=cur.fetchone()
+        if old:
+            lastdur=int(old.get('last_session_seconds') or 0)
+            lastseen=old.get('last_seen')
+            gap=9999
+            try: gap=max(0,time.time()-lastseen.timestamp())
+            except Exception: pass
+            new_session=(gap>150 or duration+15<lastdur)
+            delta=min(duration,86400) if new_session else max(0,min(600,duration-lastdur))
+            cur.execute("""UPDATE player_stats SET name=%s,steam_id=IF(%s<>'',%s,steam_id),last_ip=IF(%s<>'',%s,last_ip),
+                current_score=%s,play_seconds=play_seconds+%s,sessions=sessions+%s,last_session_seconds=%s,last_seen=NOW(),last_snapshot_at=NOW()
+                WHERE server_id=%s AND player_key=%s""",
+                (name,steam,steam,ip,ip,score,delta,1 if new_session else 0,duration,sid,key))
+        else:
+            cur.execute("""INSERT INTO player_stats(server_id,player_key,name,steam_id,last_ip,current_score,play_seconds,sessions,last_session_seconds,first_seen,last_seen,last_snapshot_at)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,1,%s,NOW(),NOW(),NOW())""",
+                (sid,key,name,steam,ip,score,min(duration,86400),duration))
+
+
+def add_game_event(db,sid,event_type,actor=('', ''),target=('', ''),weapon='',headshot=False,map_name='',meta=None):
+    an,as_=actor; tn,ts=target; ak=player_key(an,as_); tk=player_key(tn,ts)
+    with db.cursor() as cur:
+        cur.execute("""INSERT INTO game_events(server_id,event_type,actor_key,actor_name,actor_steam_id,target_key,target_name,target_steam_id,weapon,headshot,map_name,meta_json)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (sid,event_type,ak,str(an)[:128],str(as_)[:64],tk,str(tn)[:128],str(ts)[:64],str(weapon)[:64],1 if headshot else 0,str(map_name)[:64],json.dumps(meta or {},ensure_ascii=False,separators=(',',':'))))
+
+
+def journal_new_lines(sid):
+    CURSOR_DIR.mkdir(parents=True,exist_ok=True)
+    cpfile=CURSOR_DIR/f'{sid}.cursor'; cursor=''
+    try: cursor=cpfile.read_text(encoding='utf-8').strip()
+    except Exception: pass
+    cmd=['journalctl','-u',f'hyper-cs16@{sid}.service','-o','cat','--no-pager','--show-cursor']
+    if cursor: cmd += ['--after-cursor',cursor]
+    else: cmd += ['--since','2 minutes ago']
+    cp=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=10)
+    text=cp.stdout or ''
+    if cp.returncode!=0 and cursor:
+        cp=subprocess.run(['journalctl','-u',f'hyper-cs16@{sid}.service','-o','cat','--no-pager','--show-cursor','--since','2 minutes ago'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=10)
+        text=cp.stdout or ''
+    lines=[]; new_cursor=''
+    for line in text.splitlines():
+        if line.startswith('-- cursor: '): new_cursor=line.split(': ',1)[1].strip()
+        else: lines.append(line)
+    if new_cursor:
+        try: cpfile.write_text(new_cursor+'\n',encoding='utf-8')
+        except Exception: pass
+    return lines
+
+
+def collect_game_logs(db,sid,current_map=''):
+    try: lines=journal_new_lines(sid)
+    except Exception as exc:
+        print(f'journal stats server {sid}: {exc}',file=sys.stderr); return
+    map_name=str(current_map or '')
+    for line in lines:
+        mm=MAP_RE.search(line)
+        if mm:
+            map_name=mm.group(1)
+            try: add_game_event(db,sid,'map',weapon='',map_name=map_name,meta={'line':line[-500:]})
+            except Exception: pass
+            continue
+        m=CONNECT_RE.search(line)
+        if m:
+            steam=m.group('steam'); key=player_key(m.group('name'),steam,m.group('address'))
+            if key:
+                try:
+                    ensure_player_stat(db,sid,m.group('name'),steam,m.group('address'))
+                    add_game_event(db,sid,'connect',(m.group('name'),steam),map_name=map_name,meta={'address':m.group('address')[:64]})
+                except Exception as exc: print(f'connect stats {sid}: {exc}',file=sys.stderr)
+            continue
+        m=DISCONNECT_RE.search(line)
+        if m:
+            if player_key(m.group('name'),m.group('steam')):
+                try: add_game_event(db,sid,'disconnect',(m.group('name'),m.group('steam')),map_name=map_name)
+                except Exception: pass
+            continue
+        m=KILL_RE.search(line)
+        if not m: continue
+        killer=(m.group('killer'),m.group('ksteam')); victim=(m.group('victim'),m.group('vsteam')); weapon=m.group('weapon'); tail=m.group('tail') or ''
+        kk=player_key(*killer); vk=player_key(*victim); headshot='headshot' in tail.lower()
+        # Do not let training bots inflate human rankings. Human-vs-human kills are ranked.
+        if kk and vk:
+            try:
+                ensure_player_stat(db,sid,*killer); ensure_player_stat(db,sid,*victim)
+                suicide=(kk==vk)
+                with db.cursor() as cur:
+                    if suicide:
+                        cur.execute('UPDATE player_stats SET deaths=deaths+1,suicides=suicides+1,last_seen=NOW() WHERE server_id=%s AND player_key=%s',(sid,kk))
+                    else:
+                        cur.execute('UPDATE player_stats SET kills=kills+1,headshots=headshots+%s,last_seen=NOW() WHERE server_id=%s AND player_key=%s',(1 if headshot else 0,sid,kk))
+                        cur.execute('UPDATE player_stats SET deaths=deaths+1,last_seen=NOW() WHERE server_id=%s AND player_key=%s',(sid,vk))
+                add_game_event(db,sid,'kill',killer,victim,weapon,headshot,map_name,{'suicide':suicide})
+            except Exception as exc: print(f'kill stats {sid}: {exc}',file=sys.stderr)
+
+
 def one(db,row,settings,store_stats=False,store_players=False):
     sid=int(row['id']); old_status=str(row.get('status_cache') or 'unknown'); recovered=False; c=scfg(sid); svc=service(sid); p=actual_hlds_pid(sid); cpu,mem,uptime=proc_metrics(p)
     # Keep the last good query values. A single dropped A2S packet must never turn a
@@ -278,6 +415,11 @@ def one(db,row,settings,store_stats=False,store_players=False):
         if store_players:
             for pl in plist:
                 cur.execute("INSERT INTO player_history(server_id,name,steam_id,score,connected_seconds,address,first_seen,last_seen,visits) VALUES(%s,%s,%s,%s,%s,%s,NOW(),NOW(),1) ON DUPLICATE KEY UPDATE score=VALUES(score),connected_seconds=VALUES(connected_seconds),address=VALUES(address),visits=visits+IF(last_seen < NOW() - INTERVAL 2 MINUTE,1,0),last_seen=NOW()",(sid,str(pl.get('name',''))[:128],str(pl.get('steam_id',''))[:64],int(pl.get('score',0)),int(float(pl.get('duration',0))),str(pl.get('address',''))[:64]))
+    if store_players:
+        for pl in plist:
+            try: snapshot_player_stat(db,sid,pl)
+            except Exception as exc: print(f'player snapshot {sid}: {exc}',file=sys.stderr)
+    collect_game_logs(db,sid,map_name)
     if old_status=='online' and status in {'failed','offline'}:
         queue_event(db,settings,'server_down',f'Сервер #{sid} перестал отвечать ({status})',sid,'danger',{'old':old_status,'new':status},5)
     elif status=='online' and old_status in {'failed','offline','starting','installing','unreachable'}:
@@ -301,6 +443,7 @@ def main():
                 with db.cursor() as cur:
                     cur.execute("DELETE FROM server_stats WHERE recorded_at < NOW() - INTERVAL 90 DAY")
                     cur.execute("DELETE FROM player_history WHERE last_seen < NOW() - INTERVAL 180 DAY")
+                    cur.execute("DELETE FROM game_events WHERE created_at < NOW() - INTERVAL 90 DAY")
                     cur.execute("DELETE FROM audit_logs WHERE created_at < NOW() - INTERVAL 365 DAY")
                     cur.execute("DELETE FROM panel_events WHERE created_at < NOW() - INTERVAL 180 DAY")
             db.close()

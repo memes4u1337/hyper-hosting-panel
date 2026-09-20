@@ -28,6 +28,13 @@ try{
         json_out(['ok'=>true,'servers'=>$rows]);
     }
     $id=(int)($_GET['server_id']??0);
+    if($method==='GET' && in_array($action,['stats','ranking'],true)){
+        if($id<1)json_out(['ok'=>false,'error'=>'server_id required'],400);api_server($id,$u);api_require($u,'sql.view',$id);
+        if($action==='stats'){
+            $st=db()->prepare('SELECT s.id,s.name,s.hostname,s.status_cache,s.current_map,s.players_online,s.max_players,s.ping_ms,s.uptime_seconds,(SELECT MAX(players) FROM server_stats ss WHERE ss.server_id=s.id AND ss.recorded_at>=NOW()-INTERVAL 24 HOUR) peak_24h,(SELECT ROUND(AVG(players),1) FROM server_stats ss WHERE ss.server_id=s.id AND ss.recorded_at>=NOW()-INTERVAL 24 HOUR) avg_24h,(SELECT COUNT(*) FROM player_stats ps WHERE ps.server_id=s.id) players_known FROM servers s WHERE s.id=?');$st->execute([$id]);json_out(['ok'=>true,'stats'=>$st->fetch()]);
+        }
+        $st=db()->prepare('SELECT name,steam_id,kills,deaths,headshots,suicides,current_score,play_seconds,sessions,last_seen,GREATEST(0,kills*2+headshots-deaths+FLOOR(play_seconds/600)) rating,ROUND(kills/GREATEST(deaths,1),2) kd FROM player_stats WHERE server_id=? ORDER BY rating DESC,kills DESC,play_seconds DESC LIMIT 100');$st->execute([$id]);json_out(['ok'=>true,'server_id'=>$id,'ranking'=>$st->fetchAll()]);
+    }
     if($method==='GET' && in_array($action,['status','players'],true)){
         if($id<1)json_out(['ok'=>false,'error'=>'server_id required'],400);api_server($id,$u);
         api_require($u,$action==='players'?'server.players':'servers.view',$id);json_out(ctl([$action,$id],15));
