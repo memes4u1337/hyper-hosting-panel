@@ -51,3 +51,6 @@
 /* v2.8: readable controller/upload errors and real AMXX state */
 .panel-error-output{margin:0;max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:rgba(7,14,25,.78);border:1px solid rgba(255,90,100,.28);border-radius:12px;padding:14px;color:#ffd8dc;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .plugin-config-warning{margin-top:12px;padding:11px 13px;border-radius:10px;background:rgba(255,193,7,.08);border:1px solid rgba(255,193,7,.22);color:#c8b477;font-size:12px}
+
+/* v3.0.1-lite: real ZM detection, no bundled game/server files */
+.zm-mod-card{border-color:rgba(34,197,94,.22);background:linear-gradient(160deg,rgba(12,31,35,.98),rgba(10,23,39,.98))}.mod-facts{display:flex;flex-wrap:wrap;gap:8px}.mod-facts span{display:inline-flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid #29415a;border-radius:999px;background:#0a1726;color:#a9bdd3;font-size:12px}.mod-facts i{color:#77d89d}.worldarena-install{display:flex;flex-direction:column;gap:8px;padding:14px;border:1px solid rgba(79,125,255,.26);border-radius:12px;background:rgba(79,125,255,.055)}.worldarena-install small{color:var(--muted);line-height:1.5}.mod-ok{border-color:rgba(34,197,94,.22);background:rgba(34,197,94,.06)}

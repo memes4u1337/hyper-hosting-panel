@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, ftplib, ipaddress, json, os, pwd, re, secrets, shutil, signal, socket, stat, subprocess, sys, tarfile, tempfile, time, zipfile, urllib.request, urllib.parse
+import argparse, ftplib, hashlib, ipaddress, json, os, pwd, re, secrets, shutil, signal, socket, stat, subprocess, sys, tarfile, tempfile, time, zipfile, urllib.request, urllib.parse
 from pathlib import Path
 
 APP_ROOT=Path('/opt/hyper-cs16')
@@ -865,7 +865,16 @@ def _sanitize_plugin_file(path:Path, plugins_dir:Path):
         if not stripped or stripped.startswith(';'):
             out.append(original)
             continue
-        active_part=stripped.split(';',1)[0].strip()
+        if stripped.startswith('//'):
+            out.append('; '+stripped[2:].strip()); changed=True
+            continue
+        # AMXX plugin lists officially use ';' for comments. A lot of old public
+        # ZM packs use C++ style // comments after a plugin name; normalize those
+        # so AMXX never interprets the comment as a plugin option/token.
+        active_part=re.split(r'\s*(?:;|//)',stripped,maxsplit=1)[0].strip()
+        inline_comment=''
+        cm=re.search(r'\s*(?:;|//)\s*(.*)$',stripped)
+        if cm: inline_comment=cm.group(1).strip()
         token=active_part.split()[0] if active_part else ''
         pieces=_split_amxx_tokens(token)
         if len(pieces)<=1:
@@ -882,8 +891,9 @@ def _sanitize_plugin_file(path:Path, plugins_dir:Path):
                 missing.append(name); changed=True
                 out.append(f'; HYPER-HOST missing plugin disabled: {name}')
                 continue
-            out.append(name if stripped==token else original)
-            if original!=out[-1]: changed=True
+            normalized=name + ((' ; '+inline_comment) if inline_comment else '')
+            out.append(normalized)
+            if original!=normalized: changed=True
             continue
         changed=True; split.append(token)
         out.append(f'; HYPER-HOST repaired malformed entry: {token}')
@@ -1940,6 +1950,112 @@ def _detect_build_payload(root:Path):
     raise RuntimeError('Assembly layout is not recognized. Expected cstrike/ or CS content folders (addons/maps/models/sound/...)')
 
 
+def _overlay_cstrike_content(payload:Path, stage_cstrike:Path):
+    """Overlay a ready-made cstrike-content pack without replacing the known-good Linux runtime.
+
+    Old public packs often ship Metamod-R/dproto/Reunion or client/game DLLs built for a
+    different HLDS/ReHLDS generation.  Those are the usual reason a ZM pack works on an
+    old host but disappears/crashes after migration.  We keep the panel's tested
+    Metamod/AMXX/game runtime and import the pack's plugins/configs/maps/models/sounds.
+    """
+    stage_cstrike.mkdir(parents=True,exist_ok=True)
+    excludes=[
+        'liblist.gam','dlls/***','cl_dlls/***','logs/***','manual/***',
+        'addons/metamod/dlls/***','addons/metamod/plugins.ini',
+        'addons/amxmodx/dlls/***','addons/amxmodx/modules/***',
+        'addons/dproto/***','addons/reunion/***','addons/localizebugfix/***',
+    ]
+    cmd=['rsync','-a']
+    for x in excludes: cmd += ['--exclude',x]
+    cmd += [str(payload)+'/',str(stage_cstrike)+'/']
+    run(cmd,timeout=1800)
+
+
+def _preserve_server_identity_files(old_root:Path, new_root:Path):
+    """Never import somebody else's admins/bans from a downloaded pack over an existing server."""
+    for rel in [
+        'cstrike/addons/amxmodx/configs/users.ini',
+        'cstrike/banned.cfg','cstrike/listip.cfg',
+    ]:
+        src=old_root/rel
+        if src.is_file():
+            dst=new_root/rel; dst.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,dst)
+
+
+def _repair_zp_pack_assets(server_root:Path):
+    """Repair common Zombie Plague pack mistakes that make clients fail on map load."""
+    cstrike=server_root/'cstrike'; fixes=[]; warnings=[]
+    ini=cstrike/'addons/amxmodx/configs/zombieplague.ini'
+    if ini.is_file():
+        raw=ini.read_text(encoding='utf-8',errors='ignore')
+        m=re.search(r'(?im)^\s*SKY NAMES\s*=\s*([^\r\n;]+)',raw)
+        if m:
+            names=[x.strip() for x in m.group(1).split(',') if x.strip()]
+            def complete_sky(name:str):
+                return all((cstrike/'gfx/env'/f'{name}{suffix}.tga').is_file() for suffix in ['bk','dn','ft','lf','rt','up'])
+            if names and not any(complete_sky(x) for x in names):
+                candidates=[]
+                env=cstrike/'gfx/env'
+                if env.is_dir():
+                    for bk in env.glob('*bk.tga'):
+                        name=bk.name[:-6]
+                        if complete_sky(name): candidates.append(name)
+                if candidates:
+                    chosen=('doom1' if 'doom1' in candidates else sorted(candidates)[0])
+                    raw=re.sub(r'(?im)^\s*SKY NAMES\s*=\s*[^\r\n;]+',f'SKY NAMES = {chosen}',raw,count=1)
+                    ini.write_text(raw,encoding='utf-8'); fixes.append(f'custom sky -> {chosen}')
+                else:
+                    raw=re.sub(r'(?im)^\s*ENABLE\s*=\s*1\s*$', 'ENABLE = 0', raw, count=1)
+                    ini.write_text(raw,encoding='utf-8'); fixes.append('custom sky disabled (assets missing)')
+    cfg=cstrike/'server.cfg'
+    if cfg.is_file():
+        text=cfg.read_text(encoding='utf-8',errors='ignore')
+        # Foreign FastDL URLs often point at a dead/mismatched old host. Let GoldSrc use the game server itself.
+        if re.search(r'(?im)^\s*sv_downloadurl\s+"?https?://',text):
+            text=re.sub(r'(?im)^\s*sv_downloadurl\s+.*$', 'sv_downloadurl ""', text)
+            fixes.append('foreign FastDL disabled')
+        if re.search(r'(?im)^\s*sv_allowdownload\s+"?0"?',text):
+            text=re.sub(r'(?im)^\s*sv_allowdownload\s+.*$', 'sv_allowdownload "1"', text)
+            fixes.append('sv_allowdownload enabled')
+        cfg.write_text(text,encoding='utf-8')
+    return {'fixes':fixes,'warnings':warnings}
+
+
+def _detect_mod_profile_at(server_root:Path):
+    cstrike=server_root/'cstrike'; plugdir=cstrike/'addons/amxmodx/plugins'; cfgdir=cstrike/'addons/amxmodx/configs'
+    actual={p.name.lower():p.name for p in plugdir.glob('*.amxx')} if plugdir.is_dir() else {}
+    active=set(); sources={}
+    if cfgdir.is_dir():
+        files=[]
+        main=cfgdir/'plugins.ini'
+        if main.is_file(): files.append(main)
+        files += sorted([x for x in cfgdir.glob('plugins-*.ini') if x.is_file()],key=lambda x:x.name.lower())
+        for f in files:
+            for line in f.read_text(encoding='utf-8',errors='ignore').splitlines():
+                st=line.strip()
+                if not st or st.startswith(';'): continue
+                body=st.split(';',1)[0].strip()
+                token=body.split()[0] if body else ''
+                if token.lower().endswith('.amxx'):
+                    active.add(token.lower()); sources.setdefault(token.lower(),[]).append(f.name)
+    zp_cores=[]
+    for key,name in actual.items():
+        if re.fullmatch(r'zombie_plague(?:40|4[._-]?3)?\.amxx',key) or key in {'zp50_core.amxx','zp_core.amxx'}:
+            zp_cores.append(name)
+    zp_active=any(x.lower() in active for x in zp_cores)
+    world_sig=['zombie_plague40.amxx','zp_addon_knifes_oli.amxx','zp_vip_free.amxx','boss_menu_by_7up.amxx']
+    worldarena=all(x in actual for x in world_sig)
+    mod_name=''
+    if worldarena: mod_name='World-Arena ZM 4.3 + Knife + Free VIP'
+    elif zp_cores: mod_name='Zombie Plague 4.3'
+    return {
+        'zp_installed':bool(zp_cores),'zp_active':bool(zp_active),'zp_core_plugins':sorted(zp_cores),
+        'worldarena_installed':bool(worldarena),'detected_mod_name':mod_name,
+        'actual_plugin_count':len(actual),'active_plugin_count':len([x for x in active if x in actual]),
+        'active_sources':sources,
+    }
+
+
 def _patch_managed_cfg(path:Path,c:dict):
     cfg=path/'cstrike/server.cfg'
     if not cfg.exists(): write_server_cfg(path,c); return
@@ -1980,8 +2096,8 @@ def _download_build_url(url:str)->Path:
     kind=_detect_archive_type(tmp); final=tmp.with_suffix('.'+kind); os.replace(tmp,final); return final
 
 
-def install_custom_build(sid:int,archive:Path,source_label:str='upload'):
-    require_root(); c=load_server(sid); path=safe_server_path(sid)
+def install_custom_build(sid:int,archive:Path,source_label:str='upload',preferred_map_override:str=''):
+    require_root(); c=load_server(sid); original_state=dict(c); path=safe_server_path(sid)
     if Path(str(c.get('path') or path)).resolve()!=path: raise RuntimeError('Unsafe server path in state')
     archive=archive.resolve()
     if not archive.is_file(): raise RuntimeError('Assembly archive not found')
@@ -2001,24 +2117,40 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload'):
         if layout=='server-root':
             run(['rsync','-a',str(payload)+'/',str(stage)+'/'],timeout=1800)
         else:
-            run(['rsync','-a',str(payload)+'/',str(stage/'cstrike')+'/'],timeout=1800)
+            _overlay_cstrike_content(payload,stage/'cstrike')
+        if old_existed:
+            _preserve_server_identity_files(path,stage)
         if not (stage/'hlds_linux').is_file(): raise RuntimeError('Fresh HLDS engine is missing after assembly preparation')
         if not (stage/'cstrike').is_dir(): raise RuntimeError('cstrike directory is missing after assembly preparation')
         for exe in ['hlds_linux','hlds_run']:
             if (stage/exe).exists(): os.chmod(stage/exe,0o775)
+        stage_cfg={**c,'path':str(stage)}
+        plugin_repairs=_sanitize_all_plugin_lists(stage_cfg)
+        module_repairs=_sanitize_modules_ini(stage_cfg)
+        metamod_repairs=_sanitize_metamod_plugins(stage_cfg)
+        zp_repairs=_repair_zp_pack_assets(stage)
+        detected=_detect_mod_profile_at(stage)
         # Preserve panel identity/network settings while keeping every other setting from the uploaded pack.
-        maps=stage/'cstrike/maps'; preferred=str(c.get('start_map') or '')
+        maps=stage/'cstrike/maps'; preferred=str(preferred_map_override or c.get('start_map') or '')
         if not preferred or not (maps/(preferred+'.bsp')).is_file():
             choices=sorted(p.stem for p in maps.glob('*.bsp') if SAFE_MAP.fullmatch(p.stem)) if maps.is_dir() else []
-            if 'de_dust2' in choices: preferred='de_dust2'
+            if detected.get('zp_active'):
+                zm=[x for x in choices if x.lower().startswith('zm_')]
+                if zm: preferred=zm[0]
+                elif 'de_dust2' in choices: preferred='de_dust2'
+                elif choices: preferred=choices[0]
+                else: raise RuntimeError('Assembly has no playable .bsp maps')
+            elif 'de_dust2' in choices: preferred='de_dust2'
             elif choices: preferred=choices[0]
             else: raise RuntimeError('Assembly has no playable .bsp maps')
-            c['start_map']=preferred; db_update_start_map(sid,preferred)
+        c['start_map']=preferred; db_update_start_map(sid,preferred)
+        c['game_mode']='zp43' if detected.get('zp_active') else 'classic'
         _patch_managed_cfg(stage,c); normalize_permissions(stage)
         run(['systemctl','stop',f'hyper-cs16@{sid}.service'],check=False,timeout=90)
         if old_existed: os.replace(path,backup)
         os.replace(stage,path); swapped=True
         c['path']=str(path); c['custom_build_source']=source_label; c['custom_build_installed_at']=int(time.time()); save_server(c)
+        db_update_mode(sid,str(c.get('game_mode','classic')),int(c.get('bots_enabled',0)),int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
         run(['systemctl','daemon-reload'],check=False)
         run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False,timeout=60)
         ok,detail=wait_server_ready(c,50.0)
@@ -2044,13 +2176,23 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload'):
             extra=(' Recovery: '+rerr[-2500:]) if rerr else ''
             raise RuntimeError(f'Uploaded assembly did not start: {detail}.{extra} {journal[-6000:]}')
         _prune_build_backups(backup_root,sid,3)
-        result={'ok':True,'id':sid,'archive_type':kind,'layout':layout,'start_map':c['start_map'],'backup':str(backup) if old_existed else '', 'source':source_label,'query':detail}
+        detected=_detect_mod_profile_at(path)
+        result={'ok':True,'id':sid,'archive_type':kind,'layout':layout,'start_map':c['start_map'],'backup':str(backup) if old_existed else '', 'source':source_label,'query':detail,
+                'game_mode':c.get('game_mode','classic'),'detected_mod':detected.get('detected_mod_name',''),'worldarena_installed':bool(detected.get('worldarena_installed')),
+                'plugin_repairs':plugin_repairs,'module_repairs':module_repairs,'metamod_repairs':metamod_repairs,'zp_repairs':zp_repairs}
         if recovery:
             result['auto_recovery']=recovery
             if recovery.get('warning'): result['warning']=recovery.get('warning')
         return result
     except Exception as exc:
-        # Transactional rollback: a bad pack must never destroy a working server.
+        # Transactional rollback: a bad pack must never destroy a working server or
+        # leave its SQL/state pointing at the attempted map/mode.
+        try:
+            save_server(original_state)
+            db_update_start_map(sid,str(original_state.get('start_map') or 'de_dust2'))
+            db_update_mode(sid,str(original_state.get('game_mode') or 'classic'),int(original_state.get('bots_enabled',0)),int(original_state.get('bots_quota',9)),int(original_state.get('bots_difficulty',3)))
+        except Exception:
+            pass
         try: run(['systemctl','stop',f'hyper-cs16@{sid}.service'],check=False,timeout=60)
         except Exception: pass
         if swapped:
@@ -2225,13 +2367,23 @@ def set_game_mode(sid:int,mode:str):
 
 def mods_status(sid:int):
     c=load_server(sid); path=Path(c['path']); cstrike=path/'cstrike'
-    zp_file=cstrike/'addons/amxmodx/plugins/zombie_plague40.amxx'
-    zp_cfg=cstrike/'addons/amxmodx/configs/plugins-zplague.ini'
-    bots_file=cstrike/'addons/yapb/bin/yapb.so'
-    zp_installed=zp_file.is_file(); bots_installed=bots_file.is_file()
-    actual_mode='zp43' if zp_installed and zp_cfg.is_file() else 'classic'
+    bots_file=cstrike/'addons/yapb/bin/yapb.so'; bots_installed=bots_file.is_file()
+    detected=_detect_mod_profile_at(path)
+    actual_mode='zp43' if detected.get('zp_active') else 'classic'
+    # Keep state/SQL in sync with what is physically loaded. This makes imported
+    # ready-made ZM packs appear immediately without requiring a second install.
+    if str(c.get('game_mode') or 'classic')!=actual_mode:
+        c['game_mode']=actual_mode; save_server(c)
+        try: db_update_mode(sid,actual_mode,int(c.get('bots_enabled',0)),int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
+        except Exception: pass
     return {'ok':True,'game_mode':actual_mode,
-            'zp43_installed':zp_installed,
+            'zp43_installed':bool(detected.get('zp_installed')),
+            'zp43_active':bool(detected.get('zp_active')),
+            'zp_core_plugins':detected.get('zp_core_plugins',[]),
+            'worldarena_installed':bool(detected.get('worldarena_installed')),
+            'detected_mod_name':detected.get('detected_mod_name',''),
+            'actual_plugin_count':int(detected.get('actual_plugin_count',0)),
+            'active_plugin_count':int(detected.get('active_plugin_count',0)),
             'bots_installed':bots_installed,
             'bots_enabled':bool(bots_installed and c.get('bots_enabled',0)), 'bots_quota':int(c.get('bots_quota',9)), 'bots_difficulty':int(c.get('bots_difficulty',3)),
             'installed_amxx':plugins_list(sid).get('installed',[])}
