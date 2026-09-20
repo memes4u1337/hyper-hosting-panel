@@ -168,6 +168,19 @@ def db_update_ftp(sid:int,user:str,password:str):
         pass
 
 
+def db_update_identity(sid:int, hostname:str):
+    """Keep the panel row in sync with a hostname adopted from an uploaded build."""
+    try:
+        con=db_connect()
+        try:
+            with con.cursor() as cur:
+                cur.execute('UPDATE servers SET hostname=%s WHERE id=%s',(hostname,sid))
+        finally:
+            con.close()
+    except Exception:
+        pass
+
+
 def db_update_start_map(sid:int,map_name:str):
     try:
         con=db_connect()
@@ -1071,19 +1084,29 @@ def repair_amxx_content(sid:int, aggressive:bool=False):
     if mm.get('changed'): actions.append('cleaned Metamod plugins.ini')
     log=_recent_failure_log(sid,180)
     broken,assets=_parse_plugin_failures(log)
+    protected=set()
+    if str(c.get('game_mode') or 'classic')=='zp43':
+        protected={'zombie_plague40.amxx','zp50_core.amxx','zp_core.amxx'}
     q=[]
     if broken:
-        q+=_quarantine_plugins(c,broken,'plugin load error')
+        safe_broken=[x for x in broken if x.lower() not in protected]
+        blocked=[x for x in broken if x.lower() in protected]
+        if safe_broken: q+=_quarantine_plugins(c,safe_broken,'plugin load error')
+        if blocked: actions.append('protected mod core has load error: '+', '.join(blocked))
     for asset in assets:
         refs=_find_plugins_referencing_asset(c,asset)
-        if refs:
-            q+=_quarantine_plugins(c,refs,f'missing asset {asset}')
-            actions.append(f'missing resource {asset}: quarantined '+', '.join(refs))
-        else:
+        safe_refs=[x for x in refs if x.lower() not in protected]
+        blocked=[x for x in refs if x.lower() in protected]
+        if safe_refs:
+            q+=_quarantine_plugins(c,safe_refs,f'missing asset {asset}')
+            actions.append(f'missing resource {asset}: quarantined '+', '.join(safe_refs))
+        if blocked:
+            actions.append(f'missing resource {asset}: required by protected mod core '+', '.join(blocked))
+        if not refs:
             actions.append(f'missing resource detected: {asset}')
     q=list(dict.fromkeys(q))
     if q: actions.append('quarantined broken plugins: '+', '.join(q))
-    if aggressive and (assets or broken) and not q:
+    if aggressive and (assets or broken) and not q and not protected:
         safe=_safe_mode_custom_plugins(c,'unresolved startup crash')
         if safe:
             q+=safe; actions.append('safe mode quarantined custom plugins: '+', '.join(safe))
@@ -1131,6 +1154,7 @@ def _disable_zp_for_recovery(c:dict):
 def recover_server(sid:int, automatic:bool=False):
     """Bring a broken server back online and quarantine only content that crashes GoldSrc."""
     require_root(); c=load_server(sid); path=Path(c['path']); actions=[]
+    preserve_mod=str(c.get('game_mode') or 'classic')=='zp43'
     if not path.is_dir(): raise RuntimeError(f'Server directory missing: {path}')
     backup=_recovery_backup(sid,c)
     pre=repair_amxx_content(sid,False)
@@ -1173,7 +1197,7 @@ def recover_server(sid:int, automatic:bool=False):
         if ok:
             return {'ok':True,'id':sid,'recovered':True,'automatic':automatic,'actions':actions,'backup':str(backup),'service':'active','udp_listening':True,'detail':detail,'warning':'YaPB was disabled because it prevented HLDS from starting'}
 
-    if _disable_zp_for_recovery(c):
+    if not preserve_mod and _disable_zp_for_recovery(c):
         actions.append('temporarily disabled Zombie Plague after startup crash')
         if (path/'cstrike/maps/de_dust2.bsp').is_file(): c['start_map']='de_dust2'; actions.append('safe map -> de_dust2')
         _set_cfg_cvar(path/'cstrike/server.cfg','sv_lan','0'); save_server(c); db_update_start_map(sid,str(c['start_map'])); normalize_permissions(path)
@@ -1196,7 +1220,7 @@ def recover_server(sid:int, automatic:bool=False):
                     'warning':'Broken custom AMXX content was quarantined so the game server could start.',
                     'quarantined':targeted.get('quarantined',[]),'missing_assets':targeted.get('missing_assets',[])}
 
-    safe=_safe_mode_custom_plugins(c,'HLDS fatal startup crash')
+    safe=[] if preserve_mod else _safe_mode_custom_plugins(c,'HLDS fatal startup crash')
     if safe:
         actions.append('last-resort AMXX safe mode: '+', '.join(safe))
         if (path/'cstrike/maps/de_dust2.bsp').is_file(): c['start_map']='de_dust2'
@@ -1722,8 +1746,21 @@ def server_config_set(args):
         c['hostname']=args.hostname
     if args.password is not None: c['server_password']=args.password[:64]
     if args.rcon is not None and args.rcon!='': c['rcon_password']=args.rcon[:96]
-    write_server_cfg(Path(c['path']),c); save_server(c); normalize_permissions(Path(c['path']))
-    return {'ok':True,'server':{k:c.get(k) for k in ['id','hostname','slots','start_map','server_password']}}
+    root=Path(c['path']); cfg=root/'cstrike/server.cfg'
+    if not cfg.exists():
+        write_server_cfg(root,c)
+    else:
+        # Never destroy a ready-made build's server.cfg just because the user
+        # changed hostname/port/slots/map in the panel. Patch only managed values.
+        _set_cfg_cvar(cfg,'hostname','"'+_clean_cfg_value(str(c.get('hostname') or ''),160)+'"')
+        _set_cfg_cvar(cfg,'sv_password','"'+_clean_cfg_value(str(c.get('server_password') or ''),64)+'"')
+        if args.rcon is not None and args.rcon!='':
+            _set_cfg_cvar(cfg,'rcon_password','"'+_clean_cfg_value(str(c.get('rcon_password') or ''),96)+'"')
+        elif not _cfg_has_directive(cfg,'rcon_password'):
+            _set_cfg_cvar(cfg,'rcon_password','"'+_clean_cfg_value(str(c.get('rcon_password') or ''),96)+'"')
+        _set_cfg_cvar(cfg,'sv_lan','0')
+    save_server(c); db_update_identity(args.id,str(c.get('hostname') or '')); db_update_start_map(args.id,str(c.get('start_map') or 'de_dust2')); normalize_permissions(root)
+    return {'ok':True,'server':{k:c.get(k) for k in ['id','hostname','slots','start_map','server_password']},'config_preserved':True}
 
 
 
@@ -1756,15 +1793,42 @@ def logs(sid:int,lines:int=160):
 
 
 def server_update(sid:int):
+    """Update Steam/engine files without wiping a custom build or its AMXX config."""
     require_root(); c=load_server(sid); path=Path(c['path']); rt=load_runtime(); steam=rt.get('steamcmd','/opt/steamcmd/steamcmd.sh')
+    keep=STATE_ROOT/'update-backups'/f'{sid}-{int(time.time())}-{secrets.token_hex(4)}'
+    keep.mkdir(parents=True,exist_ok=True)
+    preserve=['cstrike/server.cfg','cstrike/liblist.gam','cstrike/addons']
+    for rel in preserve:
+        src=path/rel
+        if src.exists():
+            dst=keep/rel; dst.parent.mkdir(parents=True,exist_ok=True)
+            if src.is_dir(): shutil.copytree(src,dst,dirs_exist_ok=True)
+            else: shutil.copy2(src,dst)
     run(['systemctl','stop',f'hyper-cs16@{sid}.service'],check=False)
     cmd=[steam,'+force_install_dir',str(path),'+login','anonymous','+app_set_config','90','mod','cstrike','+app_update','90','-beta','steam_legacy','validate','+quit']
     result=run_as_cs16(cmd,check=False,timeout=1800)
-    install_metamod_amxx(path)
+    if result.returncode!=0:
+        run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False)
+        raise RuntimeError((result.stdout or '')[-5000:])
     if c.get('profile')=='rehlds': install_rehlds(path)
-    write_server_cfg(path,c); normalize_permissions(path); run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False)
-    if result.returncode!=0: raise RuntimeError((result.stdout or '')[-4000:])
-    return {'ok':True,'output':(result.stdout or '')[-4000:]}
+    # Restore the exact custom mod/config tree after Steam validation. Steam update
+    # is an engine update, not permission to replace the user's build.
+    for rel in preserve:
+        src=keep/rel; dst=path/rel
+        if not src.exists(): continue
+        if src.is_dir():
+            if dst.exists(): shutil.rmtree(dst)
+            shutil.copytree(src,dst)
+        else:
+            dst.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,dst)
+    ensure_steam_runtime(Path(steam)); normalize_permissions(path)
+    ok,detail=_restart_strict(sid,c,45.0)
+    if not ok:
+        journal=_recent_failure_log(sid,160)
+        raise RuntimeError(f'Steam update finished, but the preserved build did not restart: {detail}. {journal[-6000:]}')
+    try: shutil.rmtree(keep)
+    except OSError: pass
+    return {'ok':True,'output':(result.stdout or '')[-4000:],'custom_build_preserved':True,'query':detail}
 
 
 def server_reinstall(sid:int):
@@ -1951,12 +2015,11 @@ def _detect_build_payload(root:Path):
 
 
 def _overlay_cstrike_content(payload:Path, stage_cstrike:Path):
-    """Overlay a ready-made cstrike-content pack without replacing the known-good Linux runtime.
+    """Overlay gameplay content while preserving the known-good HLDS/AMXX core.
 
-    Old public packs often ship Metamod-R/dproto/Reunion or client/game DLLs built for a
-    different HLDS/ReHLDS generation.  Those are the usual reason a ZM pack works on an
-    old host but disappears/crashes after migration.  We keep the panel's tested
-    Metamod/AMXX/game runtime and import the pack's plugins/configs/maps/models/sounds.
+    Custom AMXX modules and safe third-party Metamod plugins are merged when the
+    archive actually contains them. Stock AMXX binaries from old packs never
+    overwrite the panel runtime.
     """
     stage_cstrike.mkdir(parents=True,exist_ok=True)
     excludes=[
@@ -1969,6 +2032,41 @@ def _overlay_cstrike_content(payload:Path, stage_cstrike:Path):
     for x in excludes: cmd += ['--exclude',x]
     cmd += [str(payload)+'/',str(stage_cstrike)+'/']
     run(cmd,timeout=1800)
+
+    # Keep current stock AMXX modules, but allow a build to bring extra modules
+    # such as reapi/custom module .so files that its plugins genuinely require.
+    srcmods=payload/'addons/amxmodx/modules'; dstmods=stage_cstrike/'addons/amxmodx/modules'
+    stock={
+        'cstrike_amxx_i386.so','csx_amxx_i386.so','engine_amxx_i386.so','fakemeta_amxx_i386.so',
+        'fun_amxx_i386.so','geoip_amxx_i386.so','hamsandwich_amxx_i386.so','json_amxx_i386.so',
+        'mysql_amxx_i386.so','nvault_amxx_i386.so','regex_amxx_i386.so','sockets_amxx_i386.so','sqlite_amxx_i386.so'
+    }
+    if srcmods.is_dir():
+        dstmods.mkdir(parents=True,exist_ok=True)
+        for mod in srcmods.glob('*.so'):
+            if mod.name.lower() in stock: continue
+            if re.fullmatch(r'[A-Za-z0-9_.-]{1,128}\.so',mod.name): shutil.copy2(mod,dstmods/mod.name)
+
+    # Merge only third-party Metamod lines whose referenced Linux .so exists in
+    # the imported tree. Old auth wrappers/core loaders stay disabled.
+    srcmeta=payload/'addons/metamod/plugins.ini'; dstmeta=stage_cstrike/'addons/metamod/plugins.ini'
+    if srcmeta.is_file() and dstmeta.is_file():
+        deny=('amxmodx','dproto','reunion','localizebugfix','metamod')
+        lines=dstmeta.read_text(encoding='utf-8',errors='ignore').splitlines()
+        known={re.sub(r'\s+',' ',x.strip().lower()) for x in lines if x.strip() and not x.lstrip().startswith(';')}
+        for raw in srcmeta.read_text(encoding='utf-8',errors='ignore').splitlines():
+            st=raw.strip()
+            if not st or st.startswith(';'): continue
+            low=st.lower()
+            if any(x in low for x in deny): continue
+            m=re.search(r'(?i)\blinux(?:32)?\s+([^\s]+\.so)\b',st)
+            if not m: continue
+            rel=m.group(1).replace('\\','/').lstrip('/')
+            if '..' in Path(rel).parts or not (stage_cstrike/rel).is_file(): continue
+            key=re.sub(r'\s+',' ',low)
+            if key not in known:
+                lines.append(st); known.add(key)
+        dstmeta.write_text('\n'.join(lines).rstrip()+'\n',encoding='utf-8')
 
 
 def _preserve_server_identity_files(old_root:Path, new_root:Path):
@@ -1983,7 +2081,7 @@ def _preserve_server_identity_files(old_root:Path, new_root:Path):
 
 
 def _repair_zp_pack_assets(server_root:Path):
-    """Repair common Zombie Plague pack mistakes that make clients fail on map load."""
+    """Audit a ZM pack without silently rewriting its gameplay configuration."""
     cstrike=server_root/'cstrike'; fixes=[]; warnings=[]
     ini=cstrike/'addons/amxmodx/configs/zombieplague.ini'
     if ini.is_file():
@@ -1993,31 +2091,22 @@ def _repair_zp_pack_assets(server_root:Path):
             names=[x.strip() for x in m.group(1).split(',') if x.strip()]
             def complete_sky(name:str):
                 return all((cstrike/'gfx/env'/f'{name}{suffix}.tga').is_file() for suffix in ['bk','dn','ft','lf','rt','up'])
-            if names and not any(complete_sky(x) for x in names):
-                candidates=[]
-                env=cstrike/'gfx/env'
+            missing=[x for x in names if not complete_sky(x)]
+            if missing:
+                available=[]; env=cstrike/'gfx/env'
                 if env.is_dir():
                     for bk in env.glob('*bk.tga'):
                         name=bk.name[:-6]
-                        if complete_sky(name): candidates.append(name)
-                if candidates:
-                    chosen=('doom1' if 'doom1' in candidates else sorted(candidates)[0])
-                    raw=re.sub(r'(?im)^\s*SKY NAMES\s*=\s*[^\r\n;]+',f'SKY NAMES = {chosen}',raw,count=1)
-                    ini.write_text(raw,encoding='utf-8'); fixes.append(f'custom sky -> {chosen}')
-                else:
-                    raw=re.sub(r'(?im)^\s*ENABLE\s*=\s*1\s*$', 'ENABLE = 0', raw, count=1)
-                    ini.write_text(raw,encoding='utf-8'); fixes.append('custom sky disabled (assets missing)')
+                        if complete_sky(name): available.append(name)
+                warnings.append('Missing sky assets for: '+', '.join(missing)+(('. Available complete skies: '+', '.join(sorted(set(available))[:20])) if available else ''))
     cfg=cstrike/'server.cfg'
     if cfg.is_file():
         text=cfg.read_text(encoding='utf-8',errors='ignore')
-        # Foreign FastDL URLs often point at a dead/mismatched old host. Let GoldSrc use the game server itself.
-        if re.search(r'(?im)^\s*sv_downloadurl\s+"?https?://',text):
-            text=re.sub(r'(?im)^\s*sv_downloadurl\s+.*$', 'sv_downloadurl ""', text)
-            fixes.append('foreign FastDL disabled')
+        m=re.search(r'(?im)^\s*sv_downloadurl\s+(.+)$',text)
+        if m and re.search(r'https?://',m.group(1),re.I):
+            warnings.append('Build contains external FastDL: '+m.group(1).strip()[:300])
         if re.search(r'(?im)^\s*sv_allowdownload\s+"?0"?',text):
-            text=re.sub(r'(?im)^\s*sv_allowdownload\s+.*$', 'sv_allowdownload "1"', text)
-            fixes.append('sv_allowdownload enabled')
-        cfg.write_text(text,encoding='utf-8')
+            warnings.append('Build has sv_allowdownload 0; clients may not receive custom resources')
     return {'fixes':fixes,'warnings':warnings}
 
 
@@ -2056,23 +2145,92 @@ def _detect_mod_profile_at(server_root:Path):
     }
 
 
-def _patch_managed_cfg(path:Path,c:dict):
+def _cfg_has_directive(path:Path,key:str)->bool:
+    try:
+        text=path.read_text(encoding='utf-8',errors='ignore')
+        return re.search(r'(?im)^\s*'+re.escape(key)+r'\s+',text) is not None
+    except Exception:
+        return False
+
+
+def _clean_cfg_value(v:str,limit:int=160)->str:
+    return re.sub(r'[\x00-\x1f\x7f]+',' ',str(v)).replace('"','').strip()[:limit]
+
+
+def _adopt_imported_cfg(path:Path,c:dict):
+    """Treat an uploaded build's server.cfg as authoritative.
+
+    Previous versions intentionally re-wrote hostname/password/settings from the old
+    panel state after import. That made a successful ZIP/RAR install look as if
+    nothing changed. v3.0.2 adopts the uploaded hostname/config and touches only the
+    minimum directives needed by the hosting panel: sv_lan=0 and a usable RCON key.
+    """
     cfg=path/'cstrike/server.cfg'
-    if not cfg.exists(): write_server_cfg(path,c); return
-    def clean(v): return str(v).replace('"','').replace('\n',' ').replace('\r',' ')
-    text=cfg.read_text(encoding='utf-8',errors='ignore')
-    managed={
-        'hostname':f'hostname "{clean(c.get("hostname","HYPER-HOST CS 1.6"))}"',
-        'rcon_password':f'rcon_password "{clean(c.get("rcon_password",""))}"',
-        'sv_password':f'sv_password "{clean(c.get("server_password",""))}"',
-        'sv_lan':'sv_lan 0',
-        'sv_region':'sv_region 255',
+    if not cfg.exists():
+        write_server_cfg(path,c)
+        return {'created_server_cfg':True,'hostname':str(c.get('hostname','')),'rcon_preserved':True,'server_password':''}
+
+    old_rcon=str(c.get('rcon_password') or '')
+    imported_hostname=_clean_cfg_value(_read_cfg_value(cfg,'hostname',''),160)
+    imported_rcon=_clean_cfg_value(_read_cfg_value(cfg,'rcon_password',''),96)
+    imported_password=_clean_cfg_value(_read_cfg_value(cfg,'sv_password',''),96) if _cfg_has_directive(cfg,'sv_password') else ''
+
+    if imported_hostname:
+        c['hostname']=imported_hostname
+    if imported_rcon:
+        c['rcon_password']=imported_rcon
+    else:
+        # Panel RCON is required for status/map/admin operations. If the build does
+        # not provide one, preserve the existing secret without touching other cfgs.
+        c['rcon_password']=old_rcon or secrets.token_urlsafe(18)
+        _set_cfg_cvar(cfg,'rcon_password','"'+_clean_cfg_value(c['rcon_password'],96)+'"')
+    c['server_password']=imported_password
+
+    # Keep every gameplay cvar from the build. Only force Internet/LAN visibility.
+    _set_cfg_cvar(cfg,'sv_lan','0')
+    (path/'cstrike/banned.cfg').touch(exist_ok=True)
+    (path/'cstrike/listip.cfg').touch(exist_ok=True)
+    return {
+        'created_server_cfg':False,
+        'hostname':str(c.get('hostname','')),
+        'hostname_adopted':bool(imported_hostname),
+        'rcon_adopted':bool(imported_rcon),
+        'rcon_preserved':not bool(imported_rcon),
+        'server_password_adopted':_cfg_has_directive(cfg,'sv_password'),
     }
-    for key in managed:
-        text=re.sub(r'(?im)^\s*'+re.escape(key)+r'\s+.*(?:\n|$)','',text)
-    text=text.rstrip()+"\n\n// HYPER-HOST managed identity/network\n"+'\n'.join(managed.values())+'\n'
-    cfg.write_text(text,encoding='utf-8')
-    (path/'cstrike/banned.cfg').touch(exist_ok=True); (path/'cstrike/listip.cfg').touch(exist_ok=True)
+
+
+def _runtime_mod_report(c:dict, expect_zp:bool=False):
+    """Verify that AMXX actually loaded the imported mode, not merely that files exist."""
+    report={'ok':True,'zp_runtime':False,'plugin_errors':[],'amxx_plugins':''}
+    try:
+        raw=query_rcon('127.0.0.1',int(c['port']),str(c.get('rcon_password','')),'amxx plugins',3.5)
+        report['amxx_plugins']=raw[-12000:]
+        for line in raw.splitlines():
+            low=line.lower()
+            if 'bad load' in low or re.search(r'\berror\b',low) or 'load fails' in low:
+                report['plugin_errors'].append(line.strip())
+    except Exception as exc:
+        report['ok']=False; report['amxx_error']=str(exc)
+    if expect_zp:
+        try:
+            zp=query_rcon('127.0.0.1',int(c['port']),str(c.get('rcon_password','')),'zp_on',2.5)
+            low=zp.lower()
+            report['zp_query']=zp[-2000:]
+            report['zp_runtime']=('zp_on' in low and 'unknown command' not in low and 'not found' not in low)
+        except Exception as exc:
+            report['zp_query_error']=str(exc)
+            report['zp_runtime']=False
+    return report
+
+
+def _restart_strict(sid:int,c:dict,timeout:float=35.0):
+    """Restart without the generic recovery engine silently disabling the requested mod."""
+    run(['systemctl','reset-failed',f'hyper-cs16@{sid}.service'],check=False)
+    cp=run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False,timeout=90)
+    if cp.returncode!=0:
+        return False,(cp.stdout or '').strip() or 'systemd restart failed'
+    return wait_server_ready(c,timeout)
 
 
 def _prune_build_backups(backup_root:Path,sid:int,keep:int=3):
@@ -2115,7 +2273,11 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload',preferre
         kind=_extract_build_archive(archive,extract_root)
         payload,layout=_detect_build_payload(extract_root)
         if layout=='server-root':
-            run(['rsync','-a',str(payload)+'/',str(stage)+'/'],timeout=1800)
+            # Never replace the panel's known-good Linux HLDS runtime with an old
+            # engine from somebody's ready-made archive. Import its cstrike tree
+            # exactly like a cstrike-only pack; gameplay files/configs are kept.
+            _overlay_cstrike_content(payload/'cstrike',stage/'cstrike')
+            layout='server-root/runtime-preserved'
         else:
             _overlay_cstrike_content(payload,stage/'cstrike')
         if old_existed:
@@ -2130,7 +2292,10 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload',preferre
         metamod_repairs=_sanitize_metamod_plugins(stage_cfg)
         zp_repairs=_repair_zp_pack_assets(stage)
         detected=_detect_mod_profile_at(stage)
-        # Preserve panel identity/network settings while keeping every other setting from the uploaded pack.
+        # The uploaded build is authoritative for gameplay/server.cfg. Only the
+        # launch port/slots stay panel-managed because systemd passes them on the
+        # command line. Adopt hostname/RCON/password from the build where present.
+        imported_cfg=_adopt_imported_cfg(stage,c)
         maps=stage/'cstrike/maps'; preferred=str(preferred_map_override or c.get('start_map') or '')
         if not preferred or not (maps/(preferred+'.bsp')).is_file():
             choices=sorted(p.stem for p in maps.glob('*.bsp') if SAFE_MAP.fullmatch(p.stem)) if maps.is_dir() else []
@@ -2145,50 +2310,54 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload',preferre
             else: raise RuntimeError('Assembly has no playable .bsp maps')
         c['start_map']=preferred; db_update_start_map(sid,preferred)
         c['game_mode']='zp43' if detected.get('zp_active') else 'classic'
-        _patch_managed_cfg(stage,c); normalize_permissions(stage)
+        normalize_permissions(stage)
         run(['systemctl','stop',f'hyper-cs16@{sid}.service'],check=False,timeout=90)
         if old_existed: os.replace(path,backup)
         os.replace(stage,path); swapped=True
         c['path']=str(path); c['custom_build_source']=source_label; c['custom_build_installed_at']=int(time.time()); save_server(c)
+        db_update_identity(sid,str(c.get('hostname') or ''))
         db_update_mode(sid,str(c.get('game_mode','classic')),int(c.get('bots_enabled',0)),int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
         run(['systemctl','daemon-reload'],check=False)
         run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False,timeout=60)
         ok,detail=wait_server_ready(c,50.0)
-        recovery=None
         if not ok:
-            # Ready-made packs frequently contain an invalid startup map, stale
-            # Metamod-R config or one broken AMXX plugin/resource. Give the normal
-            # recovery engine one chance to quarantine only the offending content
-            # before rolling the whole upload back.
-            try:
-                recovery=recover_server(sid,True)
-                ok=bool(recovery.get('ok'))
-                if ok:
-                    detail=str(recovery.get('detail') or detail)
-                    # recover_server may choose a known-good startup map/mode. Reload
-                    # the canonical state so the response/UI reports what is running.
-                    c=load_server(sid)
-            except Exception as recovery_exc:
-                recovery={'ok':False,'error':str(recovery_exc)}
-        if not ok:
-            journal=_recent_failure_log(sid,160)
-            rerr=str((recovery or {}).get('error') or '')
-            extra=(' Recovery: '+rerr[-2500:]) if rerr else ''
-            raise RuntimeError(f'Uploaded assembly did not start: {detail}.{extra} {journal[-6000:]}')
-        _prune_build_backups(backup_root,sid,3)
+            # Do NOT call recover_server() here: that routine is allowed to rename
+            # plugins-zplague.ini and leave a ZM upload running as classic. An
+            # imported build is either running as uploaded, or we rollback it.
+            journal=_recent_failure_log(sid,180)
+            broken,assets=_parse_plugin_failures(journal)
+            hint=''
+            if broken: hint+=' Broken AMXX: '+', '.join(dict.fromkeys(broken))[:1400]+'.'
+            if assets: hint+=' Missing resources: '+', '.join(dict.fromkeys(assets))[:1400]+'.'
+            raise RuntimeError(f'Uploaded assembly did not start as uploaded: {detail}.{hint} {journal[-7000:]}')
+
         detected=_detect_mod_profile_at(path)
+        runtime_report=_runtime_mod_report(c,bool(detected.get('zp_active')))
+        if detected.get('zp_active') and not runtime_report.get('zp_runtime'):
+            journal=_recent_failure_log(sid,180)
+            plugout=str(runtime_report.get('amxx_plugins') or '')[-6000:]
+            zpout=str(runtime_report.get('zp_query') or runtime_report.get('zp_query_error') or '')[-1500:]
+            raise RuntimeError('Zombie Plague files were installed but the mode did not load at runtime. '
+                               +'zp_on check: '+zpout+' AMXX: '+plugout+' LOG: '+journal[-6000:])
+
+        _prune_build_backups(backup_root,sid,3)
+        warnings=[]
+        for w in (zp_repairs.get('warnings') or []):
+            warnings.append(str(w))
+        if runtime_report.get('plugin_errors'):
+            warnings.append('AMXX reports plugin errors: '+' | '.join(runtime_report['plugin_errors'][:12]))
         result={'ok':True,'id':sid,'archive_type':kind,'layout':layout,'start_map':c['start_map'],'backup':str(backup) if old_existed else '', 'source':source_label,'query':detail,
-                'game_mode':c.get('game_mode','classic'),'detected_mod':detected.get('detected_mod_name',''),'worldarena_installed':bool(detected.get('worldarena_installed')),
-                'plugin_repairs':plugin_repairs,'module_repairs':module_repairs,'metamod_repairs':metamod_repairs,'zp_repairs':zp_repairs}
-        if recovery:
-            result['auto_recovery']=recovery
-            if recovery.get('warning'): result['warning']=recovery.get('warning')
+                'hostname':c.get('hostname',''),'game_mode':c.get('game_mode','classic'),'detected_mod':detected.get('detected_mod_name',''),'worldarena_installed':bool(detected.get('worldarena_installed')),
+                'plugin_repairs':plugin_repairs,'module_repairs':module_repairs,'metamod_repairs':metamod_repairs,'zp_repairs':zp_repairs,
+                'imported_config':imported_cfg,'runtime_mod':runtime_report}
+        if warnings: result['warning']=' '.join(warnings)
         return result
     except Exception as exc:
         # Transactional rollback: a bad pack must never destroy a working server or
         # leave its SQL/state pointing at the attempted map/mode.
         try:
             save_server(original_state)
+            db_update_identity(sid,str(original_state.get('hostname') or ''))
             db_update_start_map(sid,str(original_state.get('start_map') or 'de_dust2'))
             db_update_mode(sid,str(original_state.get('game_mode') or 'classic'),int(original_state.get('bots_enabled',0)),int(original_state.get('bots_quota',9)),int(original_state.get('bots_difficulty',3)))
         except Exception:
@@ -2330,39 +2499,71 @@ def install_zp43(sid:int):
             chosen=next((r for r in roots if r.exists() and ((r/'addons').exists() or (r/'models').exists() or (r/'sound').exists() or (r/'sprites').exists())),None)
             if chosen is None: raise RuntimeError(f'Zombie Plague archive layout is not recognized: {name}')
             _copy_tree_contents(chosen,cstrike)
-    # ZP 4.3 can be toggled by zp_on/zp_toggle; keep the plugin set enabled.
     zplist=cstrike/'addons/amxmodx/configs/plugins-zplague.ini'
     if not zplist.exists():
         main=cstrike/'addons/amxmodx/plugins/zombie_plague40.amxx'
         if main.exists(): zplist.write_text('zombie_plague40.amxx\nzp_zclasses40.amxx\n',encoding='utf-8')
-    if zplist.exists():
-        # AMXX automatically loads plugins-*.ini. Make sure the file is not disabled/renamed.
-        pass
     c['game_mode']='zp43'; save_server(c); db_update_mode(sid,'zp43',int(c.get('bots_enabled',0)),int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
     _sanitize_all_plugin_lists(c); _sanitize_modules_ini(c); _sanitize_metamod_plugins(c)
-    normalize_permissions(path); restart=service_action(sid,'restart')
-    current=load_server(sid)
-    return {'ok':True,'mode':str(current.get('game_mode','classic')),'backup':str(backup),'restart':restart,'warning':restart.get('warning','')}
+    normalize_permissions(path)
+    ok,detail=_restart_strict(sid,c,45.0)
+    if not ok:
+        journal=_recent_failure_log(sid,180)
+        raise RuntimeError(f'Zombie Plague was installed but HLDS did not start: {detail}. {journal[-7000:]}')
+    runtime=_runtime_mod_report(c,True)
+    if not runtime.get('zp_runtime'):
+        journal=_recent_failure_log(sid,180)
+        raise RuntimeError('Zombie Plague files are present, but zp_on is not available after restart. AMXX: '
+                           +str(runtime.get('amxx_plugins') or '')[-6000:]+' LOG: '+journal[-5000:])
+    warning=''
+    if runtime.get('plugin_errors'): warning='AMXX plugin errors: '+' | '.join(runtime['plugin_errors'][:12])
+    return {'ok':True,'mode':'zp43','backup':str(backup),'restart':{'ok':True,'detail':detail},'runtime_mod':runtime,'warning':warning}
 
 
 def set_game_mode(sid:int,mode:str):
     require_root(); c=load_server(sid); path=Path(c['path']); cstrike=path/'cstrike'
     if mode not in {'classic','zp43'}: raise RuntimeError('Unsupported game mode')
+    zplist=cstrike/'addons/amxmodx/configs/plugins-zplague.ini'
+    disabled=cstrike/'addons/amxmodx/configs/disabled-zplague.ini'
+    old_mode=str(c.get('game_mode') or 'classic')
+    had_zplist=zplist.exists(); had_disabled=disabled.exists()
+
     if mode=='zp43':
-        zplist=cstrike/'addons/amxmodx/configs/plugins-zplague.ini'
-        disabled=cstrike/'addons/amxmodx/configs/disabled-zplague.ini'
         if not zplist.exists() and disabled.exists(): disabled.rename(zplist)
-        if not zplist.exists() and not (cstrike/'addons/amxmodx/plugins/zombie_plague40.amxx').exists(): return install_zp43(sid)
+        if not zplist.exists() and not (cstrike/'addons/amxmodx/plugins/zombie_plague40.amxx').exists():
+            return install_zp43(sid)
     else:
-        zplist=cstrike/'addons/amxmodx/configs/plugins-zplague.ini'
-        disabled=cstrike/'addons/amxmodx/configs/disabled-zplague.ini'
         if zplist.exists():
             if disabled.exists(): disabled.unlink()
             zplist.rename(disabled)
+
     c['game_mode']=mode; save_server(c); db_update_mode(sid,mode,int(c.get('bots_enabled',0)),int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
-    restart=service_action(sid,'restart')
-    current=load_server(sid)
-    return {'ok':True,'mode':str(current.get('game_mode',mode)),'restart':restart,'warning':restart.get('warning','')}
+    normalize_permissions(path)
+    ok,detail=_restart_strict(sid,c,40.0)
+    runtime=_runtime_mod_report(c,mode=='zp43') if ok else {'zp_runtime':False,'plugin_errors':[]}
+    valid=ok and (mode!='zp43' or runtime.get('zp_runtime'))
+    if not valid:
+        # Restore the exact on/off state instead of letting generic recovery silently
+        # turn the requested ZM mode off and report success.
+        try:
+            if had_zplist:
+                if disabled.exists() and not zplist.exists(): disabled.rename(zplist)
+            else:
+                if zplist.exists():
+                    if disabled.exists(): disabled.unlink()
+                    zplist.rename(disabled)
+            if had_disabled and not disabled.exists() and not had_zplist and zplist.exists(): zplist.rename(disabled)
+        except Exception:
+            pass
+        c['game_mode']=old_mode; save_server(c); db_update_mode(sid,old_mode,int(c.get('bots_enabled',0)),int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
+        _restart_strict(sid,c,30.0)
+        journal=_recent_failure_log(sid,180)
+        amxx=str(runtime.get('amxx_plugins') or '')[-5000:]
+        zpq=str(runtime.get('zp_query') or runtime.get('zp_query_error') or '')[-1200:]
+        raise RuntimeError(f'Requested mode {mode} did not start and was reverted to {old_mode}. startup={detail}; zp={zpq}; AMXX={amxx}; LOG={journal[-6000:]}')
+    warning=''
+    if runtime.get('plugin_errors'): warning='AMXX plugin errors: '+' | '.join(runtime['plugin_errors'][:12])
+    return {'ok':True,'mode':mode,'restart':{'ok':True,'detail':detail},'runtime_mod':runtime,'warning':warning}
 
 
 def mods_status(sid:int):
@@ -2376,14 +2577,23 @@ def mods_status(sid:int):
         c['game_mode']=actual_mode; save_server(c)
         try: db_update_mode(sid,actual_mode,int(c.get('bots_enabled',0)),int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
         except Exception: pass
+    runtime={'zp_runtime':False,'plugin_errors':[]}
+    try:
+        if service_status(sid)=='active' and udp_listening(int(c['port'])):
+            runtime=_runtime_mod_report(c,actual_mode=='zp43')
+    except Exception as exc:
+        runtime={'zp_runtime':False,'plugin_errors':[],'error':str(exc)}
     return {'ok':True,'game_mode':actual_mode,
             'zp43_installed':bool(detected.get('zp_installed')),
             'zp43_active':bool(detected.get('zp_active')),
+            'zp_runtime':bool(runtime.get('zp_runtime')) if actual_mode=='zp43' else False,
             'zp_core_plugins':detected.get('zp_core_plugins',[]),
             'worldarena_installed':bool(detected.get('worldarena_installed')),
             'detected_mod_name':detected.get('detected_mod_name',''),
             'actual_plugin_count':int(detected.get('actual_plugin_count',0)),
             'active_plugin_count':int(detected.get('active_plugin_count',0)),
+            'runtime_plugin_errors':runtime.get('plugin_errors',[]),
+            'runtime_mod':runtime,
             'bots_installed':bots_installed,
             'bots_enabled':bool(bots_installed and c.get('bots_enabled',0)), 'bots_quota':int(c.get('bots_quota',9)), 'bots_difficulty':int(c.get('bots_difficulty',3)),
             'installed_amxx':plugins_list(sid).get('installed',[])}
