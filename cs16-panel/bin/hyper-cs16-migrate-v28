@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import json
+from pathlib import Path
+
+RUNTIME=Path('/etc/hyper-cs16/runtime.json')
+
+def main():
+    if not RUNTIME.is_file():
+        print('[v2.8 migrate] runtime.json not found; skip')
+        return 0
+    rt=json.loads(RUNTIME.read_text(encoding='utf-8'))
+    import pymysql
+    con=pymysql.connect(host=rt.get('db_host','127.0.0.1'),port=int(rt.get('db_port',3306)),user=rt['db_user'],password=rt['db_password'],database=rt['db_name'],charset='utf8mb4',autocommit=True)
+    with con.cursor() as c:
+        c.execute("INSERT INTO settings(setting_key,setting_value) VALUES('panel_version','2.8.0') ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)")
+    con.close()
+    print('[v2.8 migrate] OK - staging self-heal + filesystem AMXX inventory')
+    return 0
+
+if __name__=='__main__':
+    raise SystemExit(main())

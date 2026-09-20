@@ -78,19 +78,55 @@ function ctl(array $args,int $timeout=120,?string $stdin=null): array {
     while(true){ $status=proc_get_status($p); $out.=stream_get_contents($pipes[1]); $err.=stream_get_contents($pipes[2]); if(!$status['running']) break; if(microtime(true)-$start>$timeout){ proc_terminate($p,15); usleep(300000); proc_terminate($p,9); $err.="\nTimeout"; break; } usleep(50000); }
     $out.=stream_get_contents($pipes[1]);$err.=stream_get_contents($pipes[2]); fclose($pipes[1]);fclose($pipes[2]); $code=proc_close($p);
     $text=trim($out); $data=json_decode($text,true);
-    if(is_array($data)){ if($code!==0 && !isset($data['ok']))$data['ok']=false; return $data; }
-    return ['ok'=>$code===0,'output'=>$text,'error'=>trim($err)?:($code===0?'':'Control command failed'),'code'=>$code];
+    if(is_array($data)){ if($code!==0 && !isset($data['ok']))$data['ok']=false; if(trim($err)!==''&&!isset($data['stderr']))$data['stderr']=trim($err); $data['code']=$code; return $data; }
+    return ['ok'=>$code===0,'output'=>$text,'stderr'=>trim($err),'error'=>trim($err)?:($code===0?'':'Control command failed'),'code'=>$code];
+}
+function ctl_error(array $r,string $fallback='Операция не выполнена'): string {
+    $parts=[]; foreach(['error','detail','warning','stderr','output'] as $k){$v=trim((string)($r[$k]??''));if($v!==''&&!in_array($v,$parts,true))$parts[]=$v;}
+    if(!$parts)$parts[]=$fallback;
+    return implode("\n\n",$parts);
+}
+function upload_error_text(int $code): string {
+    return match($code){
+        UPLOAD_ERR_INI_SIZE=>'Файл больше upload_max_filesize на сервере',
+        UPLOAD_ERR_FORM_SIZE=>'Файл больше допустимого размера формы',
+        UPLOAD_ERR_PARTIAL=>'Файл загрузился только частично',
+        UPLOAD_ERR_NO_FILE=>'Файл не выбран',
+        UPLOAD_ERR_NO_TMP_DIR=>'PHP: отсутствует временная папка загрузок',
+        UPLOAD_ERR_CANT_WRITE=>'PHP не смог записать временный файл на диск',
+        UPLOAD_ERR_EXTENSION=>'PHP-расширение остановило загрузку файла',
+        default=>'Неизвестная ошибка загрузки PHP (код '.$code.')',
+    };
+}
+function ensure_upload_staging(): array {
+    $dir='/var/lib/hyper-cs16/uploads';
+    clearstatcache(true,$dir);
+    if(is_dir($dir)&&is_writable($dir)) return ['ok'=>true,'path'=>$dir];
+    $r=ctl(['staging-prepare'],30);
+    clearstatcache(true,$dir);
+    if(empty($r['ok'])||!is_dir($dir)||!is_writable($dir)){
+        $diag='path='.$dir.' exists='.(is_dir($dir)?'yes':'no').' writable='.(is_writable($dir)?'yes':'no');
+        throw new RuntimeException("Upload staging не готов. Панель попыталась исправить его автоматически.\n".ctl_error($r,'staging-prepare failed')."\n".$diag);
+    }
+    return $r;
 }
 function stage_upload(array $file,string $prefix,string $extension,int $maxBytes): array {
-    if(empty($file['tmp_name'])||!is_uploaded_file((string)$file['tmp_name'])) throw new RuntimeException('Файл не выбран');
-    if((int)($file['error']??UPLOAD_ERR_OK)!==UPLOAD_ERR_OK) throw new RuntimeException('Ошибка загрузки файла');
-    $size=(int)($file['size']??0); if($size<1||$size>$maxBytes) throw new RuntimeException('Недопустимый размер файла');
+    $err=(int)($file['error']??UPLOAD_ERR_NO_FILE);
+    if($err!==UPLOAD_ERR_OK) throw new RuntimeException(upload_error_text($err));
+    if(empty($file['tmp_name'])||!is_uploaded_file((string)$file['tmp_name'])) throw new RuntimeException('PHP не распознал файл как HTTP upload');
+    $size=(int)($file['size']??0); if($size<1||$size>$maxBytes) throw new RuntimeException('Недопустимый размер файла: '.$size.' байт');
     $original=basename((string)($file['name']??'')); $ext=strtolower(pathinfo($original,PATHINFO_EXTENSION));
-    if($ext!==ltrim(strtolower($extension),'.')) throw new RuntimeException('Недопустимое расширение файла');
-    $dir='/var/lib/hyper-cs16/uploads'; if(!is_dir($dir)) throw new RuntimeException('Upload staging не настроен. Повтори install-cs16-panel.sh');
+    if($ext!==ltrim(strtolower($extension),'.')) throw new RuntimeException('Недопустимое расширение файла: .'.$ext);
+    $staging=ensure_upload_staging(); $dir=(string)($staging['path']??'/var/lib/hyper-cs16/uploads');
+    $free=@disk_free_space($dir); if(is_float($free)||is_int($free)){ if($free>0 && $free<$size+64*1024*1024) throw new RuntimeException('Недостаточно свободного места для upload staging: нужно '.number_format($size/1048576,1).' МБ'); }
     $token=$prefix.'-'.bin2hex(random_bytes(16)).$extension; $dst=$dir.'/'.$token;
-    if(!move_uploaded_file((string)$file['tmp_name'],$dst)) throw new RuntimeException('Не удалось поместить файл в staging');
-    @chmod($dst,0640); return [$token,$original];
+    if(!move_uploaded_file((string)$file['tmp_name'],$dst)){
+        $last=error_get_last(); $extra=is_array($last)?trim((string)($last['message']??'')):'';
+        throw new RuntimeException('Не удалось переместить загруженный файл в '.$dst.($extra!==''?"\nPHP: ".$extra:''));
+    }
+    @chmod($dst,0640); clearstatcache(true,$dst);
+    if(!is_file($dst)||(int)@filesize($dst)!==$size){ @unlink($dst); throw new RuntimeException('Файл в staging не прошёл проверку размера после загрузки'); }
+    return [$token,$original];
 }
 function all_servers(): array {
     $u=current_user(); if(!$u)return []; if(in_array((string)$u['role'],['owner','admin'],true))return db()->query('SELECT * FROM servers ORDER BY id DESC')->fetchAll();

@@ -232,8 +232,17 @@
   $('#quickMapSelector')?.addEventListener('change',()=>{const state=$('#mapChangeState');if(state){state.className='';state.textContent='Нажми «Запустить»';}});
 
   async function loadPlugins(){
-    const box=$('#pluginList');if(!box)return;box.textContent='Загрузка...';
-    try{const j=await api('plugins');const files=j.files||[], enabled=new Set(j.enabled||[]);box.innerHTML=files.map(p=>`<div class="plugin-row"><div><i class="fa-solid fa-puzzle-piece"></i><b>${esc(p)}</b><small>${enabled.has(p)?'Включён':'Выключен'}</small></div><label class="switch"><input type="checkbox" data-plugin="${esc(p)}" ${enabled.has(p)?'checked':''}><span></span></label></div>`).join('')||'<div class="text-secondary">.amxx файлы не найдены</div>';$$('[data-plugin]',box).forEach(ch=>ch.onchange=async()=>{try{await api('plugin-toggle',{plugin:ch.dataset.plugin,state:ch.checked?'on':'off'},'POST');toast(ch.checked?'Плагин включён':'Плагин выключен')}catch(e){ch.checked=!ch.checked;toast(e.message,true)}})}catch(e){box.innerHTML=`<span class="text-danger">${esc(e.message)}</span>`}
+    const box=$('#pluginList');if(!box)return;box.textContent='Загрузка реально установленных AMXX...';
+    try{
+      const j=await api('plugins');
+      const installed=Array.isArray(j.installed)?j.installed:(j.files||[]).map(name=>({name,enabled:(j.enabled||[]).includes(name),size:0,stock:false}));
+      const kb=n=>n?`${Math.max(1,Math.round(Number(n)/1024))} КБ`:'';
+      box.innerHTML=installed.map(p=>`<div class="plugin-row"><div><i class="fa-solid fa-puzzle-piece"></i><b>${esc(p.name)}</b><small>${p.enabled?'Включён':'Выключен'}${p.stock?' · стандартный AMXX':''}${p.size?` · ${kb(p.size)}`:''}</small></div><label class="switch"><input type="checkbox" data-plugin="${esc(p.name)}" ${p.enabled?'checked':''}><span></span></label></div>`).join('')||'<div class="text-secondary">На этом сервере нет .amxx файлов.</div>';
+      if(Array.isArray(j.missing_config_entries)&&j.missing_config_entries.length){
+        box.insertAdjacentHTML('beforeend',`<div class="plugin-config-warning"><i class="fa-solid fa-circle-info"></i> В plugins.ini есть ${j.missing_config_entries.length} старых записей на отсутствующие файлы. Они не считаются установленными и в список не добавлены.</div>`);
+      }
+      $$('[data-plugin]',box).forEach(ch=>ch.onchange=async()=>{try{await api('plugin-toggle',{plugin:ch.dataset.plugin,state:ch.checked?'on':'off'},'POST');toast(ch.checked?'Плагин включён':'Плагин выключен')}catch(e){ch.checked=!ch.checked;toast(e.message,true)}});
+    }catch(e){box.innerHTML=`<pre class="panel-error-output">${esc(e.message)}</pre>`}
   }
 
   async function loadConfig(){const sel=$('#configSelect'),ed=$('#configEditor');if(!sel||!ed)return;ed.value='Загрузка...';try{const j=await fetch(`/api.php?view=config&server_id=${sid}&name=${encodeURIComponent(sel.value)}`,{credentials:'same-origin'}).then(r=>r.json());if(j.ok===false)throw new Error(j.error);ed.value=j.content||'';}catch(e){ed.value=`// ERROR: ${e.message}`}}

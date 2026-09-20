@@ -62,9 +62,22 @@ def legacy_cfg_path(sid:int)->Path: return LEGACY_SERVER_CFG_DIR/f'{sid}.json'
 def deleted_marker(sid:int)->Path: return DELETED_DIR/f'{sid}.deleted'
 
 def ensure_state_permissions():
-    """Keep mutable runtime state readable by the unprivileged cs16 service."""
+    """Keep mutable state private, while allowing PHP to traverse to upload staging.
+
+    STATE_ROOT used to be 0750 root:cs16.  That blocks www-data before it can
+    even stat STATE_ROOT/uploads, so PHP reported "Upload staging not configured"
+    even when the child directory existed.  Keep only traverse permission for
+    other users on the state root (0751), and keep the actual private subdirs
+    locked to root:cs16.
+    """
     require_root()
-    for d in (STATE_ROOT, SERVER_CFG_DIR, DELETED_DIR):
+    STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.chown(STATE_ROOT, user='root', group='cs16')
+        os.chmod(STATE_ROOT, 0o751)
+    except Exception as exc:
+        raise RuntimeError(f'Cannot fix state root permissions for {STATE_ROOT}: {exc}')
+    for d in (SERVER_CFG_DIR, DELETED_DIR):
         d.mkdir(parents=True, exist_ok=True)
         try:
             shutil.chown(d, user='root', group='cs16')
@@ -84,6 +97,30 @@ def ensure_state_permissions():
         os.chmod(STAGING_DIR,0o770)
     except Exception as exc:
         raise RuntimeError(f'Cannot fix upload staging permissions for {STAGING_DIR}: {exc}')
+
+
+def staging_prepare():
+    """Create/repair the web upload staging area and verify it as www-data."""
+    require_root(); ensure_state_permissions()
+    # Remove abandoned staging uploads after one day. Never follow symlinks.
+    now=time.time(); removed=0
+    for fp in STAGING_DIR.iterdir():
+        try:
+            st=os.lstat(fp)
+            if stat.S_ISREG(st.st_mode) and now-st.st_mtime>86400:
+                fp.unlink(); removed+=1
+        except OSError:
+            pass
+    test=run(['runuser','-u','www-data','--','test','-w',str(STAGING_DIR)],check=False,timeout=10)
+    if test.returncode!=0:
+        raise RuntimeError(f'Upload staging exists but www-data cannot write to {STAGING_DIR}. state_root_mode={oct(os.stat(STATE_ROOT).st_mode & 0o777)} staging_mode={oct(os.stat(STAGING_DIR).st_mode & 0o777)}')
+    try:
+        usage=shutil.disk_usage(STAGING_DIR)
+        free=int(usage.free)
+    except Exception:
+        free=0
+    st=os.stat(STAGING_DIR)
+    return {'ok':True,'path':str(STAGING_DIR),'mode':oct(st.st_mode & 0o777),'uid':st.st_uid,'gid':st.st_gid,'www_data_writable':True,'free_bytes':free,'stale_removed':removed}
 
 
 def db_connect():
@@ -1374,35 +1411,95 @@ def activate_map(sid:int,map_name:str):
     raise RuntimeError(f'Map {map_name} could not be started safely. Server was automatically restored on {rollback}. Reason: {detail}; recovery actions: {", ".join(recovery.get("actions",[])) or "safe restart"}')
 
 def plugins_list(sid:int):
-    c=load_server(sid); root=Path(c['path'])/'cstrike/addons/amxmodx'; pin=root/'configs/plugins.ini'; plugdir=root/'plugins'
-    enabled=[]; disabled=[]; raw=[]
-    text=pin.read_text(encoding='utf-8',errors='ignore') if pin.exists() else ''
-    for line in text.splitlines():
-        stripped=line.strip();
-        if not stripped: continue
-        active=not stripped.startswith(';')
-        token=stripped.lstrip(';').strip().split(';',1)[0].strip().split()[0] if stripped.lstrip(';').strip() else ''
-        if token.endswith('.amxx'):
-            (enabled if active else disabled).append(token)
-        raw.append(line)
-    files=sorted([p.name for p in plugdir.glob('*.amxx')]) if plugdir.is_dir() else []
-    return {'ok':True,'enabled':enabled,'disabled':disabled,'files':files,'plugins_ini':raw}
+    """Return only AMXX plugin files that physically exist on this server.
+
+    AMXX can load plugins.ini plus plugins-*.ini, so enabled state is derived from
+    all active plugin lists that are actually present. Historical config entries
+    pointing to deleted files are diagnostics only and never rendered as installed.
+    """
+    c=load_server(sid); root=Path(c['path'])/'cstrike/addons/amxmodx'; cfgdir=root/'configs'; plugdir=root/'plugins'
+    configured_enabled=[]; configured_disabled=[]; raw=[]; source_by_name={}
+    cfg_files=[]
+    main=cfgdir/'plugins.ini'
+    if main.is_file(): cfg_files.append(main)
+    if cfgdir.is_dir():
+        cfg_files.extend(sorted([x for x in cfgdir.glob('plugins-*.ini') if x.is_file()],key=lambda x:x.name.lower()))
+    seen_cfg=set()
+    for pin in cfg_files:
+        rp=str(pin.resolve())
+        if rp in seen_cfg: continue
+        seen_cfg.add(rp)
+        text=pin.read_text(encoding='utf-8',errors='ignore')
+        for line in text.splitlines():
+            stripped=line.strip()
+            if not stripped: continue
+            active=not stripped.startswith(';')
+            body=stripped.lstrip(';').strip()
+            token=body.split(';',1)[0].strip().split()[0] if body else ''
+            if token.lower().endswith('.amxx'):
+                (configured_enabled if active else configured_disabled).append(token)
+                if active: source_by_name.setdefault(token.lower(),[]).append(pin.name)
+            raw.append(f'[{pin.name}] {line}')
+    actual={}
+    if plugdir.is_dir():
+        for fp in sorted(plugdir.glob('*.amxx'),key=lambda x:x.name.lower()):
+            if not fp.is_file(): continue
+            try: st=fp.stat()
+            except OSError: continue
+            actual[fp.name.lower()]={'name':fp.name,'size':int(st.st_size),'mtime':int(st.st_mtime)}
+    enabled_keys={x.lower() for x in configured_enabled}
+    installed=[]; enabled=[]; disabled=[]
+    for key,item in actual.items():
+        is_enabled=key in enabled_keys
+        item={**item,'enabled':is_enabled,'stock':key in AMXX_STOCK_PLUGINS,'config_sources':source_by_name.get(key,[])}
+        installed.append(item)
+        (enabled if is_enabled else disabled).append(item['name'])
+    missing=[]; missing_seen=set()
+    for x in configured_enabled+configured_disabled:
+        k=x.lower()
+        if k not in actual and k not in missing_seen:
+            missing.append(x); missing_seen.add(k)
+    return {'ok':True,'enabled':enabled,'disabled':disabled,'files':[x['name'] for x in installed],
+            'installed':installed,'installed_count':len(installed),'missing_config_entries':missing,'plugin_config_files':[x.name for x in cfg_files],'plugins_ini':raw}
 
 
 def plugin_toggle(sid:int,name:str,enable:bool):
-    require_root();
+    require_root()
     if not SAFE_PLUGIN.fullmatch(name) or not name.endswith('.amxx'): raise RuntimeError('Invalid plugin name')
-    c=load_server(sid); pin=Path(c['path'])/'cstrike/addons/amxmodx/configs/plugins.ini'; pin.parent.mkdir(parents=True,exist_ok=True)
-    lines=pin.read_text(encoding='utf-8',errors='ignore').splitlines() if pin.exists() else []
-    found=False; out_lines=[]
-    for line in lines:
-        stripped=line.strip(); token=stripped.lstrip(';').strip().split(';',1)[0].strip().split()[0] if stripped.lstrip(';').strip() else ''
-        if token==name:
-            found=True; out_lines.append(name if enable else ';'+name)
-        else: out_lines.append(line)
-    if not found: out_lines.append(name if enable else ';'+name)
-    pin.write_text('\n'.join(out_lines).rstrip()+'\n',encoding='utf-8'); normalize_permissions(Path(c['path']))
-    return {'ok':True,'plugin':name,'enabled':enable}
+    c=load_server(sid); root=Path(c['path'])/'cstrike/addons/amxmodx'; plugfile=root/'plugins'/name
+    if not plugfile.is_file(): raise RuntimeError(f'AMXX plugin is not installed on this server: {name}')
+    cfgdir=root/'configs'; cfgdir.mkdir(parents=True,exist_ok=True)
+    cfg_files=[]; main=cfgdir/'plugins.ini'
+    if main.exists(): cfg_files.append(main)
+    cfg_files.extend(sorted([x for x in cfgdir.glob('plugins-*.ini') if x.is_file()],key=lambda x:x.name.lower()))
+    found_any=False; changed_files=[]
+    lname=name.lower()
+    for pin in cfg_files:
+        lines=pin.read_text(encoding='utf-8',errors='ignore').splitlines(); out_lines=[]; changed=False
+        for line in lines:
+            stripped=line.strip(); body=stripped.lstrip(';').strip()
+            token=body.split(';',1)[0].strip().split()[0] if body else ''
+            if token.lower()==lname:
+                found_any=True
+                desired=name if enable else ';'+name
+                # Keep trailing comment, if any, only when it is a real comment after the token.
+                tail=''
+                body_no_prefix=stripped.lstrip(';').strip()
+                if ';' in body_no_prefix:
+                    _,comment=body_no_prefix.split(';',1); tail=' ;'+comment.strip() if comment.strip() else ''
+                newline=desired+tail
+                if newline!=line.strip(): changed=True
+                out_lines.append(newline)
+            else:
+                out_lines.append(line)
+        if changed:
+            pin.write_text('\n'.join(out_lines).rstrip()+'\n',encoding='utf-8'); changed_files.append(pin.name)
+    if not found_any:
+        lines=main.read_text(encoding='utf-8',errors='ignore').splitlines() if main.exists() else []
+        lines.append(name if enable else ';'+name)
+        main.write_text('\n'.join(lines).rstrip()+'\n',encoding='utf-8'); changed_files.append(main.name)
+    normalize_permissions(Path(c['path']))
+    return {'ok':True,'plugin':name,'enabled':enable,'config_files':changed_files,'installed':True}
 
 
 ALLOWED_CONFIGS={
@@ -1652,28 +1749,33 @@ def server_update(sid:int):
 
 
 def server_reinstall(sid:int):
+    """True clean reinstall. Old custom mods/plugins stay only in backup.
+
+    Preserve AMXX administrators (users.ini) because they are panel access data,
+    but do not restore plugins.ini, .amxx files, YaPB or Zombie content. The UI
+    therefore immediately shows only plugins that really exist in the fresh tree.
+    """
     require_root(); c=load_server(sid); path=Path(c['path']); backup=APP_ROOT/'backups'/f'server-{sid}-{int(time.time())}'
     backup.parent.mkdir(parents=True,exist_ok=True); run(['systemctl','stop',f'hyper-cs16@{sid}.service'],check=False)
     if path.exists():
         backup.mkdir(parents=True,exist_ok=True)
-        for rel in ['cstrike/server.cfg','cstrike/addons/amxmodx/configs/users.ini','cstrike/addons/amxmodx/configs/plugins.ini','cstrike/addons/amxmodx/plugins']:
-            src=path/rel
-            if src.exists():
-                dst=backup/rel; dst.parent.mkdir(parents=True,exist_ok=True)
-                if src.is_dir(): shutil.copytree(src,dst,dirs_exist_ok=True)
-                else: shutil.copy2(src,dst)
+        # Keep a complete copy for manual rollback/troubleshooting.
+        run(['rsync','-a',str(path)+'/',str(backup)+'/'],timeout=1200)
         shutil.rmtree(path)
     base=Path(load_runtime().get('base_game_dir','/srv/hyper-cs16/base-hlds')); ensure_base('classic'); run(['rsync','-a',str(base)+'/',str(path)+'/'],timeout=600)
     if c.get('profile')=='rehlds': install_rehlds(path)
-    # Restore user AMXX admins/plugins after clean game files are recreated. server.cfg is regenerated from panel settings.
-    for rel in ['cstrike/addons/amxmodx/configs/users.ini','cstrike/addons/amxmodx/configs/plugins.ini','cstrike/addons/amxmodx/plugins']:
-        src=backup/rel
-        if src.exists():
-            dst=path/rel; dst.parent.mkdir(parents=True,exist_ok=True)
-            if src.is_dir(): shutil.copytree(src,dst,dirs_exist_ok=True)
-            else: shutil.copy2(src,dst)
+    # Preserve only AMXX admin identities, not old mods/plugins.
+    old_users=backup/'cstrike/addons/amxmodx/configs/users.ini'
+    if old_users.exists():
+        dst=path/'cstrike/addons/amxmodx/configs/users.ini'; dst.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(old_users,dst)
+    c['game_mode']='classic'; c['bots_enabled']=0; c.pop('custom_build_source',None); c.pop('custom_build_installed_at',None); save_server(c)
+    db_update_mode(sid,'classic',0,0,int(c.get('bots_difficulty',3)))
     write_server_cfg(path,c); normalize_permissions(path); run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False)
-    return {'ok':True,'backup':str(backup)}
+    ok,detail=wait_server_ready(c,45.0)
+    if not ok:
+        journal=_recent_failure_log(sid,120)
+        raise RuntimeError(f'Clean reinstall completed but HLDS did not become ready: {detail}. {journal[-5000:]}')
+    return {'ok':True,'backup':str(backup),'clean':True,'plugins':plugins_list(sid),'query':detail}
 
 
 def ftp_reset(sid:int):
@@ -1860,7 +1962,7 @@ def _download_build_url(url:str)->Path:
     if u.scheme not in {'http','https'} or not u.netloc: raise RuntimeError('Assembly URL must start with http:// or https://')
     ensure_state_permissions()
     tmp=STATE_ROOT/f'.build-download-{secrets.token_hex(16)}.bin'
-    cp=run(['curl','--proto','=http,https','-fL','--retry','3','--retry-delay','2','--connect-timeout','20','--max-redirs','8','-A','HYPER-HOST-CS16/2.7','-o',str(tmp),url],check=False,timeout=3600)
+    cp=run(['curl','--proto','=http,https','-fL','--retry','3','--retry-delay','2','--connect-timeout','20','--max-redirs','8','-A','HYPER-HOST-CS16/2.8','-o',str(tmp),url],check=False,timeout=3600)
     if cp.returncode!=0:
         try: tmp.unlink()
         except FileNotFoundError: pass
@@ -1948,6 +2050,9 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload'):
                 if backup.exists(): os.replace(backup,path)
                 normalize_permissions(path)
                 run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False,timeout=60)
+                raise RuntimeError(f'Assembly install failed, previous working server was restored automatically: {exc}')
+            except RuntimeError:
+                raise
             except Exception as rex:
                 raise RuntimeError(f'Assembly install failed: {exc}; rollback also failed: {rex}')
         raise
@@ -2111,10 +2216,16 @@ def set_game_mode(sid:int,mode:str):
 
 def mods_status(sid:int):
     c=load_server(sid); path=Path(c['path']); cstrike=path/'cstrike'
-    return {'ok':True,'game_mode':str(c.get('game_mode','zp43' if (cstrike/'addons/amxmodx/configs/plugins-zplague.ini').exists() else 'classic')),
-            'zp43_installed':(cstrike/'addons/amxmodx/plugins/zombie_plague40.amxx').exists(),
-            'bots_installed':(cstrike/'addons/yapb/bin/yapb.so').exists(),
-            'bots_enabled':bool(c.get('bots_enabled',0)), 'bots_quota':int(c.get('bots_quota',9)), 'bots_difficulty':int(c.get('bots_difficulty',3))}
+    zp_file=cstrike/'addons/amxmodx/plugins/zombie_plague40.amxx'
+    zp_cfg=cstrike/'addons/amxmodx/configs/plugins-zplague.ini'
+    bots_file=cstrike/'addons/yapb/bin/yapb.so'
+    zp_installed=zp_file.is_file(); bots_installed=bots_file.is_file()
+    actual_mode='zp43' if zp_installed and zp_cfg.is_file() else 'classic'
+    return {'ok':True,'game_mode':actual_mode,
+            'zp43_installed':zp_installed,
+            'bots_installed':bots_installed,
+            'bots_enabled':bool(bots_installed and c.get('bots_enabled',0)), 'bots_quota':int(c.get('bots_quota',9)), 'bots_difficulty':int(c.get('bots_difficulty',3)),
+            'installed_amxx':plugins_list(sid).get('installed',[])}
 
 
 def nat_upnp(sid:int):
@@ -2273,6 +2384,10 @@ def doctor():
                 state_ok=False; state_detail.append(f'cs16 cannot read {fp.name}')
     checks['state_dir']={'ok':state_ok,'path':str(SERVER_CFG_DIR),'detail':'; '.join(state_detail)}
     checks['ftp_restore_service']={'ok':run(['systemctl','is-enabled','hyper-cs16-ftp-restore.service'],check=False).returncode==0}
+    try:
+        stg=staging_prepare(); checks['upload_staging']={'ok':True,'path':stg['path'],'mode':stg['mode'],'www_data_writable':True,'free_bytes':stg['free_bytes']}
+    except Exception as exc:
+        checks['upload_staging']={'ok':False,'path':str(STAGING_DIR),'error':str(exc)}
     return {'ok':all(v.get('ok') for v in checks.values()),'checks':checks}
 
 
@@ -2308,6 +2423,7 @@ def main():
     q=sp.add_parser('zp43-install'); q.add_argument('id',type=int)
     q=sp.add_parser('mode-set'); q.add_argument('id',type=int); q.add_argument('mode',choices=['classic','zp43'])
     sp.add_parser('ftp-restore')
+    sp.add_parser('staging-prepare')
     sp.add_parser('doctor')
     args=p.parse_args()
     try:
@@ -2368,6 +2484,7 @@ def main():
         elif args.cmd=='repair-runtime': result=repair_server_runtime(args.id)
         elif args.cmd=='delete': result=server_delete(args.id)
         elif args.cmd=='ftp-restore': result=ftp_restore()
+        elif args.cmd=='staging-prepare': result=staging_prepare()
         elif args.cmd=='doctor': result=doctor()
         else: raise RuntimeError('Unknown command')
         out(result,0 if result.get('ok',True) else 1)
