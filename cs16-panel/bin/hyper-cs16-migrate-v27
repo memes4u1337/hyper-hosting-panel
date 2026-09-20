@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import json
+from pathlib import Path
+
+RUNTIME=Path('/etc/hyper-cs16/runtime.json')
+
+def main():
+    if not RUNTIME.is_file():
+        print('[v2.7 migrate] runtime.json not found; skip')
+        return 0
+    rt=json.loads(RUNTIME.read_text(encoding='utf-8'))
+    import pymysql
+    con=pymysql.connect(host=rt.get('db_host','127.0.0.1'),port=int(rt.get('db_port',3306)),user=rt['db_user'],password=rt['db_password'],database=rt['db_name'],charset='utf8mb4',autocommit=True,cursorclass=pymysql.cursors.DictCursor)
+    db=rt['db_name']
+    def col(table,name):
+        with con.cursor() as c:
+            c.execute('SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND COLUMN_NAME=%s LIMIT 1',(db,table,name)); return bool(c.fetchone())
+    def table(name):
+        with con.cursor() as c:
+            c.execute('SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s LIMIT 1',(db,name)); return bool(c.fetchone())
+    def exec(sql,args=None):
+        with con.cursor() as c: c.execute(sql,args or ())
+
+    if table('servers'):
+        for name,ddl in [
+            ('cpu_limit_percent','ALTER TABLE servers ADD COLUMN cpu_limit_percent DECIMAL(7,2) NOT NULL DEFAULT 0'),
+            ('memory_limit_mb','ALTER TABLE servers ADD COLUMN memory_limit_mb INT UNSIGNED NOT NULL DEFAULT 0'),
+            ('disk_limit_mb','ALTER TABLE servers ADD COLUMN disk_limit_mb INT UNSIGNED NOT NULL DEFAULT 0'),
+            ('ftp_limit_mb','ALTER TABLE servers ADD COLUMN ftp_limit_mb INT UNSIGNED NOT NULL DEFAULT 0'),
+            ('over_limit','ALTER TABLE servers ADD COLUMN over_limit TINYINT(1) NOT NULL DEFAULT 0'),
+            ('limit_message',"ALTER TABLE servers ADD COLUMN limit_message VARCHAR(255) NOT NULL DEFAULT ''"),
+        ]:
+            if not col('servers',name): exec(ddl)
+        # Keep legacy columns for compatibility, but make them explicitly unlimited.
+        for sql in [
+            'ALTER TABLE servers MODIFY cpu_limit_percent DECIMAL(7,2) NOT NULL DEFAULT 0',
+            'ALTER TABLE servers MODIFY memory_limit_mb INT UNSIGNED NOT NULL DEFAULT 0',
+            'ALTER TABLE servers MODIFY disk_limit_mb INT UNSIGNED NOT NULL DEFAULT 0',
+            'ALTER TABLE servers MODIFY ftp_limit_mb INT UNSIGNED NOT NULL DEFAULT 0',
+        ]:
+            try: exec(sql)
+            except Exception: pass
+        exec("UPDATE servers SET cpu_limit_percent=0,memory_limit_mb=0,disk_limit_mb=0,ftp_limit_mb=0,over_limit=0,limit_message=''")
+
+    if table('plans'):
+        for sql in [
+            'ALTER TABLE plans MODIFY max_servers INT UNSIGNED NOT NULL DEFAULT 0',
+            'ALTER TABLE plans MODIFY cpu_limit_percent DECIMAL(7,2) NOT NULL DEFAULT 0',
+            'ALTER TABLE plans MODIFY memory_limit_mb INT UNSIGNED NOT NULL DEFAULT 0',
+            'ALTER TABLE plans MODIFY disk_limit_mb INT UNSIGNED NOT NULL DEFAULT 0',
+            'ALTER TABLE plans MODIFY ftp_limit_mb INT UNSIGNED NOT NULL DEFAULT 0',
+        ]:
+            try: exec(sql)
+            except Exception: pass
+        exec('UPDATE plans SET max_servers=0,slots_limit=32,cpu_limit_percent=0,memory_limit_mb=0,disk_limit_mb=0,ftp_limit_mb=0')
+
+    exec("INSERT INTO settings(setting_key,setting_value) VALUES('panel_version','2.7.0') ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)")
+    con.close(); print('[v2.7 migrate] OK - resource limits disabled')
+    return 0
+
+if __name__=='__main__': raise SystemExit(main())

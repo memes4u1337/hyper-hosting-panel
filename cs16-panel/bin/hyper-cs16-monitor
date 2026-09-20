@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import json, subprocess, sys, time, re, socket, urllib.request, urllib.parse
+import json, subprocess, sys, time, re, socket, urllib.request, urllib.parse, shutil
 from pathlib import Path
 
 APP=Path('/opt/hyper-cs16'); ETC=Path('/etc/hyper-cs16'); STATE=Path('/var/lib/hyper-cs16')
@@ -144,6 +144,19 @@ def disk(path):
     try:return float(cp.stdout.split()[0])
     except:return 0.0
 
+def host_ram_total_mb():
+    try:
+        for line in Path('/proc/meminfo').read_text().splitlines():
+            if line.startswith('MemTotal:'): return float(line.split()[1])/1024.0
+    except Exception: pass
+    return 0.0
+
+def filesystem_used_percent(path):
+    try:
+        u=shutil.disk_usage(path)
+        return (float(u.used)/float(u.total)*100.0) if u.total else 0.0
+    except Exception:return 0.0
+
 def udp_listening(port):
     cp=subprocess.run(['ss','-lunH'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
     needle=f':{int(port)}'
@@ -243,15 +256,17 @@ def one(db,row,settings,store_stats=False,store_players=False):
         FAIL_COUNTS[sid]=0
 
     d=disk(c['path']) if c else 0.0
-    cpu_limit=float(row.get('cpu_limit_percent') or 0); mem_limit=float(row.get('memory_limit_mb') or 0); disk_limit=float(row.get('disk_limit_mb') or 0); ftp_limit=float(row.get('ftp_limit_mb') or 0)
+    # v2.7 has no per-server resource limits. These thresholds are notification
+    # thresholds only and never throttle/stop HLDS.
     warnings=[]
     alert_cpu=float(settings.get('resource_alert_cpu','90') or 90); alert_ram=float(settings.get('resource_alert_ram','90') or 90); alert_disk=float(settings.get('resource_alert_disk','90') or 90)
-    if cpu_limit>0 and cpu>=cpu_limit*(alert_cpu/100.0): warnings.append(f'CPU {cpu:.1f}% / {cpu_limit:.0f}%')
-    if mem_limit>0 and mem>=mem_limit*(alert_ram/100.0): warnings.append(f'RAM {mem:.0f} / {mem_limit:.0f} MB')
-    if disk_limit>0 and d>=disk_limit*(alert_disk/100.0): warnings.append(f'Диск {d:.0f} / {disk_limit:.0f} MB')
-    if ftp_limit>0 and d>=ftp_limit*(alert_disk/100.0): warnings.append(f'FTP/root {d:.0f} / {ftp_limit:.0f} MB')
-    over=1 if warnings else 0; limit_message=', '.join(warnings)[:255]
-    if warnings: queue_event(db,settings,'resource_high','Высокая нагрузка: '+limit_message,sid,'warning',{'cpu':cpu,'ram':mem,'disk':d},30)
+    total_ram=host_ram_total_mb(); ram_pct=(mem/total_ram*100.0) if total_ram>0 else 0.0
+    disk_pct=filesystem_used_percent(c['path']) if c else 0.0
+    if cpu>=alert_cpu: warnings.append(f'CPU процесса {cpu:.1f}%')
+    if total_ram>0 and ram_pct>=alert_ram: warnings.append(f'RAM процесса {ram_pct:.1f}% от RAM хоста')
+    if disk_pct>=alert_disk: warnings.append(f'Диск хоста занят на {disk_pct:.1f}%')
+    over=0; limit_message='; '.join(warnings)[:255]
+    if warnings: queue_event(db,settings,'resource_high','Высокая нагрузка: '+limit_message,sid,'warning',{'cpu':cpu,'ram_mb':mem,'ram_host_percent':ram_pct,'server_disk_mb':d,'disk_host_percent':disk_pct},30)
     with db.cursor() as cur:
         if query_ok:
             cur.execute("UPDATE servers SET status_cache=%s,current_map=%s,players_online=%s,max_players=%s,cpu_percent=%s,memory_mb=%s,disk_mb=%s,uptime_seconds=%s,ping_ms=%s,over_limit=%s,limit_message=%s,last_query_at=NOW() WHERE id=%s",(status,map_name,online,maxp,cpu,mem,d,uptime,ping,over,limit_message,sid))
@@ -274,7 +289,7 @@ def main():
         try:
             db=conn()
             with db.cursor() as cur:
-                cur.execute("SELECT id,port,slots,start_map,current_map,players_online,max_players,ping_ms,status_cache,cpu_limit_percent,memory_limit_mb,disk_limit_mb,ftp_limit_mb FROM servers WHERE enabled=1 ORDER BY id"); rows=cur.fetchall()
+                cur.execute("SELECT id,port,slots,start_map,current_map,players_online,max_players,ping_ms,status_cache FROM servers WHERE enabled=1 ORDER BY id"); rows=cur.fetchall()
             settings=get_settings(db); store_stats=(tick%6==0); store_players=(tick%6==0)
             for row in rows:
                 try: one(db,row,settings,store_stats,store_players)

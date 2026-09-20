@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, ftplib, ipaddress, json, os, pwd, re, secrets, shutil, signal, socket, stat, subprocess, sys, tarfile, tempfile, time, zipfile
+import argparse, ftplib, ipaddress, json, os, pwd, re, secrets, shutil, signal, socket, stat, subprocess, sys, tarfile, tempfile, time, zipfile, urllib.request, urllib.parse
 from pathlib import Path
 
 APP_ROOT=Path('/opt/hyper-cs16')
@@ -10,6 +10,8 @@ SERVER_CFG_DIR=STATE_ROOT/'servers'
 LEGACY_SERVER_CFG_DIR=ETC_ROOT/'servers'
 RUNTIME_FILE=ETC_ROOT/'runtime.json'
 STAGING_DIR=STATE_ROOT/'uploads'
+DELETED_DIR=STATE_ROOT/'deleted'
+BUILD_BACKUP_DIR_NAME='_build_backups'
 LIB_DIR=APP_ROOT/'lib'
 if str(LIB_DIR) not in sys.path: sys.path.insert(0,str(LIB_DIR))
 try:
@@ -20,6 +22,7 @@ except Exception as exc:
 SAFE_MAP=re.compile(r'^[A-Za-z0-9_\-]{1,64}$')
 SAFE_PLUGIN=re.compile(r'^[A-Za-z0-9_.\-]{1,96}$')
 SAFE_STAGE=re.compile(r'^(?:map|plugin)-[a-f0-9]{32}\.(?:bsp|amxx)$')
+SAFE_BUILD_STAGE=re.compile(r'^build-[a-f0-9]{32}\.(?:zip|rar)$')
 SAFE_HOST=re.compile(r'^[A-Za-z0-9 ._\-\[\]()#]{1,160}$')
 SAFE_NAME=re.compile(r'^[A-Za-z0-9А-Яа-яЁё ._\-\[\]()#]{1,96}$')
 REHLDS_VERSION='3.15.0.896'
@@ -56,11 +59,12 @@ def load_runtime():
 def cfg_path(sid:int)->Path: return SERVER_CFG_DIR/f'{sid}.json'
 
 def legacy_cfg_path(sid:int)->Path: return LEGACY_SERVER_CFG_DIR/f'{sid}.json'
+def deleted_marker(sid:int)->Path: return DELETED_DIR/f'{sid}.deleted'
 
 def ensure_state_permissions():
     """Keep mutable runtime state readable by the unprivileged cs16 service."""
     require_root()
-    for d in (STATE_ROOT, SERVER_CFG_DIR):
+    for d in (STATE_ROOT, SERVER_CFG_DIR, DELETED_DIR):
         d.mkdir(parents=True, exist_ok=True)
         try:
             shutil.chown(d, user='root', group='cs16')
@@ -74,6 +78,12 @@ def ensure_state_permissions():
                 os.chmod(fp, 0o640)
         except Exception as exc:
             raise RuntimeError(f'Cannot fix state file permissions for {fp}: {exc}')
+    STAGING_DIR.mkdir(parents=True,exist_ok=True)
+    try:
+        shutil.chown(STAGING_DIR,user='www-data',group='cs16')
+        os.chmod(STAGING_DIR,0o770)
+    except Exception as exc:
+        raise RuntimeError(f'Cannot fix upload staging permissions for {STAGING_DIR}: {exc}')
 
 
 def db_connect():
@@ -186,6 +196,13 @@ def recover_server_config(sid:int):
 def load_server(sid:int):
     p=cfg_path(sid)
     legacy=legacy_cfg_path(sid)
+    marker=deleted_marker(sid)
+    # A deletion tombstone is authoritative. This prevents monitor/API races from
+    # resurrecting a server from SQL or a stale read-only /etc JSON between the
+    # filesystem deletion and the panel's SQL DELETE. server_create() explicitly
+    # removes the tombstone when an ID is intentionally created again.
+    if marker.exists():
+        out({'ok':False,'error':f'Server {sid} was deleted; stale legacy state is ignored'},2)
     source=p if p.exists() else legacy if legacy.exists() else None
     if source is not None:
         try:
@@ -249,6 +266,7 @@ def port_available(port:int, ignore_sid:int|None=None):
         for p in root.glob('*.json') if root.exists() else []:
             try:
                 c=json.loads(p.read_text(encoding='utf-8')); sid=int(c.get('id',0)); key=(sid,int(c.get('port',0)))
+                if root==LEGACY_SERVER_CFG_DIR and deleted_marker(sid).exists() and not cfg_path(sid).exists(): continue
                 if key in seen: continue
                 seen.add(key)
                 if ignore_sid is not None and sid==ignore_sid:
@@ -669,6 +687,9 @@ def repair_server_runtime(sid:int):
 
 def server_create(args):
     require_root()
+    try: deleted_marker(args.id).unlink()
+    except FileNotFoundError: pass
+    except OSError: pass
     if not (1<=args.slots<=32): raise RuntimeError('Slots must be 1..32 (GoldSrc protocol limit)')
     if not (27015<=args.port<=27100): raise RuntimeError('Port must be 27015..27100')
     if not SAFE_MAP.fullmatch(args.map): raise RuntimeError('Invalid start map')
@@ -1590,26 +1611,27 @@ def server_config_set(args):
 
 
 
-def server_limits_set(sid:int,cpu:float,memory:int):
-    """Apply per-server CPU/RAM limits without changing game files.
-    Persistent limits are stored as a systemd drop-in; runtime values are applied immediately when possible.
+def server_limits_set(sid:int,cpu:float=0,memory:int=0):
+    """v2.7 compatibility command: remove all CPU/RAM restrictions.
+
+    The panel no longer enforces per-server resource quotas. The arguments are
+    accepted only so old API/UI calls do not fail during an upgrade.
     """
     require_root(); load_server(sid)
-    cpu=max(0.0,min(float(cpu),800.0)); memory=max(0,min(int(memory),262144))
     drop=Path(f'/etc/systemd/system/hyper-cs16@{sid}.service.d')
-    drop.mkdir(parents=True,exist_ok=True)
-    lines=['[Service]']
-    lines.append('CPUQuota=infinity' if cpu<=0 else f'CPUQuota={cpu:.2f}%')
-    lines.append('MemoryMax=infinity' if memory<=0 else f'MemoryMax={memory}M')
-    (drop/'limits.conf').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+    limits=drop/'limits.conf'
+    try: limits.unlink()
+    except FileNotFoundError: pass
+    except OSError as exc: raise RuntimeError(f'Cannot remove legacy systemd limits: {exc}')
+    try:
+        if drop.is_dir() and not any(drop.iterdir()): drop.rmdir()
+    except OSError: pass
     run(['systemctl','daemon-reload'],check=False)
     unit=f'hyper-cs16@{sid}.service'
     if service_status(sid)=='active':
-        props=[]
-        props.append('CPUQuota=infinity' if cpu<=0 else f'CPUQuota={cpu:.2f}%')
-        props.append('MemoryMax=infinity' if memory<=0 else f'MemoryMax={memory}M')
-        run(['systemctl','set-property','--runtime',unit]+props,check=False,timeout=30)
-    return {'ok':True,'id':sid,'cpu_limit_percent':cpu,'memory_limit_mb':memory,'persistent':str(drop/'limits.conf')}
+        run(['systemctl','set-property','--runtime',unit,'CPUQuota=infinity','MemoryMax=infinity'],check=False,timeout=30)
+    return {'ok':True,'id':sid,'unlimited':True,'cpu_limit_percent':0,'memory_limit_mb':0}
+
 
 def logs(sid:int,lines:int=160):
     load_server(sid); lines=max(10,min(lines,1000))
@@ -1712,6 +1734,243 @@ def plugin_upload(sid:int,token:str,plugin_name:str):
     return {'ok':True,'plugin':plugin_name}
 
 
+
+
+def _build_take_staged(token:str)->Path:
+    require_root(); ensure_state_permissions()
+    if not SAFE_BUILD_STAGE.fullmatch(token): raise RuntimeError('Invalid build upload token')
+    src=STAGING_DIR/token
+    st=os.lstat(src)
+    if not stat.S_ISREG(st.st_mode): raise RuntimeError('Build upload is not a regular file')
+    try: web_uid=pwd.getpwnam('www-data').pw_uid
+    except KeyError: raise RuntimeError('www-data user not found')
+    if st.st_uid!=web_uid: raise RuntimeError('Build upload has invalid owner')
+    if st.st_size<1: raise RuntimeError('Build archive is empty')
+    private=STATE_ROOT/f'.build-{secrets.token_hex(16)}{src.suffix.lower()}'
+    os.replace(src,private)
+    shutil.chown(private,user='root',group='cs16'); os.chmod(private,0o640)
+    return private
+
+
+def _detect_archive_type(path:Path)->str:
+    head=path.read_bytes()[:16]
+    if head.startswith(b'PK\x03\x04') or head.startswith(b'PK\x05\x06') or zipfile.is_zipfile(path): return 'zip'
+    if head.startswith(b'Rar!\x1a\x07'): return 'rar'
+    raise RuntimeError('Only ZIP and RAR assemblies are supported')
+
+
+def _validate_archive_name(name:str):
+    n=name.replace('\\','/').strip()
+    if not n or n in {'.','./'}: return
+    if n.startswith('/') or re.match(r'^[A-Za-z]:',n): raise RuntimeError(f'Unsafe archive path: {name}')
+    parts=[x for x in n.split('/') if x not in {'','.','./'}]
+    if any(x=='..' for x in parts): raise RuntimeError(f'Unsafe archive path: {name}')
+
+
+def _extract_rar(path:Path,dst:Path):
+    seven=shutil.which('7z') or shutil.which('7zz')
+    if not seven: raise RuntimeError('RAR support is not installed (7z/p7zip-full is required)')
+    listing=run([seven,'l','-slt',str(path)],check=False,timeout=120)
+    if listing.returncode!=0: raise RuntimeError('RAR archive cannot be read: '+(listing.stdout or '')[-2000:])
+    in_entries=False
+    for line in (listing.stdout or '').splitlines():
+        if line.startswith('----------'): in_entries=True; continue
+        if in_entries and line.startswith('Path = '): _validate_archive_name(line[7:])
+    dst.mkdir(parents=True,exist_ok=True)
+    cp=run([seven,'x','-y',f'-o{dst}',str(path)],check=False,timeout=1800)
+    if cp.returncode!=0: raise RuntimeError('RAR extraction failed: '+(cp.stdout or '')[-3000:])
+
+
+def _validate_extracted_tree(root:Path):
+    root=root.resolve()
+    for item in root.rglob('*'):
+        st=os.lstat(item)
+        if stat.S_ISLNK(st.st_mode) or not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode)):
+            raise RuntimeError(f'Archive contains unsupported link/device: {item.relative_to(root)}')
+        r=item.resolve()
+        if r!=root and root not in r.parents: raise RuntimeError('Archive escaped extraction directory')
+
+
+def _extract_build_archive(archive:Path,dst:Path)->str:
+    kind=_detect_archive_type(archive)
+    if kind=='zip': extract_zip(archive,dst)
+    else: _extract_rar(archive,dst)
+    _validate_extracted_tree(dst)
+    return kind
+
+
+def _unwrap_single_dir(root:Path)->Path:
+    cur=root
+    for _ in range(4):
+        entries=[x for x in cur.iterdir() if x.name not in {'__MACOSX','.DS_Store'}]
+        if len(entries)==1 and entries[0].is_dir(): cur=entries[0]
+        else: break
+    return cur
+
+
+def _detect_build_payload(root:Path):
+    root=_unwrap_single_dir(root)
+    # Prefer a directory that owns cstrike/. This covers full HLDS/ReHLDS packs
+    # and packs wrapped in one or two release folders.
+    if (root/'cstrike').is_dir(): return root,'server-root'
+    candidates=[]
+    for cstrike in root.rglob('cstrike'):
+        if cstrike.is_dir():
+            try: depth=len(cstrike.relative_to(root).parts)
+            except Exception: continue
+            if depth<=4: candidates.append((depth,cstrike.parent))
+    if candidates:
+        candidates.sort(key=lambda x:x[0]); return candidates[0][1],'server-root'
+    markers={'addons','maps','models','sound','sprites','resource','gfx','events','config','configs'}
+    if any((root/m).exists() for m in markers): return root,'cstrike-content'
+    dirs=[d for d in root.iterdir() if d.is_dir()]
+    for d in dirs:
+        if any((d/m).exists() for m in markers): return d,'cstrike-content'
+    raise RuntimeError('Assembly layout is not recognized. Expected cstrike/ or CS content folders (addons/maps/models/sound/...)')
+
+
+def _patch_managed_cfg(path:Path,c:dict):
+    cfg=path/'cstrike/server.cfg'
+    if not cfg.exists(): write_server_cfg(path,c); return
+    def clean(v): return str(v).replace('"','').replace('\n',' ').replace('\r',' ')
+    text=cfg.read_text(encoding='utf-8',errors='ignore')
+    managed={
+        'hostname':f'hostname "{clean(c.get("hostname","HYPER-HOST CS 1.6"))}"',
+        'rcon_password':f'rcon_password "{clean(c.get("rcon_password",""))}"',
+        'sv_password':f'sv_password "{clean(c.get("server_password",""))}"',
+        'sv_lan':'sv_lan 0',
+        'sv_region':'sv_region 255',
+    }
+    for key in managed:
+        text=re.sub(r'(?im)^\s*'+re.escape(key)+r'\s+.*(?:\n|$)','',text)
+    text=text.rstrip()+"\n\n// HYPER-HOST managed identity/network\n"+'\n'.join(managed.values())+'\n'
+    cfg.write_text(text,encoding='utf-8')
+    (path/'cstrike/banned.cfg').touch(exist_ok=True); (path/'cstrike/listip.cfg').touch(exist_ok=True)
+
+
+def _prune_build_backups(backup_root:Path,sid:int,keep:int=3):
+    items=sorted([p for p in backup_root.glob(f'{sid}-*') if p.is_dir()],key=lambda p:p.stat().st_mtime,reverse=True)
+    for old in items[max(1,keep):]:
+        try: shutil.rmtree(old)
+        except OSError: pass
+
+
+def _download_build_url(url:str)->Path:
+    u=urllib.parse.urlparse(str(url).strip())
+    if u.scheme not in {'http','https'} or not u.netloc: raise RuntimeError('Assembly URL must start with http:// or https://')
+    ensure_state_permissions()
+    tmp=STATE_ROOT/f'.build-download-{secrets.token_hex(16)}.bin'
+    cp=run(['curl','--proto','=http,https','-fL','--retry','3','--retry-delay','2','--connect-timeout','20','--max-redirs','8','-A','HYPER-HOST-CS16/2.7','-o',str(tmp),url],check=False,timeout=3600)
+    if cp.returncode!=0:
+        try: tmp.unlink()
+        except FileNotFoundError: pass
+        raise RuntimeError('Assembly download failed: '+(cp.stdout or '')[-3000:])
+    if not tmp.is_file() or tmp.stat().st_size<1: raise RuntimeError('Downloaded assembly is empty')
+    kind=_detect_archive_type(tmp); final=tmp.with_suffix('.'+kind); os.replace(tmp,final); return final
+
+
+def install_custom_build(sid:int,archive:Path,source_label:str='upload'):
+    require_root(); c=load_server(sid); path=safe_server_path(sid)
+    if Path(str(c.get('path') or path)).resolve()!=path: raise RuntimeError('Unsafe server path in state')
+    archive=archive.resolve()
+    if not archive.is_file(): raise RuntimeError('Assembly archive not found')
+    rt=load_runtime(); base=Path(rt.get('base_game_dir','/srv/hyper-cs16/base-hlds'))
+    ensure_base('classic')
+    token=secrets.token_hex(6); parent=path.parent
+    stage=parent/f'.build-stage-{sid}-{token}'
+    extract_root=STATE_ROOT/f'.build-extract-{sid}-{token}'
+    backup_root=parent/BUILD_BACKUP_DIR_NAME; backup_root.mkdir(parents=True,exist_ok=True)
+    backup=backup_root/f'{sid}-before-build-{time.strftime("%Y%m%d-%H%M%S")}-{token}'
+    old_existed=path.exists(); swapped=False
+    try:
+        if stage.exists(): shutil.rmtree(stage)
+        run(['rsync','-a','--delete',str(base)+'/',str(stage)+'/'],timeout=1200)
+        kind=_extract_build_archive(archive,extract_root)
+        payload,layout=_detect_build_payload(extract_root)
+        if layout=='server-root':
+            run(['rsync','-a',str(payload)+'/',str(stage)+'/'],timeout=1800)
+        else:
+            run(['rsync','-a',str(payload)+'/',str(stage/'cstrike')+'/'],timeout=1800)
+        if not (stage/'hlds_linux').is_file(): raise RuntimeError('Fresh HLDS engine is missing after assembly preparation')
+        if not (stage/'cstrike').is_dir(): raise RuntimeError('cstrike directory is missing after assembly preparation')
+        for exe in ['hlds_linux','hlds_run']:
+            if (stage/exe).exists(): os.chmod(stage/exe,0o775)
+        # Preserve panel identity/network settings while keeping every other setting from the uploaded pack.
+        maps=stage/'cstrike/maps'; preferred=str(c.get('start_map') or '')
+        if not preferred or not (maps/(preferred+'.bsp')).is_file():
+            choices=sorted(p.stem for p in maps.glob('*.bsp') if SAFE_MAP.fullmatch(p.stem)) if maps.is_dir() else []
+            if 'de_dust2' in choices: preferred='de_dust2'
+            elif choices: preferred=choices[0]
+            else: raise RuntimeError('Assembly has no playable .bsp maps')
+            c['start_map']=preferred; db_update_start_map(sid,preferred)
+        _patch_managed_cfg(stage,c); normalize_permissions(stage)
+        run(['systemctl','stop',f'hyper-cs16@{sid}.service'],check=False,timeout=90)
+        if old_existed: os.replace(path,backup)
+        os.replace(stage,path); swapped=True
+        c['path']=str(path); c['custom_build_source']=source_label; c['custom_build_installed_at']=int(time.time()); save_server(c)
+        run(['systemctl','daemon-reload'],check=False)
+        run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False,timeout=60)
+        ok,detail=wait_server_ready(c,50.0)
+        recovery=None
+        if not ok:
+            # Ready-made packs frequently contain an invalid startup map, stale
+            # Metamod-R config or one broken AMXX plugin/resource. Give the normal
+            # recovery engine one chance to quarantine only the offending content
+            # before rolling the whole upload back.
+            try:
+                recovery=recover_server(sid,True)
+                ok=bool(recovery.get('ok'))
+                if ok:
+                    detail=str(recovery.get('detail') or detail)
+                    # recover_server may choose a known-good startup map/mode. Reload
+                    # the canonical state so the response/UI reports what is running.
+                    c=load_server(sid)
+            except Exception as recovery_exc:
+                recovery={'ok':False,'error':str(recovery_exc)}
+        if not ok:
+            journal=_recent_failure_log(sid,160)
+            rerr=str((recovery or {}).get('error') or '')
+            extra=(' Recovery: '+rerr[-2500:]) if rerr else ''
+            raise RuntimeError(f'Uploaded assembly did not start: {detail}.{extra} {journal[-6000:]}')
+        _prune_build_backups(backup_root,sid,3)
+        result={'ok':True,'id':sid,'archive_type':kind,'layout':layout,'start_map':c['start_map'],'backup':str(backup) if old_existed else '', 'source':source_label,'query':detail}
+        if recovery:
+            result['auto_recovery']=recovery
+            if recovery.get('warning'): result['warning']=recovery.get('warning')
+        return result
+    except Exception as exc:
+        # Transactional rollback: a bad pack must never destroy a working server.
+        try: run(['systemctl','stop',f'hyper-cs16@{sid}.service'],check=False,timeout=60)
+        except Exception: pass
+        if swapped:
+            try:
+                if path.exists(): shutil.rmtree(path)
+                if backup.exists(): os.replace(backup,path)
+                normalize_permissions(path)
+                run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False,timeout=60)
+            except Exception as rex:
+                raise RuntimeError(f'Assembly install failed: {exc}; rollback also failed: {rex}')
+        raise
+    finally:
+        try:
+            if stage.exists(): shutil.rmtree(stage)
+        except OSError: pass
+        try:
+            if extract_root.exists(): shutil.rmtree(extract_root)
+        except OSError: pass
+        try: archive.unlink()
+        except OSError: pass
+
+
+def build_install_upload(sid:int,token:str):
+    archive=_build_take_staged(token)
+    return install_custom_build(sid,archive,'upload:'+token.rsplit('.',1)[-1])
+
+
+def build_install_url(sid:int,url:str):
+    archive=_download_build_url(url)
+    host=urllib.parse.urlparse(url).netloc
+    return install_custom_build(sid,archive,'url:'+host[:120])
 
 def _copy_tree_contents(src:Path,dst:Path):
     dst.mkdir(parents=True,exist_ok=True)
@@ -1945,25 +2204,53 @@ def network_fix(sid:int):
     return info
 
 def server_delete(sid:int):
-    require_root()
-    # Deletion must work even when an old patch lost the JSON state file.
-    if cfg_path(sid).exists() or legacy_cfg_path(sid).exists():
-        c=load_server(sid)
-    else:
-        row=db_server_row(sid) or {}
+    require_root(); ensure_state_permissions()
+    # Deletion must not depend on /etc being writable. Read legacy JSON only as
+    # a hint; never require unlinking it.
+    row=db_server_row(sid) or {}; c=None
+    for source in (cfg_path(sid),legacy_cfg_path(sid)):
+        if not source.exists(): continue
+        try:
+            data=json.loads(source.read_text(encoding='utf-8'))
+            if isinstance(data,dict): c=data; break
+        except Exception: pass
+    if c is None:
         c={'id':sid,'path':str(safe_server_path(sid)),'ftp_user':str(row.get('ftp_user') or f'cs16_{sid}')}
     path=Path(str(c.get('path') or safe_server_path(sid))).resolve(); safe=safe_server_path(sid)
     if path!=safe: raise RuntimeError(f'Unsafe server delete path: {path}')
-    user=str(c.get('ftp_user') or f'cs16_{sid}')
-    run(['systemctl','disable','--now',f'hyper-cs16@{sid}.service'],check=False)
+    user=str(c.get('ftp_user') or row.get('ftp_user') or f'cs16_{sid}')
+    run(['systemctl','disable','--now',f'hyper-cs16@{sid}.service'],check=False,timeout=90)
     ctl=shutil.which('hyper-host-ctl') or '/usr/local/sbin/hyper-host-ctl'
     if Path(ctl).exists(): run([ctl,'delete-ftp',user],check=False,timeout=120)
     if path.exists(): shutil.rmtree(path)
-    for p in (cfg_path(sid),legacy_cfg_path(sid)):
-        try: p.unlink()
-        except FileNotFoundError: pass
+    try: cfg_path(sid).unlink()
+    except FileNotFoundError: pass
+    except OSError as exc: raise RuntimeError(f'Cannot remove writable state {cfg_path(sid)}: {exc}')
+    DELETED_DIR.mkdir(parents=True,exist_ok=True)
+    marker=deleted_marker(sid); marker.write_text(f'deleted {int(time.time())}\n',encoding='utf-8')
+    try: shutil.chown(marker,user='root',group='cs16'); os.chmod(marker,0o640)
+    except Exception: pass
+    legacy_left=legacy_cfg_path(sid).exists()
+    if legacy_left:
+        try: legacy_cfg_path(sid).unlink(); legacy_left=False
+        except OSError: pass
+    backup_root=safe.parent/BUILD_BACKUP_DIR_NAME
+    if backup_root.is_dir():
+        for bp in backup_root.glob(f'{sid}-*'):
+            try:
+                if bp.is_dir(): shutil.rmtree(bp)
+                else: bp.unlink()
+            except OSError: pass
+    # Remove stale resource-property drop-ins from old panel versions. They are
+    # irrelevant after deletion and must not affect a future server reusing the ID.
+    for root in (Path('/etc/systemd/system'),Path('/run/systemd/system')):
+        d=root/f'hyper-cs16@{sid}.service.d'
+        if d.is_dir():
+            try: shutil.rmtree(d)
+            except OSError: pass
+    run(['systemctl','daemon-reload'],check=False)
     run(['systemctl','reset-failed',f'hyper-cs16@{sid}.service'],check=False)
-    return {'ok':True,'id':sid,'deleted_path':str(path),'ftp_user':user}
+    return {'ok':True,'id':sid,'deleted_path':str(path),'ftp_user':user,'legacy_state_left':legacy_left,'legacy_state':str(legacy_cfg_path(sid)) if legacy_left else ''}
 
 
 def doctor():
@@ -2013,6 +2300,8 @@ def main():
     q=sp.add_parser('logs'); q.add_argument('id',type=int); q.add_argument('--lines',type=int,default=160)
     q=sp.add_parser('map-upload'); q.add_argument('id',type=int); q.add_argument('token'); q.add_argument('map_name')
     q=sp.add_parser('plugin-upload'); q.add_argument('id',type=int); q.add_argument('token'); q.add_argument('plugin_name')
+    q=sp.add_parser('build-install-upload'); q.add_argument('id',type=int); q.add_argument('token')
+    q=sp.add_parser('build-install-url'); q.add_argument('id',type=int)
     q=sp.add_parser('bots-install'); q.add_argument('id',type=int); q.add_argument('--quota',type=int,default=9); q.add_argument('--difficulty',type=int,default=3)
     q=sp.add_parser('bots-config'); q.add_argument('id',type=int); q.add_argument('--quota',type=int,required=True); q.add_argument('--difficulty',type=int,required=True)
     q=sp.add_parser('bots-disable'); q.add_argument('id',type=int)
@@ -2071,6 +2360,11 @@ def main():
         elif args.cmd=='mode-set': result=set_game_mode(args.id,args.mode)
         elif args.cmd=='map-upload': result=map_upload(args.id,args.token,args.map_name)
         elif args.cmd=='plugin-upload': result=plugin_upload(args.id,args.token,args.plugin_name)
+        elif args.cmd=='build-install-upload': result=build_install_upload(args.id,args.token)
+        elif args.cmd=='build-install-url':
+            raw=sys.stdin.buffer.read(8193)
+            if len(raw)>8192: raise RuntimeError('Assembly URL is too long')
+            result=build_install_url(args.id,raw.decode('utf-8','replace').strip())
         elif args.cmd=='repair-runtime': result=repair_server_runtime(args.id)
         elif args.cmd=='delete': result=server_delete(args.id)
         elif args.cmd=='ftp-restore': result=ftp_restore()
