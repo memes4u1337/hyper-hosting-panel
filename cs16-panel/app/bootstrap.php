@@ -7,6 +7,7 @@ ini_set('session.cookie_samesite', 'Lax');
 if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ini_set('session.cookie_secure', '1');
 session_start();
 date_default_timezone_set('Europe/Moscow');
+const HYPER_CS16_PANEL_BUILD = '2.9';
 
 $configFile = '/etc/hyper-cs16/panel.php';
 if (!is_file($configFile)) { http_response_code(500); exit('CS16 panel is not installed. Run install-cs16-panel.sh'); }
@@ -98,17 +99,35 @@ function upload_error_text(int $code): string {
         default=>'Неизвестная ошибка загрузки PHP (код '.$code.')',
     };
 }
+function upload_staging_dir(): string { return '/var/tmp/hyper-cs16-panel/uploads'; }
 function ensure_upload_staging(): array {
-    $dir='/var/lib/hyper-cs16/uploads';
+    $dir=upload_staging_dir(); $base=dirname($dir);
     clearstatcache(true,$dir);
-    if(is_dir($dir)&&is_writable($dir)) return ['ok'=>true,'path'=>$dir];
+    // First try without sudo. /var/tmp is deliberately used so PHP can repair
+    // staging even when /etc or /var/lib is mounted read-only/restricted.
+    if(!is_dir($base)) @mkdir($base,0770,true);
+    if(is_dir($base)) @chmod($base,0750);
+    if(!is_dir($dir)) @mkdir($dir,0770,true);
+    if(is_dir($dir)) @chmod($dir,0770);
+    clearstatcache(true,$dir);
+    if(is_dir($dir)&&is_writable($dir)) return ['ok'=>true,'path'=>$dir,'mode'=>'php-self-heal'];
+
+    // Root helper is only the second fallback. Its full output is preserved so
+    // the panel shows the real reason instead of the old install-cs16-panel hint.
     $r=ctl(['staging-prepare'],30);
     clearstatcache(true,$dir);
     if(empty($r['ok'])||!is_dir($dir)||!is_writable($dir)){
-        $diag='path='.$dir.' exists='.(is_dir($dir)?'yes':'no').' writable='.(is_writable($dir)?'yes':'no');
-        throw new RuntimeException("Upload staging не готов. Панель попыталась исправить его автоматически.\n".ctl_error($r,'staging-prepare failed')."\n".$diag);
+        $diag='panel_build='.HYPER_CS16_PANEL_BUILD
+            .' php_user='.(function_exists('posix_geteuid')?(string)posix_geteuid():'unknown')
+            .' path='.$dir
+            .' exists='.(is_dir($dir)?'yes':'no')
+            .' writable='.(is_writable($dir)?'yes':'no')
+            .' parent_exists='.(is_dir($base)?'yes':'no')
+            .' parent_writable='.(is_writable($base)?'yes':'no')
+            .' tmp='.sys_get_temp_dir();
+        throw new RuntimeException("Upload staging не удалось подготовить автоматически.\n".ctl_error($r,'staging-prepare failed')."\n".$diag);
     }
-    return $r;
+    return array_merge(['path'=>$dir],$r);
 }
 function stage_upload(array $file,string $prefix,string $extension,int $maxBytes): array {
     $err=(int)($file['error']??UPLOAD_ERR_NO_FILE);
@@ -117,7 +136,7 @@ function stage_upload(array $file,string $prefix,string $extension,int $maxBytes
     $size=(int)($file['size']??0); if($size<1||$size>$maxBytes) throw new RuntimeException('Недопустимый размер файла: '.$size.' байт');
     $original=basename((string)($file['name']??'')); $ext=strtolower(pathinfo($original,PATHINFO_EXTENSION));
     if($ext!==ltrim(strtolower($extension),'.')) throw new RuntimeException('Недопустимое расширение файла: .'.$ext);
-    $staging=ensure_upload_staging(); $dir=(string)($staging['path']??'/var/lib/hyper-cs16/uploads');
+    $staging=ensure_upload_staging(); $dir=(string)($staging['path']??upload_staging_dir());
     $free=@disk_free_space($dir); if(is_float($free)||is_int($free)){ if($free>0 && $free<$size+64*1024*1024) throw new RuntimeException('Недостаточно свободного места для upload staging: нужно '.number_format($size/1048576,1).' МБ'); }
     $token=$prefix.'-'.bin2hex(random_bytes(16)).$extension; $dst=$dir.'/'.$token;
     if(!move_uploaded_file((string)$file['tmp_name'],$dst)){

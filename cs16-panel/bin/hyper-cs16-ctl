@@ -9,7 +9,8 @@ STATE_ROOT=Path('/var/lib/hyper-cs16')
 SERVER_CFG_DIR=STATE_ROOT/'servers'
 LEGACY_SERVER_CFG_DIR=ETC_ROOT/'servers'
 RUNTIME_FILE=ETC_ROOT/'runtime.json'
-STAGING_DIR=STATE_ROOT/'uploads'
+STAGING_ROOT=Path('/var/tmp/hyper-cs16-panel')
+STAGING_DIR=STAGING_ROOT/'uploads'
 DELETED_DIR=STATE_ROOT/'deleted'
 BUILD_BACKUP_DIR_NAME='_build_backups'
 LIB_DIR=APP_ROOT/'lib'
@@ -91,17 +92,25 @@ def ensure_state_permissions():
                 os.chmod(fp, 0o640)
         except Exception as exc:
             raise RuntimeError(f'Cannot fix state file permissions for {fp}: {exc}')
-    STAGING_DIR.mkdir(parents=True,exist_ok=True)
+
+
+def ensure_staging_permissions():
+    """Create staging outside /etc and /var/lib so immutable parent mounts cannot break uploads."""
+    require_root()
+    STAGING_ROOT.mkdir(parents=True, exist_ok=True)
+    STAGING_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        shutil.chown(STAGING_DIR,user='www-data',group='cs16')
-        os.chmod(STAGING_DIR,0o770)
+        shutil.chown(STAGING_ROOT, user='www-data', group='www-data')
+        os.chmod(STAGING_ROOT, 0o750)
+        shutil.chown(STAGING_DIR, user='www-data', group='www-data')
+        os.chmod(STAGING_DIR, 0o770)
     except Exception as exc:
         raise RuntimeError(f'Cannot fix upload staging permissions for {STAGING_DIR}: {exc}')
 
 
 def staging_prepare():
     """Create/repair the web upload staging area and verify it as www-data."""
-    require_root(); ensure_state_permissions()
+    require_root(); ensure_state_permissions(); ensure_staging_permissions()
     # Remove abandoned staging uploads after one day. Never follow symlinks.
     now=time.time(); removed=0
     for fp in STAGING_DIR.iterdir():
