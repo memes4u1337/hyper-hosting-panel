@@ -441,9 +441,20 @@ def main():
                     # across the 5-minute window by its id.
                     sid=int(row.get('id') or 0)
                     if sid>0 and tick%30==sid%30:
-                        cp=subprocess.run(['/usr/local/sbin/hyper-cs16-ctl','fastdl-sync',str(sid)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=180)
-                        if cp.returncode!=0:
-                            print(f'fastdl sync server {sid}: {(cp.stdout or "").strip()[-1500:]}',file=sys.stderr)
+                        # Do not rewrite server.cfg of legacy/existing servers merely
+                        # because the monitor was upgraded. Auto-sync becomes active
+                        # only after that server explicitly enabled/synced FastDL or
+                        # after a new build install performed the managed FastDL step.
+                        auto=False
+                        try:
+                            st=json.load(open(f'/var/lib/hyper-cs16/servers/{sid}.json',encoding='utf-8'))
+                            auto=bool(st.get('fastdl_auto_sync'))
+                        except Exception:
+                            auto=False
+                        if auto:
+                            cp=subprocess.run(['/usr/local/sbin/hyper-cs16-ctl','fastdl-sync',str(sid)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=180)
+                            if cp.returncode!=0:
+                                print(f'fastdl sync server {sid}: {(cp.stdout or "").strip()[-1500:]}',file=sys.stderr)
                 except Exception as exc: print(f'server {row.get("id")}: {exc}',file=sys.stderr)
             if tick%6==0:
                 billing_tick(db,settings)
