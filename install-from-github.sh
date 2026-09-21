@@ -1,28 +1,16 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
-
-REPOSITORY="https://github.com/memes4u1337/hyper-hosting-panel.git"
-TARGET="/root/hyper-hosting-panel"
-TMP="/tmp/hyper-host-v1.2-update"
-
-if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-  exec sudo bash "$0" "$@"
-fi
-
+set -euo pipefail
 cd /root
-rm -rf "$TMP"
-git clone --depth 1 --branch main "$REPOSITORY" "$TMP"
+rm -rf /root/hyper-hosting-panel
+git clone --depth=1 https://github.com/memes4u1337/hyper-hosting-panel.git /root/hyper-hosting-panel
+cd /root/hyper-hosting-panel
 
-if [[ -f /etc/hyper-host/hyper-host.conf ]]; then
-  rm -rf "$TARGET"
-  mv "$TMP" "$TARGET"
-  cd "$TARGET"
-  chmod +x setup.sh install.sh update.sh
-  exec bash update.sh
-else
-  rm -rf "$TARGET"
-  mv "$TMP" "$TARGET"
-  cd "$TARGET"
-  chmod +x setup.sh install.sh
-  exec bash setup.sh
+# Apply the repository's normal CS 1.6 build first if it exists.
+if [[ -f apply-cs16-v3.3-fullbuild.sh ]]; then
+  bash apply-cs16-v3.3-fullbuild.sh
 fi
+
+# Then apply the encoding fix. Put this patch folder into the cloned repository,
+# or run apply-assembly-encoding-fix.sh from wherever you downloaded it.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+bash "$SCRIPT_DIR/apply-assembly-encoding-fix.sh" /root/hyper-hosting-panel
