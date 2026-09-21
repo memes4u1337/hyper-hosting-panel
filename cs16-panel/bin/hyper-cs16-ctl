@@ -31,6 +31,7 @@ SAFE_HOST=re.compile(r'^[A-Za-z0-9 ._\-\[\]()#]{1,160}$')
 SAFE_NAME=re.compile(r'^[A-Za-z0-9А-Яа-яЁё ._\-\[\]()#]{1,96}$')
 REHLDS_VERSION='3.15.0.896'
 REGAMEDLL_VERSION='5.30.0.814'
+REAPI_VERSION='5.29.0.358'
 METAMOD_VERSION='1.3.0.149'
 METAMOD_AM_VERSION='1.21.1-am'
 AMXX_BUILD='5303'
@@ -40,6 +41,8 @@ METAMOD_URL=f'https://github.com/rehlds/Metamod-R/releases/download/{METAMOD_VER
 METAMOD_AM_URL=f'https://www.amxmodx.org/release/metamod-{METAMOD_AM_VERSION}.zip'
 REHLDS_URL=f'https://github.com/rehlds/ReHLDS/releases/download/{REHLDS_VERSION}/rehlds-bin-{REHLDS_VERSION}.zip'
 REGAMEDLL_URL=f'https://github.com/rehlds/ReGameDLL_CS/releases/download/{REGAMEDLL_VERSION}/regamedll-bin-{REGAMEDLL_VERSION}.zip'
+REAPI_URL=f'https://github.com/rehlds/ReAPI/releases/download/{REAPI_VERSION}/reapi-bin-{REAPI_VERSION}.zip'
+BUILD_SOURCE_ROOT=Path('/srv/hyper-cs16/build-sources')
 YAPB_URL='https://yapb.jeefo.net/latest'
 ZP43_PLUGIN_URL='https://sourceforge.net/projects/zm-strike/files/zp_plugin_43.zip/download'
 ZP43_RESOURCES_URL='https://sourceforge.net/projects/zm-strike/files/zp_resources.zip/download'
@@ -162,38 +165,11 @@ def _mysql_root_exec(sql:str):
     return (cp.stdout or '').strip()
 
 
-def ensure_mysql_socket_compat()->dict:
-    """Provide the legacy /tmp/mysql.sock path expected by old AMXX SQL plugins.
-
-    Ubuntu/Debian MariaDB normally listens on /run/mysqld/mysqld.sock, while many
-    old CS 1.6 plugins hard-code localhost and therefore try /tmp/mysql.sock.
-    A symlink fixes the transport without touching the plugin binary/config.
-    """
-    legacy=Path('/tmp/mysql.sock')
-    candidates=[Path('/run/mysqld/mysqld.sock'),Path('/var/run/mysqld/mysqld.sock'),Path('/var/lib/mysql/mysql.sock')]
-    target=next((p for p in candidates if p.exists()),None)
-    if target is None:
-        return {'ok':False,'changed':False,'error':'MariaDB socket not found'}
-    try:
-        if legacy.exists() and not legacy.is_symlink():
-            # A real socket/file already owns the legacy path. Never remove it.
-            return {'ok':True,'changed':False,'path':str(legacy),'target':'existing-local-socket'}
-        if legacy.is_symlink() and legacy.resolve()==target.resolve():
-            return {'ok':True,'changed':False,'path':str(legacy),'target':str(target)}
-        if legacy.is_symlink():
-            try: legacy.unlink()
-            except OSError as exc: return {'ok':False,'changed':False,'error':str(exc)}
-        legacy.symlink_to(target)
-        return {'ok':True,'changed':True,'path':str(legacy),'target':str(target)}
-    except Exception as exc:
-        return {'ok':False,'changed':False,'error':str(exc)}
-
-
 def _server_sql_names(sid:int):
     return f'cs16_srv_{int(sid)}', f'cs16_s{int(sid)}'
 
 
-def _write_amxx_sql_cfg(c:dict, db_name:str, db_user:str, db_password:str, touch_modules:bool=True):
+def _write_amxx_sql_cfg(c:dict, db_name:str, db_user:str, db_password:str):
     root=Path(c['path'])
     cfg=root/'cstrike/addons/amxmodx/configs/sql.cfg'
     cfg.parent.mkdir(parents=True,exist_ok=True)
@@ -212,13 +188,12 @@ def _write_amxx_sql_cfg(c:dict, db_name:str, db_user:str, db_password:str, touch
         f'; Database: {db_name}\n; User: {db_user}\n; Host: 127.0.0.1:3306\n',
         encoding='utf-8'
     )
-    if touch_modules:
-        modules=root/'cstrike/addons/amxmodx/configs/modules.ini'
-        modules.parent.mkdir(parents=True,exist_ok=True)
-        text=modules.read_text(encoding='utf-8',errors='ignore') if modules.exists() else ''
-        active_mysql=any(re.match(r'^\s*mysql(?:_amxx_i386\.so)?\s*$',ln,re.I) for ln in text.splitlines() if not ln.lstrip().startswith(';'))
-        if not active_mysql:
-            modules.write_text(text.rstrip()+('\n' if text.strip() else '')+'mysql\n',encoding='utf-8')
+    modules=root/'cstrike/addons/amxmodx/configs/modules.ini'
+    modules.parent.mkdir(parents=True,exist_ok=True)
+    text=modules.read_text(encoding='utf-8',errors='ignore') if modules.exists() else ''
+    active_mysql=any(re.match(r'^\s*mysql(?:_amxx_i386\.so)?\s*$',ln,re.I) for ln in text.splitlines() if not ln.lstrip().startswith(';'))
+    if not active_mysql:
+        modules.write_text(text.rstrip()+('\n' if text.strip() else '')+'mysql\n',encoding='utf-8')
     return str(cfg)
 
 
@@ -237,7 +212,7 @@ def _sql_meta_update(sid:int, db_name:str='', db_user:str='', config_path:str=''
         pass
 
 
-def sql_provision(sid:int, rotate:bool=False, preserve_runtime:bool=False):
+def sql_provision(sid:int, rotate:bool=False):
     """Create a dedicated SQL database/user for one game server and wire AMXX sql.cfg.
 
     This does not depend on a particular game mode. Universal HYPER-HOST player
@@ -262,7 +237,7 @@ def sql_provision(sid:int, rotate:bool=False, preserve_runtime:bool=False):
             f"GRANT ALL PRIVILEGES ON {qdb}.* TO {quser}@'localhost';FLUSH PRIVILEGES;"
         )
         _mysql_root_exec(sql)
-        cfg_path_written=_write_amxx_sql_cfg(c,db_name,db_user,password,touch_modules=not preserve_runtime)
+        cfg_path_written=_write_amxx_sql_cfg(c,db_name,db_user,password)
         c['sql_enabled']=True; c['sql_host']='127.0.0.1'; c['sql_port']=3306
         c['sql_db']=db_name; c['sql_user']=db_user; c['sql_password']=password; c['sql_config_path']=cfg_path_written
         save_server(c); normalize_permissions(root)
@@ -399,6 +374,17 @@ def db_update_mode(sid:int,mode:str,bots_enabled:int|None=None,bots_quota:int|No
             if bots_difficulty is not None: sets.append('bots_difficulty=%s'); vals.append(int(bots_difficulty))
             vals.append(sid)
             with con.cursor() as cur: cur.execute('UPDATE servers SET '+','.join(sets)+' WHERE id=%s',tuple(vals))
+        finally: con.close()
+    except Exception:
+        pass
+
+
+def db_update_profile(sid:int,profile:str):
+    profile='rehlds' if str(profile)=='rehlds' else 'classic'
+    try:
+        con=db_connect()
+        try:
+            with con.cursor() as cur: cur.execute('UPDATE servers SET build_profile=%s WHERE id=%s',(profile,sid))
         finally: con.close()
     except Exception:
         pass
@@ -643,6 +629,38 @@ def install_rehlds(path:Path):
             (path/'cstrike/dlls').mkdir(parents=True,exist_ok=True); shutil.copy2(candidates[0],path/'cstrike/dlls/cs.so')
 
 
+def install_reapi(path:Path):
+    """Install ReAPI only when an uploaded build needs it and did not ship it.
+
+    Existing uploaded ReAPI binaries are never overwritten. This helper is a
+    compatibility filler, not a general runtime replacement.
+    """
+    target=path/'cstrike/addons/amxmodx/modules/reapi_amxx_i386.so'
+    if target.is_file():
+        return {'installed':False,'path':str(target),'version':'uploaded'}
+    with tempfile.TemporaryDirectory(prefix='hhcs16-reapi-') as td:
+        td=Path(td); z=td/'reapi.zip'; download(REAPI_URL,z); extract_zip(z,td/'reapi')
+        candidates=list((td/'reapi').rglob('reapi_amxx_i386.so'))
+        if not candidates: raise RuntimeError('ReAPI linux32 module not found in release archive')
+        target.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(candidates[0],target)
+        incsrc=next((x for x in (td/'reapi').rglob('include') if x.is_dir()),None)
+        if incsrc:
+            incdst=path/'cstrike/addons/amxmodx/scripting/include'; incdst.mkdir(parents=True,exist_ok=True)
+            for f in incsrc.glob('*.inc'):
+                if not (incdst/f.name).exists(): shutil.copy2(f,incdst/f.name)
+    modules=path/'cstrike/addons/amxmodx/configs/modules.ini'
+    modules.parent.mkdir(parents=True,exist_ok=True)
+    text=modules.read_text(encoding='utf-8',errors='ignore') if modules.exists() else ''
+    active=False
+    for line in text.replace('\r','').splitlines():
+        st=line.strip()
+        if not st or st.startswith(';') or st.startswith('//'): continue
+        if st.split(';',1)[0].strip().split()[0].lower()=='reapi': active=True; break
+    if not active:
+        modules.write_text(text.rstrip()+('\n' if text and not text.endswith('\n') else '')+'reapi\n',encoding='utf-8')
+    return {'installed':True,'path':str(target),'version':REAPI_VERSION}
+
+
 def ensure_steam_runtime(steam:Path):
     """Repair the 32-bit Steam runtime expected by GoldSrc.
 
@@ -826,8 +844,6 @@ def fastdl_sync(sid:int, configure:bool=True):
         except OSError: pass
     c['fastdl_url']=cfg_result.get('url') or _fastdl_url(c)
     c['fastdl_last_sync']=int(time.time()); c['fastdl_files']=files; c['fastdl_bytes']=total
-    if configure:
-        c['fastdl_auto_sync']=True
     save_server(c)
     runtime_applied=False; runtime_errors=[]
     if service_status(sid)=='active' and udp_listening(int(c.get('port') or 0)):
@@ -1185,12 +1201,6 @@ def server_create(args):
 def _recent_failure_log(sid:int, lines:int=100):
     cp=run(['journalctl','-u',f'hyper-cs16@{sid}.service','-n',str(max(20,min(300,lines))),'--no-pager','-o','cat'],check=False)
     return (cp.stdout or '')[-12000:]
-
-
-def _journal_since(sid:int, epoch:float, lines:int=400):
-    cp=run(['journalctl','-u',f'hyper-cs16@{sid}.service','--since',f'@{int(epoch)}','-n',str(max(50,min(1200,lines))),
-            '--no-pager','-o','cat'],check=False)
-    return (cp.stdout or '')[-40000:]
 
 
 def actual_hlds_pid(sid:int):
@@ -2474,110 +2484,252 @@ def _analyze_build_runtime(cstrike:Path)->dict:
     return {'complete_linux_runtime':complete,'files':pieces,'elf_bits':bits}
 
 
-def _analyze_server_root_runtime(payload:Path, layout:str)->dict:
-    """Detect a complete uploaded HLDS/ReHLDS server root.
+def _copy_file_if_missing(src:Path,dst:Path)->bool:
+    if dst.exists() or not src.is_file(): return False
+    dst.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,dst); return True
 
-    Previous installers always kept HYPER-HOST's own hlds_linux/engine and only
-    imported cstrike/.  That silently breaks ready-made packs which depend on an
-    exact ReHLDS engine + ReGameDLL + ReAPI combination.  If the archive really
-    contains an executable 32-bit hlds_linux at the detected server root, let the
-    uploaded root runtime win.  Missing ancillary files are still inherited from
-    the known-good SteamCMD base because staging starts from that base.
+
+def _overlay_uploaded_build_exact(payload:Path,layout:str,stage:Path,base:Path)->dict:
+    """Copy the uploaded build without the old compat-content stripping.
+
+    The archive wins byte-for-byte for every file it contains.  The panel fills
+    only genuinely missing Linux server/runtime files afterwards.  This is the
+    key rule for hosted ready-made builds: uploaded AMXX modules, Metamod, cs.so,
+    plugins-*.ini, data/lang and configs must never disappear just because one
+    other runtime component is absent from the archive.
     """
-    hlds=payload/'hlds_linux'
-    cstrike=payload/'cstrike'
-    complete=bool(layout=='server-root' and hlds.is_file() and cstrike.is_dir() and _elf_bits(hlds)==32)
-    files=[]
-    if complete:
-        for name in ('hlds_linux','hlds_run','engine_i486.so','core.so','filesystem_stdio.so','demoplayer.so','steamclient.so'):
-            if (payload/name).is_file(): files.append(name)
-    return {'complete_server_root_runtime':complete,'files':files,'hlds_elf_bits':_elf_bits(hlds) if hlds.is_file() else 0}
+    copied_root=False
+    if layout=='server-root':
+        # Keep the SteamCMD base only as a fallback for files the archive does not
+        # contain.  Replace cstrike itself first, otherwise stock AMXX/plugin files
+        # from the base leak into the uploaded assembly and change its behaviour.
+        pc=payload/'cstrike'
+        if pc.is_dir():
+            if (stage/'cstrike').exists(): shutil.rmtree(stage/'cstrike')
+            run(['rsync','-a',str(pc)+'/',str(stage/'cstrike')+'/'],timeout=1800)
+        # Overlay the rest of the uploaded server root.  Do not delete fallback
+        # engine files that are absent from the archive.
+        run(['rsync','-a','--exclude','cstrike/***',str(payload)+'/',str(stage)+'/'],timeout=1800)
+        copied_root=True
+        payload_cstrike=pc
+    else:
+        if (stage/'cstrike').exists(): shutil.rmtree(stage/'cstrike')
+        run(['rsync','-a',str(payload)+'/',str(stage/'cstrike')+'/'],timeout=1800)
+        payload_cstrike=payload
+    return {'payload_cstrike':str(payload_cstrike),'server_root_overlay':copied_root}
 
 
-def _overlay_full_server_root(payload:Path, stage:Path):
-    """Overlay an uploaded Linux server root while keeping the SteamCMD base as fallback.
+def _fill_missing_linux_runtime(stage:Path,base:Path)->dict:
+    """Fill only missing runtime pieces; never overwrite uploaded equivalents."""
+    added=[]; replaced_invalid=[]
+    # Engine/root runtime. A Windows/non-ELF hlds_linux cannot run here, so use the
+    # known SteamCMD binary only in that specific case.
+    for rel in ['hlds_linux','hlds_run','engine_i486.so','core.so','filesystem_stdio.so','demoplayer.so','steam_appid.txt']:
+        src=base/rel; dst=stage/rel
+        invalid=False
+        if dst.is_file() and rel in {'hlds_linux','engine_i486.so','core.so','filesystem_stdio.so','demoplayer.so'}:
+            invalid=_elf_bits(dst) not in {32}
+        if invalid:
+            if src.is_file(): shutil.copy2(src,dst); replaced_invalid.append(rel)
+        elif _copy_file_if_missing(src,dst): added.append(rel)
 
-    The stage was already created from the panel's clean base.  Uploaded files
-    replace matching root files, and the uploaded cstrike/ tree is authoritative
-    via --delete so no stale panel add-ons are mixed into the ready-made build.
-    """
-    run(['rsync','-a','--exclude','cstrike/***',str(payload)+'/',str(stage)+'/'],timeout=1800)
-    _overlay_full_cstrike_content(payload/'cstrike',stage/'cstrike')
+    cs=stage/'cstrike'; bcs=base/'cstrike'; cs.mkdir(parents=True,exist_ok=True)
+    # Game DLL/liblist are required even for archives exported from hosting FTP
+    # accounts that hide protected runtime files.
+    for rel in ['liblist.gam','dlls/cs.so']:
+        src=bcs/rel; dst=cs/rel
+        invalid=dst.is_file() and rel.endswith('.so') and _elf_bits(dst)!=32
+        if invalid:
+            if src.is_file(): dst.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,dst); replaced_invalid.append('cstrike/'+rel)
+        elif _copy_file_if_missing(src,dst): added.append('cstrike/'+rel)
+
+    amxx=cs/'addons/amxmodx'; bamxx=bcs/'addons/amxmodx'
+    build_has_amxx=amxx.exists() or (cs/'addons/metamod/plugins.ini').is_file()
+    if build_has_amxx and bamxx.is_dir():
+        # Loader: preserve uploaded loader, otherwise fill from base.
+        loaders=[amxx/'dlls/amxmodx.so',amxx/'dlls/amxmodx_mm_i386.so']
+        if not any(x.is_file() and _elf_bits(x)==32 for x in loaders):
+            for name in ['amxmodx.so','amxmodx_mm_i386.so']:
+                if _copy_file_if_missing(bamxx/'dlls'/name,amxx/'dlls'/name): added.append('cstrike/addons/amxmodx/dlls/'+name)
+        # Missing stock AMXX modules/data may be hidden by some hosting exports.
+        # --ignore-existing guarantees that custom/uploaded files always win.
+        for sub in ['modules','data']:
+            src=bamxx/sub; dst=amxx/sub
+            if src.is_dir():
+                before={str(x.relative_to(dst)) for x in dst.rglob('*') if x.is_file()} if dst.is_dir() else set()
+                run(['rsync','-a','--ignore-existing',str(src)+'/',str(dst)+'/'],timeout=300)
+                after={str(x.relative_to(dst)) for x in dst.rglob('*') if x.is_file()} if dst.is_dir() else set()
+                for x in sorted(after-before): added.append('cstrike/addons/amxmodx/'+sub+'/'+x)
+        for rel in ['configs/core.ini','configs/modules.ini']:
+            if _copy_file_if_missing(bamxx/rel,amxx/rel): added.append('cstrike/addons/amxmodx/'+rel)
+
+    # Metamod loader/config only when AMXX/addons are present and the upload did
+    # not supply a usable Linux Metamod binary.
+    meta=cs/'addons/metamod'; bmeta=bcs/'addons/metamod'
+    if build_has_amxx and bmeta.is_dir():
+        candidates=[meta/'dlls/metamod.so',meta/'dlls/metamod_i386.so',meta/'metamod_i386.so']
+        if not any(x.is_file() and _elf_bits(x)==32 for x in candidates):
+            for rel in ['dlls/metamod.so','dlls/metamod_i386.so','metamod_i386.so']:
+                if _copy_file_if_missing(bmeta/rel,meta/rel): added.append('cstrike/addons/metamod/'+rel)
+                if any(x.is_file() and _elf_bits(x)==32 for x in candidates): break
+        if _copy_file_if_missing(bmeta/'plugins.ini',meta/'plugins.ini'): added.append('cstrike/addons/metamod/plugins.ini')
+
+    # If AMXX is present but its Metamod line was omitted, add only that loader
+    # line. Existing third-party Metamod plugins remain untouched.
+    mp=meta/'plugins.ini'
+    if build_has_amxx and mp.exists():
+        raw=mp.read_text(encoding='latin1',errors='ignore').replace('\r','')
+        if 'amxmodx' not in raw.lower():
+            loader='addons/amxmodx/dlls/amxmodx.so' if (amxx/'dlls/amxmodx.so').is_file() else 'addons/amxmodx/dlls/amxmodx_mm_i386.so'
+            mp.write_text(raw.rstrip()+f'\nlinux {loader}\n',encoding='latin1')
+            added.append('Metamod AMXX loader line')
+    return {'added':added,'replaced_invalid':replaced_invalid}
 
 
-def _file_sha256(path:Path)->str:
+def _sha256_file(path:Path)->str:
     h=hashlib.sha256()
-    with path.open('rb') as fh:
-        for chunk in iter(lambda:fh.read(1024*1024),b''):
-            h.update(chunk)
+    with path.open('rb') as f:
+        while True:
+            b=f.read(1024*1024)
+            if not b: break
+            h.update(b)
     return h.hexdigest()
 
 
-def _runtime_binary_manifest(cstrike:Path)->dict:
-    """Fingerprint the binary runtime of an imported cstrike tree.
-
-    This lets the installer prove that AMXX/Metamod/modules were not silently
-    replaced after import.  It intentionally ignores configs/assets which the
-    panel may augment with FastDL/SQL settings.
-    """
-    rels=[]
-    fixed=[
-        'dlls/cs.so',
-        'addons/metamod/dlls/metamod.so','addons/metamod/dlls/metamod_i386.so','addons/metamod/metamod_i386.so',
-        'addons/amxmodx/dlls/amxmodx.so','addons/amxmodx/dlls/amxmodx_mm_i386.so',
-    ]
-    for rel in fixed:
-        if (cstrike/rel).is_file(): rels.append(rel)
-    for base in (cstrike/'addons/amxmodx/modules', cstrike/'addons'):
-        if not base.is_dir(): continue
-        for p in base.rglob('*.so'):
-            try: rel=str(p.relative_to(cstrike)).replace('\\','/')
-            except Exception: continue
-            if rel not in rels: rels.append(rel)
-    out={}
-    for rel in sorted(set(rels),key=str.lower):
-        p=cstrike/rel
-        try: out[rel]={'sha256':_file_sha256(p),'size':p.stat().st_size,'elf_bits':_elf_bits(p)}
-        except Exception: pass
-    return out
+def _verify_uploaded_payload(payload:Path,layout:str,stage:Path)->dict:
+    """Verify that every regular file from the archive survived the copy."""
+    source_root=(payload/'cstrike') if layout=='server-root' and (payload/'cstrike').is_dir() else payload
+    dest_root=(stage/'cstrike')
+    checked=0; missing=[]; mismatch=[]; total_bytes=0
+    for src in source_root.rglob('*'):
+        if not src.is_file(): continue
+        rel=src.relative_to(source_root); dst=dest_root/rel
+        checked+=1; total_bytes+=src.stat().st_size
+        if not dst.is_file(): missing.append(str(rel)); continue
+        if src.stat().st_size!=dst.stat().st_size:
+            mismatch.append(str(rel)); continue
+        # Hash runtime/config/plugin files and every small file. Large client
+        # assets are size-verified to keep 200+ MB uploads fast.
+        if src.stat().st_size<=8*1024*1024 or src.suffix.lower() in {'.so','.amxx','.ini','.cfg','.gam','.txt'}:
+            if _sha256_file(src)!=_sha256_file(dst): mismatch.append(str(rel))
+    return {'ok':not missing and not mismatch,'files':checked,'bytes':total_bytes,'missing':missing[:50],'mismatch':mismatch[:50]}
 
 
-def _manifest_diff(before:dict, after:dict)->list[str]:
-    diff=[]
-    for rel,meta in before.items():
-        cur=after.get(rel)
-        if not cur: diff.append(f'{rel}: missing after install'); continue
-        if str(cur.get('sha256'))!=str(meta.get('sha256')):
-            diff.append(f'{rel}: binary changed')
-    return diff
+def _active_amxx_plugins(cstrike:Path)->list[Path]:
+    cfg=cstrike/'addons/amxmodx/configs'; plug=cstrike/'addons/amxmodx/plugins'; names=[]
+    if not cfg.is_dir() or not plug.is_dir(): return []
+    files=[]
+    if (cfg/'plugins.ini').is_file(): files.append(cfg/'plugins.ini')
+    files += sorted(x for x in cfg.glob('plugins-*.ini') if x.is_file() and not x.name.startswith('disabled-'))
+    seen=set()
+    for f in files:
+        raw=f.read_bytes().replace(b'\r\n',b'\n').replace(b'\r',b'\n').decode('latin1','ignore')
+        for line in raw.splitlines():
+            st=line.strip()
+            if not st or st.startswith(';') or st.startswith('//'): continue
+            body=re.split(r'\s*(?:;|//)',st,maxsplit=1)[0].strip()
+            token=body.split()[0] if body else ''
+            if token.lower().endswith('.amxx') and token.lower() not in seen:
+                seen.add(token.lower()); p=plug/token
+                if p.is_file(): names.append(p)
+    return names
 
 
-def _build_requires_rehlds(server_root:Path)->bool:
-    """Detect uploaded gameplay which genuinely requires ReHLDS/ReGameDLL/ReAPI."""
-    cstrike=server_root/'cstrike'
-    if (cstrike/'addons/amxmodx/modules/reapi_amxx_i386.so').is_file(): return True
-    # Many packs ship ReAPI-dependent .amxx files but forget the module itself.
-    plugdir=cstrike/'addons/amxmodx/plugins'
-    if plugdir.is_dir():
-        for p in plugdir.glob('*.amxx'):
-            try:
-                data=p.read_bytes()
-                if b'RegisterHookChain' in data or b'RG_' in data:
-                    return True
-            except Exception:
-                pass
-    return False
-
-
-def _engine_looks_rehlds(server_root:Path)->bool:
-    for p in (server_root/'hlds_linux',server_root/'engine_i486.so'):
-        if not p.is_file(): continue
+def _build_requires_reapi(cstrike:Path)->dict:
+    plugins=_active_amxx_plugins(cstrike); hits=[]
+    needles=[b'RegisterHookChain',b'RegisterHookChainEx',b'EnableHookChain',b'DisableHookChain',b'GetHookChain',b'SetHookChain']
+    for p in plugins:
         try:
             data=p.read_bytes()
-            if b'ReHLDS' in data or b'rehlds' in data: return True
-        except Exception:
-            pass
-    return False
+            if any(n in data for n in needles): hits.append(p.name)
+        except Exception: pass
+    modules=cstrike/'addons/amxmodx/configs/modules.ini'
+    configured=False
+    if modules.is_file():
+        text=modules.read_bytes().replace(b'\r',b'').decode('latin1','ignore')
+        configured=any(line.strip().lower().split(';',1)[0].strip()=='reapi' for line in text.splitlines() if line.strip() and not line.strip().startswith((';','//')))
+    existing=(cstrike/'addons/amxmodx/modules/reapi_amxx_i386.so').is_file()
+    return {'required':bool(hits or configured or existing),'plugin_hits':hits,'configured':configured,'module_present':existing}
+
+
+def _binary_contains(path:Path,needle:bytes)->bool:
+    try: return needle.lower() in path.read_bytes().lower()
+    except Exception: return False
+
+
+def _ensure_reapi_compatible_stack(stage:Path)->dict:
+    """Auto-repair the exact failure shown by ReAPI: hookchains need ReHLDS/ReGameDLL."""
+    req=_build_requires_reapi(stage/'cstrike'); actions=[]
+    if not req.get('required'): return {'required':False,'actions':actions,**req}
+    if not (stage/'cstrike/addons/amxmodx/modules/reapi_amxx_i386.so').is_file():
+        r=install_reapi(stage); actions.append('installed ReAPI '+str(r.get('version') or ''))
+    has_rehlds=_binary_contains(stage/'engine_i486.so',b'rehlds') or _binary_contains(stage/'hlds_linux',b'rehlds')
+    has_regame=_binary_contains(stage/'cstrike/dlls/cs.so',b'regamedll')
+    if not (has_rehlds and has_regame):
+        install_rehlds(stage)
+        actions.append(f'installed ReHLDS {REHLDS_VERSION} + ReGameDLL {REGAMEDLL_VERSION} for ReAPI hookchains')
+        has_rehlds=True; has_regame=True
+    return {'required':True,'actions':actions,'rehlds':has_rehlds,'regamedll':has_regame,**req}
+
+
+def _ensure_legacy_mysql_socket()->dict:
+    """Make old AMXX plugins using host=localhost work on modern MariaDB."""
+    run(['systemctl','start','mariadb.service'],check=False,timeout=60)
+    candidates=[Path('/run/mysqld/mysqld.sock'),Path('/var/run/mysqld/mysqld.sock')]
+    real=next((x for x in candidates if x.exists()),None)
+    if not real:
+        return {'ok':False,'error':'MariaDB socket not found under /run/mysqld'}
+    link=Path('/tmp/mysql.sock')
+    try:
+        if link.is_symlink() or link.exists():
+            if link.is_symlink() and link.resolve()==real.resolve():
+                return {'ok':True,'path':str(link),'target':str(real)}
+            link.unlink()
+        link.symlink_to(real)
+        return {'ok':True,'path':str(link),'target':str(real)}
+    except Exception as exc:
+        return {'ok':False,'error':str(exc),'target':str(real)}
+
+
+def _store_successful_build_source(sid:int,archive:Path,kind:str)->str:
+    d=BUILD_SOURCE_ROOT/str(sid); d.mkdir(parents=True,exist_ok=True)
+    ext='zip' if kind=='zip' else 'rar'; dst=d/f'last-successful.{ext}'
+    tmp=d/f'.last-successful.{ext}.tmp'
+    shutil.copy2(archive,tmp); os.replace(tmp,dst)
+    # Remove stale other extension.
+    for other in d.glob('last-successful.*'):
+        if other!=dst:
+            try: other.unlink()
+            except OSError: pass
+    run(['chown','-R','root:cs16',str(d)],check=False); run(['chmod','0750',str(d)],check=False)
+    return str(dst)
+
+
+def _runtime_error_lines(sid:int,lines:int=260,since_epoch:float|None=None)->list[str]:
+    # Runtime validation must only judge the *new* start. Older errors from the
+    # previous assembly may still be in the journal and used to make a repaired
+    # build look broken even though those lines predate the swap/restart.
+    if since_epoch is not None:
+        cp=run(['journalctl','-u',f'hyper-cs16@{sid}.service','--since',f'@{max(0.0,float(since_epoch)-1.0):.3f}','--no-pager','-o','cat'],check=False)
+        text=(cp.stdout or '')[-64000:]
+    else:
+        text=_recent_failure_log(sid,lines)
+    out=[]
+    pats=('run time error','bad load','error:','failed to open dictionary','you need rehlds or regamedll','invalid cvar pointer','undefined symbol','module/ library required')
+    for ln in text.splitlines():
+        low=ln.lower()
+        if any(x in low for x in pats): out.append(ln.strip())
+    # de-duplicate exact spam while preserving order
+    return list(dict.fromkeys(out))[-80:]
+
+
+def _critical_runtime_errors(lines:list[str])->list[str]:
+    critical=[]
+    core_markers=('zombie_plague40.amxx','zp_core.amxx','zp50_core.amxx','metamod','amxmodx_mm','modules list not found','0 plugins, 0 running','you need rehlds or regamedll')
+    for ln in lines:
+        low=ln.lower()
+        if any(x in low for x in core_markers): critical.append(ln)
+    return critical
 
 
 def _overlay_full_cstrike_content(payload:Path, stage_cstrike:Path):
@@ -2753,6 +2905,32 @@ def _normalize_imported_text_configs(server_root:Path):
         except Exception as exc:
             failed.append({'file':str(p),'error':str(exc)})
     return {'changed':changed,'failed':failed}
+
+
+def _normalize_plugin_comment_syntax(server_root:Path)->dict:
+    """Fix only old inline // comments; never disable/split/dedupe plugins."""
+    cfg=server_root/'cstrike/addons/amxmodx/configs'; changed=[]
+    if not cfg.is_dir(): return {'changed':changed}
+    for f in sorted(cfg.glob('plugins*.ini')):
+        if not f.is_file(): continue
+        data=f.read_bytes().replace(b'\r\n',b'\n').replace(b'\r',b'\n')
+        text=data.decode('latin1','ignore'); out=[]; touched=False
+        for line in text.splitlines():
+            st=line.lstrip()
+            if not st or st.startswith(';'):
+                out.append(line); continue
+            if st.startswith('//'):
+                prefix=line[:len(line)-len(st)]
+                out.append(prefix+';'+st[2:]); touched=True; continue
+            # Only change inline // after an actual .amxx token.
+            m=re.match(r'^(\s*[^;\s]+\.amxx(?:\s+debug)?)(\s+)//(.*)$',line,re.I)
+            if m:
+                out.append(m.group(1)+' ; '+m.group(3).strip()); touched=True
+            else:
+                out.append(line)
+        if touched:
+            f.write_bytes(('\n'.join(out).rstrip()+'\n').encode('latin1','ignore')); changed.append(f.name)
+    return {'changed':changed}
 
 
 def _preserve_server_identity_files(old_root:Path, new_root:Path):
@@ -2978,17 +3156,7 @@ def _runtime_mod_report(c:dict, expect_zp:bool=False, expected_plugins:int=0):
             report['zp_command_rejected']=True
         report['zp_runtime']=bool(report.get('zp_plugin_running'))
     report['expected_plugin_count']=int(expected_plugins or 0)
-    total=int(report.get('runtime_plugin_total') or 0)
-    running=int(report.get('runtime_plugin_running') or 0)
-    module_total=int(report.get('runtime_module_total') or 0)
-    module_correct=int(report.get('runtime_module_correct') or 0)
-    # Completion is about the actual loader state, not harmless init-time journal
-    # warnings.  If every configured plugin is present/running and every reported
-    # AMXX module is correct, keep the build.  Real `error`/`bad load` rows remain
-    # fatal through plugin_errors.
-    plugins_complete=(not expected_plugins or (total>=int(expected_plugins) and running>=int(expected_plugins)))
-    modules_complete=(module_total==0 or module_correct>=module_total)
-    report['plugin_set_complete']=bool(plugins_complete and modules_complete and not report.get('plugin_errors'))
+    report['plugin_set_complete']=bool((not expected_plugins or int(report.get('runtime_plugin_total') or 0)>=int(expected_plugins)) and not report.get('plugin_errors'))
     return report
 
 
@@ -3034,84 +3202,45 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload',preferre
     extract_root=STATE_ROOT/f'.build-extract-{sid}-{token}'
     backup_root=parent/BUILD_BACKUP_DIR_NAME; backup_root.mkdir(parents=True,exist_ok=True)
     backup=backup_root/f'{sid}-before-build-{time.strftime("%Y%m%d-%H%M%S")}-{token}'
-    old_existed=path.exists(); swapped=False
+    old_existed=path.exists(); swapped=False; kind=''
     try:
         if stage.exists(): shutil.rmtree(stage)
+        # Root engine fallback only. cstrike itself will be replaced by the upload.
         run(['rsync','-a','--delete',str(base)+'/',str(stage)+'/'],timeout=1200)
         kind=_extract_build_archive(archive,extract_root)
         payload,layout=_detect_build_payload(extract_root)
-        payload_cstrike=(payload/'cstrike') if layout=='server-root' else payload
-        runtime_profile=_analyze_build_runtime(payload_cstrike)
-        root_runtime_profile=_analyze_server_root_runtime(payload,layout)
-        exact_runtime=False
-        if root_runtime_profile.get('complete_server_root_runtime'):
-            # True full-server archive: keep its root engine/runtime AND exact
-            # cstrike tree.  The clean SteamCMD stage only fills files the pack
-            # omitted; uploaded files always win.
-            _overlay_full_server_root(payload,stage)
-            import_mode='full-server-root'
-            exact_runtime=True
-        elif runtime_profile.get('complete_linux_runtime'):
-            # A ready-made Linux assembly must stay a ready-made assembly. Keep the
-            # exact cstrike runtime (cs.so + Metamod + AMXX + modules) and only keep
-            # the outer HLDS engine from our SteamCMD base.
-            _overlay_full_cstrike_content(payload_cstrike,stage/'cstrike')
-            import_mode='full-linux-cstrike'
-            exact_runtime=True
-        else:
-            # Content-only/Windows packs still use the compatibility overlay so a
-            # random old binary cannot replace the known-good Linux loader.
-            _overlay_cstrike_content(payload_cstrike,stage/'cstrike')
-            import_mode='compat-content-overlay'
-        layout=layout+'/'+import_mode
-        if old_existed:
-            _preserve_server_identity_files(path,stage)
+
+        exact_copy=_overlay_uploaded_build_exact(payload,layout,stage,base)
+        manifest=_verify_uploaded_payload(payload,layout,stage)
+        if not manifest.get('ok'):
+            raise RuntimeError('Archive copy verification failed before any compatibility repair: '+json.dumps(manifest,ensure_ascii=False))
+
+        runtime_fill=_fill_missing_linux_runtime(stage,base)
         text_normalization=_normalize_imported_text_configs(stage)
         if text_normalization.get('failed'):
             raise RuntimeError('Failed to normalize imported text configs: '+json.dumps(text_normalization['failed'][:8],ensure_ascii=False))
-        compatibility_actions=[]
-        # ReAPI / RegisterHookChain content is not functional on a plain stock
-        # HLDS + stock GameDLL.  If a cstrike-only pack needs it and did not bring
-        # a ReHLDS root, upgrade only the engine/GameDLL compatibility layer while
-        # leaving its Metamod/AMXX/plugins untouched.
-        if _build_requires_rehlds(stage) and not _engine_looks_rehlds(stage):
-            install_rehlds(stage)
-            compatibility_actions.append('ReHLDS + ReGameDLL installed because uploaded plugins require ReAPI/HookChains')
-            import_mode += '+auto-rehlds'
-            layout=layout.split('/')[0]+'/'+import_mode
+        plugin_comment_fix=_normalize_plugin_comment_syntax(stage)
 
+        # Do not sanitize, disable, rebuild or replace the uploaded plugin/module
+        # lists. Missing pieces are filled around the archive, never instead of it.
+        plugin_repairs=[]; module_repairs={}; metamod_repairs={}
+
+        reapi_compat=_ensure_reapi_compatible_stack(stage)
+        runtime_profile=_analyze_build_runtime(stage/'cstrike')
         runtime_preflight=_critical_runtime_preflight(stage/'cstrike',runtime_profile)
         if not runtime_preflight.get('ok'):
-            raise RuntimeError('Uploaded Linux runtime has missing dependencies: '+json.dumps(runtime_preflight.get('missing_dependencies',[])[:12],ensure_ascii=False))
-        if not (stage/'hlds_linux').is_file(): raise RuntimeError('Fresh HLDS engine is missing after assembly preparation')
+            raise RuntimeError('Prepared Linux runtime has missing shared-library dependencies: '+json.dumps(runtime_preflight.get('missing_dependencies',[])[:20],ensure_ascii=False))
+        if not (stage/'hlds_linux').is_file(): raise RuntimeError('HLDS/ReHLDS engine is missing after assembly preparation')
         if not (stage/'cstrike').is_dir(): raise RuntimeError('cstrike directory is missing after assembly preparation')
         for exe in ['hlds_linux','hlds_run']:
             if (stage/exe).exists(): os.chmod(stage/exe,0o775)
-        stage_cfg={**c,'path':str(stage)}
-        # A complete uploaded runtime is authoritative.  Do not "clean" its
-        # plugins.ini/modules.ini/metamod list: those transformations were the
-        # reason old ready-made builds lost half their modules/plugins.  Content
-        # overlays still receive conservative sanitation.
-        if exact_runtime:
-            plugin_repairs=[]
-            module_repairs={'changed':False,'duplicates':[],'preserved_exact_runtime':True}
-            metamod_repairs={'changed':False,'duplicates':[],'invalid_amxx_modules':[],'preserved_exact_runtime':True}
-        else:
-            plugin_repairs=_sanitize_all_plugin_lists(stage_cfg)
-            module_repairs=_sanitize_modules_ini(stage_cfg)
-            metamod_repairs=_sanitize_metamod_plugins(stage_cfg)
+
         external_fastdl=_extract_external_fastdl_url(stage)
         zp_repairs=_repair_zp_pack_assets(stage,external_fastdl)
         detected=_detect_mod_profile_at(stage)
-        # The uploaded build is authoritative for gameplay/server.cfg. Only the
-        # launch port/slots stay panel-managed because systemd passes them on the
-        # command line. Adopt hostname/RCON/password from the build where present.
         imported_cfg=_adopt_imported_cfg(stage,c)
-        # FastDL is the one transport setting HYPER-HOST intentionally owns. The
-        # managed block is appended after every build directive, so a pack's old
-        # FastDL can never override the local per-server mirror.
         fastdl_cfg=_fastdl_apply_cfg(c,stage)
-        expected_runtime_manifest=_runtime_binary_manifest(stage/'cstrike') if exact_runtime else {}
+
         maps=stage/'cstrike/maps'; preferred=str(preferred_map_override or c.get('start_map') or '')
         if not preferred or not (maps/(preferred+'.bsp')).is_file():
             choices=sorted(p.stem for p in maps.glob('*.bsp') if SAFE_MAP.fullmatch(p.stem)) if maps.is_dir() else []
@@ -3126,43 +3255,41 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload',preferre
             else: raise RuntimeError('Assembly has no playable .bsp maps')
         c['start_map']=preferred; db_update_start_map(sid,preferred)
         c['game_mode']='zp43' if detected.get('zp_active') else 'classic'
+        if reapi_compat.get('rehlds') or reapi_compat.get('regamedll'):
+            c['profile']='rehlds'; db_update_profile(sid,'rehlds')
+        import_mode='exact-server-root' if layout=='server-root' else 'exact-cstrike-archive'
+        layout_result=layout+'/'+import_mode
+
+        if old_existed:
+            # Keep this account's panel admins/bans, but no mod/runtime file is
+            # borrowed from the old server.
+            _preserve_server_identity_files(path,stage)
+
         normalize_permissions(stage)
         run(['systemctl','stop',f'hyper-cs16@{sid}.service'],check=False,timeout=90)
         if old_existed: os.replace(path,backup)
         os.replace(stage,path); swapped=True
         c['path']=str(path); c['custom_build_source']=source_label; c['custom_build_installed_at']=int(time.time()); save_server(c)
+
+        mysql_socket=_ensure_legacy_mysql_socket()
         sql_warning=''
         try:
-            # Do not edit modules.ini of a ready-made runtime.  sql.cfg is enough
-            # for standard SQLX plugins, and legacy localhost plugins get the
-            # /tmp/mysql.sock compatibility link below.
-            sql_info=sql_provision(sid,preserve_runtime=exact_runtime)
+            sql_info=sql_provision(sid)
         except Exception as sql_exc:
             sql_info={'ok':False,'error':str(sql_exc)}; sql_warning='Automatic SQL setup failed: '+str(sql_exc)
-        mysql_socket_compat=ensure_mysql_socket_compat()
         db_update_identity(sid,str(c.get('hostname') or ''))
         db_update_mode(sid,str(c.get('game_mode','classic')),int(c.get('bots_enabled',0)),int(c.get('bots_quota',9)),int(c.get('bots_difficulty',3)))
-        # Mirror the final installed files before the first client can connect.
-        # This also persists the canonical sv_downloadurl block in the real server.cfg.
+        db_update_profile(sid,str(c.get('profile','classic')))
+
         fastdl_info=fastdl_sync(sid,True)
         c=load_server(sid)
-        if expected_runtime_manifest:
-            manifest_diff=_manifest_diff(expected_runtime_manifest,_runtime_binary_manifest(path/'cstrike'))
-            if manifest_diff:
-                raise RuntimeError('Imported runtime binaries changed after installation: '+json.dumps(manifest_diff[:20],ensure_ascii=False))
-        else:
-            manifest_diff=[]
         run(['systemctl','daemon-reload'],check=False)
-        start_epoch=time.time()
+        start_mark=time.time()
         run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False,timeout=60)
-        ok,detail=wait_server_ready(c,50.0)
+        ok,detail=wait_server_ready(c,55.0)
         runtime_hydrated=[]
         if not ok:
-            # Some commercial/old packs intentionally omitted client assets from
-            # the ZIP because their previous host supplied them only over FastDL.
-            # If the crash log names such a resource, recover it from that old URL
-            # once, mirror it to our FastDL, and retry before deciding to rollback.
-            journal=_recent_failure_log(sid,180)
+            journal=_recent_failure_log(sid,220)
             broken,assets=_parse_plugin_failures(journal)
             if external_fastdl and assets:
                 runtime_hydrated=_hydrate_resources_from_external_fastdl(path,external_fastdl,assets)
@@ -3172,100 +3299,84 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload',preferre
                     run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False,timeout=60)
                     ok,detail=wait_server_ready(c,45.0)
             if not ok:
-                # Do NOT call recover_server() here: that routine is allowed to rename
-                # plugins-zplague.ini and leave a ZM upload running as classic. An
-                # imported build is either running as uploaded, or we rollback it.
-                journal=_recent_failure_log(sid,180)
+                journal=_recent_failure_log(sid,220)
                 broken,assets=_parse_plugin_failures(journal)
                 hint=''
                 if broken: hint+=' Broken AMXX: '+', '.join(dict.fromkeys(broken))[:1400]+'.'
                 if assets: hint+=' Missing resources: '+', '.join(dict.fromkeys(assets))[:1400]+'.'
                 if external_fastdl: hint+=' Previous FastDL checked: '+external_fastdl[:500]+'.'
-                raise RuntimeError(f'Uploaded assembly did not start as uploaded: {detail}.{hint} {journal[-7000:]}')
+                raise RuntimeError(f'Uploaded assembly cannot keep HLDS running: {detail}.{hint} {journal[-7000:]}')
+
+        # Some packs only reveal their ReAPI requirement after plugin_init().
+        # Repair that exact incompatibility in place and restart once.
+        fresh_errors=_runtime_error_lines(sid,260,start_mark)
+        if any('you need rehlds or regamedll' in x.lower() for x in fresh_errors):
+            install_rehlds(path)
+            c=load_server(sid); c['profile']='rehlds'; save_server(c); db_update_profile(sid,'rehlds')
+            start_mark=time.time()
+            run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False,timeout=60)
+            ok,detail=wait_server_ready(c,45.0)
+            if not ok: raise RuntimeError('ReAPI compatibility repair installed ReHLDS/ReGameDLL, but server no longer starts: '+detail+' '+_recent_failure_log(sid,160)[-5000:])
+            fresh_errors=_runtime_error_lines(sid,260,start_mark)
+            reapi_compat.setdefault('actions',[]).append('runtime log requested ReHLDS/ReGameDLL; repaired live build and restarted once')
 
         detected=_detect_mod_profile_at(path)
-        # Give map/plugin init a moment to settle, then verify the *whole* configured
-        # AMXX set. Previous builds only checked that the ZP core appeared, which
-        # could label a half-broken 69-plugin assembly as "really running".
         time.sleep(2.0)
         runtime_report=_runtime_mod_report(c,bool(detected.get('zp_active')),int(detected.get('active_plugin_count') or 0))
+        runtime_errors=_runtime_error_lines(sid,300,start_mark)
+        critical_errors=_critical_runtime_errors(runtime_errors)
 
-        # Runtime errors are diagnostics, not automatically a reason to destroy a
-        # fully loaded build.  A plugin can emit an old/native warning during init
-        # and still stay RUNNING.  Only bad-load/error status, missing configured
-        # plugins/modules, dead ZP core or a crashed server are fatal below.
-        fresh_journal=_journal_since(sid,start_epoch,700)
-        runtime_warning_lines=[]
-        for ln in fresh_journal.splitlines():
-            low=ln.lower()
-            if ('[amxx]' in low and ('run time error' in low or 'invalid cvar pointer' in low or 'native "registerham"' in low or 'native "registerhookchain"' in low)) or '[reapi]' in low:
-                s=ln.strip()
-                if s and s not in runtime_warning_lines: runtime_warning_lines.append(s)
-        runtime_report['runtime_warnings']=runtime_warning_lines[:80]
-        runtime_report['runtime_warning_count']=len(runtime_warning_lines)
         if detected.get('zp_active') and not runtime_report.get('zp_runtime'):
-            journal=_recent_failure_log(sid,180)
-            plugout=str(runtime_report.get('amxx_plugins') or '')[-6000:]
-            modsout=str(runtime_report.get('amxx_modules') or runtime_report.get('amxx_modules_error') or '')[-3000:]
-            metaout=str(runtime_report.get('meta_list') or runtime_report.get('meta_error') or '')[-3000:]
-            zpout=str(runtime_report.get('zp_query') or runtime_report.get('zp_query_error') or '')[-1500:]
-            raise RuntimeError('Zombie Plague files were installed but the mode did not load at runtime. '
-                               +'ZP plugin lines: '+json.dumps(runtime_report.get('zp_plugin_lines') or [],ensure_ascii=False)
-                               +' | zp_on: '+zpout+' | AMXX plugins: '+plugout+' | AMXX modules: '+modsout
-                               +' | Metamod: '+metaout+' | LOG: '+journal[-6000:])
+            # Keep the uploaded build installed for inspection instead of silently
+            # putting an unrelated previous build back. It is online, but unhealthy.
+            critical_errors.append('Zombie Plague core is configured but not running')
 
-        if not runtime_report.get('plugin_set_complete'):
-            journal=_recent_failure_log(sid,220)
-            raise RuntimeError('Assembly started, but AMXX did not load the complete configured plugin set. '
-                               +f'Configured: {int(detected.get("active_plugin_count") or 0)}, '
-                               +f'runtime: {int(runtime_report.get("runtime_plugin_total") or 0)}, '
-                               +f'running: {int(runtime_report.get("runtime_plugin_running") or 0)}. '
-                               +'Errors: '+json.dumps(runtime_report.get('plugin_errors') or [],ensure_ascii=False)
-                               +' | AMXX plugins: '+str(runtime_report.get('amxx_plugins') or '')[-7000:]
-                               +' | AMXX modules: '+str(runtime_report.get('amxx_modules') or '')[-3500:]
-                               +' | Metamod: '+str(runtime_report.get('meta_list') or '')[-3500:]
-                               +' | LOG: '+journal[-7000:])
-
-        # Persist what actually passed the runtime validation so the UI can show
-        # a concrete 69/69-style result instead of a vague "detected mod" label.
         c=load_server(sid)
         c['custom_build_import_mode']=import_mode
         c['custom_build_expected_plugins']=int(detected.get('active_plugin_count') or 0)
         c['custom_build_runtime_plugins']=int(runtime_report.get('runtime_plugin_total') or 0)
         c['custom_build_runtime_running']=int(runtime_report.get('runtime_plugin_running') or 0)
-        c['custom_build_runtime_warnings']=int(runtime_report.get('runtime_warning_count') or 0)
+        c['custom_build_runtime_healthy']=0 if critical_errors else 1
         save_server(c)
 
+        source_copy=_store_successful_build_source(sid,archive,kind)
         _prune_build_backups(backup_root,sid,3)
         warnings=[]
-        for w in (zp_repairs.get('warnings') or []):
-            warnings.append(str(w))
-        if runtime_report.get('plugin_errors'):
-            warnings.append('AMXX reports plugin errors: '+' | '.join(runtime_report['plugin_errors'][:12]))
-        if runtime_report.get('runtime_warnings'):
-            warnings.append(f'Runtime emitted {len(runtime_report["runtime_warnings"])} warning/error line(s), but the configured plugin set is fully loaded; build was kept installed. First: '+str(runtime_report['runtime_warnings'][0])[:500])
+        for w in (zp_repairs.get('warnings') or []): warnings.append(str(w))
+        if runtime_report.get('plugin_errors'): warnings.append('AMXX: '+' | '.join(runtime_report['plugin_errors'][:12]))
+        if runtime_errors:
+            warnings.append(f'Runtime emitted {len(runtime_errors)} unique warning/error line(s). First: {runtime_errors[0]}')
+        if critical_errors:
+            warnings.append('CRITICAL runtime errors remain: '+' | '.join(critical_errors[:8]))
         if sql_warning: warnings.append(sql_warning)
-        result={'ok':True,'id':sid,'archive_type':kind,'layout':layout,'start_map':c['start_map'],'backup':str(backup) if old_existed else '', 'source':source_label,'query':detail,
-                'hostname':c.get('hostname',''),'game_mode':c.get('game_mode','classic'),'detected_mod':detected.get('detected_mod_name',''),'worldarena_installed':bool(detected.get('worldarena_installed')),
-                'plugin_repairs':plugin_repairs,'module_repairs':module_repairs,'metamod_repairs':metamod_repairs,'zp_repairs':zp_repairs,
-                'text_normalization':text_normalization,'imported_config':imported_cfg,'runtime_mod':runtime_report,'sql':sql_info,
+        if not mysql_socket.get('ok'): warnings.append('Legacy MySQL socket: '+str(mysql_socket.get('error') or 'not ready'))
+
+        result={'ok':True,'id':sid,'archive_type':kind,'layout':layout_result,'start_map':c['start_map'],
+                'backup':str(backup) if old_existed else '', 'source':source_label,'source_copy':source_copy,'query':detail,
+                'hostname':c.get('hostname',''),'game_mode':c.get('game_mode','classic'),'profile':c.get('profile','classic'),
+                'detected_mod':detected.get('detected_mod_name',''),'worldarena_installed':bool(detected.get('worldarena_installed')),
+                'plugin_repairs':plugin_repairs,'module_repairs':module_repairs,'metamod_repairs':metamod_repairs,
+                'plugin_comment_fix':plugin_comment_fix,'zp_repairs':zp_repairs,'text_normalization':text_normalization,
+                'imported_config':imported_cfg,'runtime_mod':runtime_report,'runtime_errors':runtime_errors,
+                'critical_runtime_errors':critical_errors,'runtime_healthy':not critical_errors,'sql':sql_info,'mysql_socket':mysql_socket,
                 'fastdl':fastdl_info,'fastdl_config':fastdl_cfg,'previous_fastdl':external_fastdl,'runtime_hydrated':runtime_hydrated,
-                'import_mode':import_mode,'runtime_profile':runtime_profile,'root_runtime_profile':root_runtime_profile,'runtime_preflight':runtime_preflight,
-                'runtime_manifest_verified':not bool(manifest_diff),'runtime_manifest_files':len(expected_runtime_manifest),
-                'compatibility_actions':compatibility_actions,'mysql_socket_compat':mysql_socket_compat,
+                'import_mode':import_mode,'runtime_profile':runtime_profile,'runtime_preflight':runtime_preflight,
+                'runtime_fill':runtime_fill,'reapi_compat':reapi_compat,'archive_manifest':manifest,
                 'configured_plugins':int(detected.get('active_plugin_count') or 0),
                 'runtime_plugins':int(runtime_report.get('runtime_plugin_total') or 0),
                 'runtime_running':int(runtime_report.get('runtime_plugin_running') or 0)}
         if warnings: result['warning']=' '.join(warnings)
         return result
     except Exception as exc:
-        # Transactional rollback: a bad pack must never destroy a working server or
-        # leave its SQL/state pointing at the attempted map/mode.
+        # Only a hard failure to keep the server process alive triggers rollback.
+        # Runtime/plugin warnings are returned above while the uploaded assembly
+        # remains installed, which makes debugging possible without losing it.
         try:
             save_server(original_state)
             db_update_identity(sid,str(original_state.get('hostname') or ''))
             db_update_start_map(sid,str(original_state.get('start_map') or 'de_dust2'))
             db_update_mode(sid,str(original_state.get('game_mode') or 'classic'),int(original_state.get('bots_enabled',0)),int(original_state.get('bots_quota',9)),int(original_state.get('bots_difficulty',3)))
+            db_update_profile(sid,str(original_state.get('profile') or 'classic'))
         except Exception:
             pass
         try: run(['systemctl','stop',f'hyper-cs16@{sid}.service'],check=False,timeout=60)
@@ -3276,7 +3387,7 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload',preferre
                 if backup.exists(): os.replace(backup,path)
                 normalize_permissions(path)
                 run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False,timeout=60)
-                raise RuntimeError(f'Assembly install failed, previous working server was restored automatically: {exc}')
+                raise RuntimeError(f'Assembly install hard-failed; previous server was restored and kept intact: {exc}')
             except RuntimeError:
                 raise
             except Exception as rex:
@@ -3292,7 +3403,6 @@ def install_custom_build(sid:int,archive:Path,source_label:str='upload',preferre
         try: archive.unlink()
         except OSError: pass
 
-
 def build_install_upload(sid:int,token:str):
     archive=_build_take_staged(token)
     return install_custom_build(sid,archive,'upload:'+token.rsplit('.',1)[-1])
@@ -3302,6 +3412,67 @@ def build_install_url(sid:int,url:str):
     archive=_download_build_url(url)
     host=urllib.parse.urlparse(url).netloc
     return install_custom_build(sid,archive,'url:'+host[:120])
+
+def build_repair_current(sid:int):
+    """Repair the currently installed assembly in-place without replacing it.
+
+    A full backup is created first. This action never imports another server and
+    never disables plugins. It only fills missing Linux runtime pieces, fixes
+    ReAPI/ReHLDS compatibility and legacy MySQL socket access, then restarts.
+    """
+    require_root(); c=load_server(sid); path=safe_server_path(sid)
+    if not path.is_dir(): raise RuntimeError('Current server directory is missing')
+    base=Path(load_runtime().get('base_game_dir','/srv/hyper-cs16/base-hlds')); ensure_base('classic')
+    backup_root=path.parent/BUILD_BACKUP_DIR_NAME; backup_root.mkdir(parents=True,exist_ok=True)
+    token=secrets.token_hex(6); backup=backup_root/f'{sid}-before-runtime-repair-{time.strftime("%Y%m%d-%H%M%S")}-{token}'
+    run(['rsync','-a',str(path)+'/',str(backup)+'/'],timeout=1800)
+    actions=[]
+    try:
+        fill=_fill_missing_linux_runtime(path,base)
+        if fill.get('added'): actions.append('filled missing Linux/AMXX runtime files: '+str(len(fill['added'])))
+        if fill.get('replaced_invalid'): actions.append('replaced non-Linux runtime files: '+', '.join(fill['replaced_invalid'][:10]))
+        norm=_normalize_imported_text_configs(path)
+        comments=_normalize_plugin_comment_syntax(path)
+        socket_fix=_ensure_legacy_mysql_socket()
+        if socket_fix.get('ok'): actions.append('legacy MySQL /tmp/mysql.sock enabled')
+        reapi=_ensure_reapi_compatible_stack(path)
+        actions += list(reapi.get('actions') or [])
+        if reapi.get('rehlds') or reapi.get('regamedll'):
+            c['profile']='rehlds'; save_server(c); db_update_profile(sid,'rehlds')
+        normalize_permissions(path)
+        try: sql_info=sql_provision(sid)
+        except Exception as exc: sql_info={'ok':False,'error':str(exc)}
+        fastdl=fastdl_sync(sid,True)
+        run(['systemctl','daemon-reload'],check=False)
+        start_mark=time.time()
+        run(['systemctl','restart',f'hyper-cs16@{sid}.service'],check=False,timeout=60)
+        ok,detail=wait_server_ready(load_server(sid),50.0)
+        if not ok:
+            raise RuntimeError('Server did not return after in-place runtime repair: '+detail+' '+_recent_failure_log(sid,180)[-5000:])
+        time.sleep(2.0)
+        c=load_server(sid); detected=_detect_mod_profile_at(path)
+        report=_runtime_mod_report(c,bool(detected.get('zp_active')),int(detected.get('active_plugin_count') or 0))
+        errors=_runtime_error_lines(sid,300,start_mark); critical=_critical_runtime_errors(errors)
+        return {'ok':True,'id':sid,'kept_current_build':True,'backup':str(backup),'actions':actions,
+                'runtime_fill':fill,'normalization':norm,'plugin_comment_fix':comments,'mysql_socket':socket_fix,
+                'reapi_compat':reapi,'sql':sql_info,'fastdl':fastdl,'runtime_mod':report,
+                'runtime_errors':errors,'critical_runtime_errors':critical,'runtime_healthy':not critical,
+                'configured_plugins':int(detected.get('active_plugin_count') or 0),
+                'runtime_plugins':int(report.get('runtime_plugin_total') or 0),'runtime_running':int(report.get('runtime_plugin_running') or 0)}
+    except Exception as exc:
+        # Restore the exact same current assembly from the backup; never substitute
+        # a clean/classic server when a repair attempt fails.
+        run(['systemctl','stop',f'hyper-cs16@{sid}.service'],check=False,timeout=60)
+        try:
+            if path.exists(): shutil.rmtree(path)
+            os.replace(backup,path); normalize_permissions(path)
+            run(['systemctl','start',f'hyper-cs16@{sid}.service'],check=False,timeout=60)
+            raise RuntimeError('Runtime repair failed; the same pre-repair assembly was restored: '+str(exc))
+        except RuntimeError:
+            raise
+        except Exception as rex:
+            raise RuntimeError(f'Runtime repair failed: {exc}; restoring its backup also failed: {rex}')
+
 
 def _copy_tree_contents(src:Path,dst:Path):
     dst.mkdir(parents=True,exist_ok=True)
@@ -3692,7 +3863,7 @@ def main():
     sp.add_parser('base-install')
     sp.add_parser('base-maps')
     c=sp.add_parser('server-create'); c.add_argument('id',type=int); c.add_argument('--name',required=True); c.add_argument('--port',type=int,required=True); c.add_argument('--slots',type=int,default=16); c.add_argument('--map',default='de_dust2'); c.add_argument('--hostname',required=True); c.add_argument('--password',default=''); c.add_argument('--profile',choices=['classic','rehlds'],default='classic')
-    for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','ftp-repair','ftp-test','network','delete','repair-runtime','mods-status','nat-upnp','network-fix','repair-content','sql-status','fastdl-sync','fastdl-status']:
+    for a in ['start','stop','restart','status','players','maps','plugins','update','reinstall','ftp-reset','ftp-repair','ftp-test','network','delete','repair-runtime','build-repair-current','mods-status','nat-upnp','network-fix','repair-content','sql-status','fastdl-sync','fastdl-status']:
         q=sp.add_parser(a); q.add_argument('id',type=int)
     q=sp.add_parser('sql-provision'); q.add_argument('id',type=int); q.add_argument('--rotate',action='store_true')
     q=sp.add_parser('sql-table'); q.add_argument('id',type=int); q.add_argument('table'); q.add_argument('--limit',type=int,default=100)
@@ -3786,6 +3957,7 @@ def main():
             if len(raw)>8192: raise RuntimeError('Assembly URL is too long')
             result=build_install_url(args.id,raw.decode('utf-8','replace').strip())
         elif args.cmd=='repair-runtime': result=repair_server_runtime(args.id)
+        elif args.cmd=='build-repair-current': result=build_repair_current(args.id)
         elif args.cmd=='delete': result=server_delete(args.id)
         elif args.cmd=='ftp-restore': result=ftp_restore()
         elif args.cmd=='staging-prepare': result=staging_prepare()
