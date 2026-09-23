@@ -1,0 +1,1054 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.request
+import zipfile
+from pathlib import Path
+
+STATE_ROOT = Path('/var/lib/hyper-cs16')
+SERVER_STATE = STATE_ROOT / 'servers'
+LEGACY_STATE = Path('/etc/hyper-cs16/servers')
+RUNTIME_FILE = Path('/etc/hyper-cs16/runtime.json')
+STACK_STATE = STATE_ROOT / 'runtime-stack'
+BACKUP_ROOT = Path('/srv/hyper-cs16/runtime-backups')
+CACHE_ROOT = Path('/srv/hyper-cs16/runtime-cache')
+CORE_CTL = Path('/usr/local/sbin/hyper-cs16-ctl')
+
+TARGETS = {
+    'rehlds': '3.15.0.896',
+    'regamedll': '5.30.0.814',
+    'metamod': '1.3.0.149',
+    'reapi': '5.29.0.358',
+    'amxx19': '1.9.0-git5303',
+    'amxx110': '1.10.0-git5486',
+    'reunion': '0.2.0.25',
+    'yapb': 'latest',
+}
+
+GITHUB_COMPONENTS = {
+    'rehlds': ('rehlds/ReHLDS', TARGETS['rehlds'], ('rehlds', 'bin')),
+    'regamedll': ('rehlds/ReGameDLL_CS', TARGETS['regamedll'], ('regamedll', 'bin')),
+    'metamod': ('rehlds/Metamod-R', TARGETS['metamod'], ('metamod', 'bin')),
+    'reapi': ('rehlds/ReAPI', TARGETS['reapi'], ('reapi', 'bin')),
+    'reunion': ('rehlds/ReUnion', TARGETS['reunion'], ('reunion',)),
+}
+
+AMXX_URLS = {
+    'amxx19_base': 'https://www.amxmodx.org/amxxdrop/1.9/amxmodx-1.9.0-git5303-base-linux.tar.gz',
+    'amxx19_cs': 'https://www.amxmodx.org/amxxdrop/1.9/amxmodx-1.9.0-git5303-cstrike-linux.tar.gz',
+    'amxx110_base': 'https://www.amxmodx.org/amxxdrop/1.10/amxmodx-1.10.0-git5486-base-linux.tar.gz',
+    'amxx110_cs': 'https://www.amxmodx.org/amxxdrop/1.10/amxmodx-1.10.0-git5486-cstrike-linux.tar.gz',
+}
+
+
+def emit(data, code=0):
+    print(json.dumps(data, ensure_ascii=False, separators=(',', ':')))
+    raise SystemExit(code)
+
+
+def require_root():
+    if os.geteuid() != 0:
+        emit({'ok': False, 'error': 'root privileges required'}, 2)
+
+
+def run(cmd, check=True, timeout=600, cwd=None):
+    cp = subprocess.run(
+        [str(x) for x in cmd],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+        timeout=timeout,
+        cwd=str(cwd) if cwd else None,
+    )
+    if check and cp.returncode != 0:
+        raise RuntimeError((cp.stdout or '').strip()[-7000:] or f'Command failed: {cmd!r}')
+    return cp
+
+
+def read_json(path: Path, default=None):
+    try:
+        obj = json.loads(path.read_text(encoding='utf-8'))
+        return obj
+    except Exception:
+        return {} if default is None else default
+
+
+def runtime_cfg():
+    d = read_json(RUNTIME_FILE, {})
+    if not isinstance(d, dict):
+        raise RuntimeError('runtime.json is invalid')
+    return d
+
+
+def state_path(sid: int):
+    p = SERVER_STATE / f'{sid}.json'
+    if p.is_file():
+        return p
+    q = LEGACY_STATE / f'{sid}.json'
+    if q.is_file():
+        return q
+    raise RuntimeError(f'Server #{sid} state JSON not found')
+
+
+def load_server(sid: int):
+    p = state_path(sid)
+    c = read_json(p, {})
+    if not isinstance(c, dict) or not c:
+        raise RuntimeError(f'Server #{sid} state is invalid')
+    c.setdefault('id', sid)
+    c.setdefault('path', str(Path(runtime_cfg().get('servers_dir', '/srv/hyper-cs16/servers')) / str(sid)))
+    return c
+
+
+def save_server(c: dict):
+    SERVER_STATE.mkdir(parents=True, exist_ok=True)
+    p = SERVER_STATE / f'{int(c["id"])}.json'
+    tmp = p.with_name('.' + p.name + '.' + secrets.token_hex(4) + '.tmp')
+    tmp.write_text(json.dumps(c, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    os.chmod(tmp, 0o640)
+    try:
+        shutil.chown(tmp, user='root', group='cs16')
+    except Exception:
+        pass
+    os.replace(tmp, p)
+
+
+def manifest_path(sid: int):
+    STACK_STATE.mkdir(parents=True, exist_ok=True)
+    return STACK_STATE / f'{sid}.json'
+
+
+def load_manifest(sid: int):
+    d = read_json(manifest_path(sid), {})
+    return d if isinstance(d, dict) else {}
+
+
+def save_manifest(sid: int, data: dict):
+    STACK_STATE.mkdir(parents=True, exist_ok=True)
+    data = dict(data)
+    data['server_id'] = sid
+    data['updated_at'] = int(time.time())
+    p = manifest_path(sid)
+    tmp = p.with_name('.' + p.name + '.' + secrets.token_hex(4) + '.tmp')
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    os.chmod(tmp, 0o640)
+    try:
+        shutil.chown(tmp, user='root', group='cs16')
+    except Exception:
+        pass
+    os.replace(tmp, p)
+
+
+def core(args, timeout=120):
+    if not CORE_CTL.is_file():
+        return {'ok': False, 'error': f'{CORE_CTL} missing'}
+    cp = run([CORE_CTL] + [str(x) for x in args], check=False, timeout=timeout)
+    text = (cp.stdout or '').strip()
+    try:
+        d = json.loads(text)
+        if isinstance(d, dict):
+            return d
+    except Exception:
+        pass
+    return {'ok': cp.returncode == 0, 'output': text, 'code': cp.returncode}
+
+
+def rcon(sid: int, cmd: str):
+    r = core(['rcon', sid, cmd], 15)
+    return str(r.get('output') or r.get('error') or '')
+
+
+def service_active(sid: int):
+    return run(['systemctl', 'is-active', '--quiet', f'hyper-cs16@{sid}.service'], check=False, timeout=15).returncode == 0
+
+
+def udp_listening(port: int):
+    if port < 1:
+        return False
+    cp = run(['ss', '-lunH'], check=False, timeout=10)
+    return bool(re.search(rf'[:.]({int(port)})\s', (cp.stdout or '') + ' '))
+
+
+def wait_ready(sid: int, port: int, timeout=75):
+    end = time.time() + timeout
+    last = ''
+    while time.time() < end:
+        a = service_active(sid)
+        u = udp_listening(port)
+        if a and u:
+            return True, 'service active + UDP listening'
+        last = f'service={"active" if a else "down"}, udp={"yes" if u else "no"}'
+        time.sleep(1)
+    return False, last or 'timeout'
+
+
+def active_plugin_names(root: Path):
+    cfg = root / 'cstrike/addons/amxmodx/configs'
+    names = []
+    if not cfg.is_dir():
+        return names
+    files = []
+    p = cfg / 'plugins.ini'
+    if p.is_file():
+        files.append(p)
+    files.extend(sorted(x for x in cfg.glob('plugins-*.ini') if x.is_file() and not x.name.startswith('disabled-')))
+    seen = set()
+    for f in files:
+        for line in f.read_text(encoding='utf-8', errors='ignore').splitlines():
+            s = line.strip()
+            if not s or s.startswith(';'):
+                continue
+            left = s.split(';', 1)[0].strip()
+            if not left:
+                continue
+            token = left.split()[0]
+            if token.lower().endswith('.amxx') and token.lower() not in seen:
+                names.append(token)
+                seen.add(token.lower())
+    return names
+
+
+def configured_needs_reapi(root: Path):
+    if (root / 'cstrike/addons/amxmodx/modules/reapi_amxx_i386.so').is_file():
+        return True
+    modules = root / 'cstrike/addons/amxmodx/configs/modules.ini'
+    if modules.is_file():
+        for line in modules.read_text(encoding='utf-8', errors='ignore').splitlines():
+            s = line.strip()
+            if s and not s.startswith(';') and s.split(';', 1)[0].strip().lower().startswith('reapi'):
+                return True
+    pdir = root / 'cstrike/addons/amxmodx/plugins'
+    for name in active_plugin_names(root):
+        f = pdir / name
+        if not f.is_file():
+            continue
+        try:
+            data = f.read_bytes().lower()
+        except OSError:
+            continue
+        if b'registerhookchain' in data or b'reapi' in data or b'rg_' in data:
+            return True
+    return False
+
+
+def parse_running(text: str):
+    vals = re.findall(r'(\d+)\s+plugins?,\s*(\d+)\s+running', text or '', re.I)
+    if vals:
+        return int(vals[-1][0]), int(vals[-1][1])
+    return (0, 0)
+
+
+def health(sid: int):
+    c = load_server(sid)
+    root = Path(c['path'])
+    running = service_active(sid)
+    data = {
+        'service_active': running,
+        'udp_listening': udp_listening(int(c.get('port') or 0)),
+        'configured_plugins': len(active_plugin_names(root)),
+        'version': '',
+        'meta': '',
+        'amxx_version': '',
+        'amxx_plugins': '',
+        'amxx_modules': '',
+        'runtime_plugin_total': 0,
+        'runtime_plugin_running': 0,
+    }
+    if running:
+        data['version'] = rcon(sid, 'version')[-3000:]
+        data['meta'] = rcon(sid, 'meta list')[-6000:]
+        data['amxx_version'] = rcon(sid, 'amxx version')[-3000:]
+        data['amxx_plugins'] = rcon(sid, 'amxx plugins')[-16000:]
+        data['amxx_modules'] = rcon(sid, 'amxx modules')[-9000:]
+        t, rr = parse_running(data['amxx_plugins'])
+        data['runtime_plugin_total'] = t
+        data['runtime_plugin_running'] = rr
+    return data
+
+
+def health_errors(h: dict):
+    errors = []
+    if not h.get('service_active'):
+        errors.append('systemd service is not active')
+    if not h.get('udp_listening'):
+        errors.append('game UDP port is not listening')
+    for line in str(h.get('meta') or '').splitlines():
+        if re.search(r'\bFAIL\b|\bbadf\b|failed to load', line, re.I):
+            errors.append('Metamod: ' + line.strip())
+    for line in str(h.get('amxx_plugins') or '').splitlines():
+        if re.search(r'\bbad load\b|load error|failed to load', line, re.I):
+            errors.append('AMXX: ' + line.strip())
+    return errors[:30]
+
+
+def safe_extract_zip(arc: Path, dst: Path):
+    dst.mkdir(parents=True, exist_ok=True)
+    base = dst.resolve()
+    with zipfile.ZipFile(arc) as z:
+        for info in z.infolist():
+            target = (dst / info.filename).resolve()
+            if target != base and base not in target.parents:
+                raise RuntimeError('Unsafe ZIP path')
+        z.extractall(dst)
+
+
+def safe_extract_tar(arc: Path, dst: Path):
+    dst.mkdir(parents=True, exist_ok=True)
+    base = dst.resolve()
+    with tarfile.open(arc, 'r:*') as t:
+        members = t.getmembers()
+        for m in members:
+            target = (dst / m.name).resolve()
+            if target != base and base not in target.parents:
+                raise RuntimeError('Unsafe TAR path')
+            if m.isdev():
+                raise RuntimeError('Unsupported device in TAR')
+        # AMXX release tarballs do not need privileged metadata.
+        t.extractall(dst)
+
+
+def download(url: str, dst: Path, timeout=1200):
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    cp = run([
+        'curl', '-fL', '--retry', '4', '--retry-delay', '2',
+        '--connect-timeout', '25', '-A', 'HYPER-HOST-CS16-RuntimeManager/6.0',
+        '-o', dst, url,
+    ], check=False, timeout=timeout)
+    if cp.returncode != 0 or not dst.is_file() or dst.stat().st_size < 100:
+        raise RuntimeError(f'Download failed: {url}\n{(cp.stdout or "")[-4000:]}')
+
+
+def github_release_asset(repo: str, tag: str, dst: Path, prefer_terms=()):
+    api = f'https://api.github.com/repos/{repo}/releases/tags/{tag}'
+    req = urllib.request.Request(api, headers={'User-Agent': 'HYPER-HOST-CS16-RuntimeManager/6.0'})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            d = json.load(resp)
+    except Exception as exc:
+        raise RuntimeError(f'GitHub API failed for {repo} {tag}: {exc}')
+    assets = d.get('assets') or []
+    candidates = []
+    for a in assets:
+        name = str(a.get('name') or '')
+        url = str(a.get('browser_download_url') or '')
+        low = name.lower()
+        if not url or not low.endswith(('.zip', '.tar.gz', '.tgz', '.tar.xz')):
+            continue
+        score = 0
+        for term in prefer_terms:
+            if term.lower() in low:
+                score += 10
+        if 'linux' in low or 'bin' in low:
+            score += 3
+        if 'debug' in low or 'symbols' in low or 'source' in low:
+            score -= 20
+        candidates.append((score, name, url))
+    if not candidates:
+        raise RuntimeError(f'No release archive found for {repo} {tag}')
+    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    chosen = candidates[0]
+    download(chosen[2], dst)
+    return chosen[1]
+
+
+def extract_archive(arc: Path, dst: Path):
+    if zipfile.is_zipfile(arc):
+        safe_extract_zip(arc, dst)
+        return
+    try:
+        safe_extract_tar(arc, dst)
+        return
+    except tarfile.TarError:
+        pass
+    raise RuntimeError(f'Unknown archive format: {arc}')
+
+
+def ensure_line(path: Path, wanted: str, contains: str=''):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = path.read_text(encoding='utf-8', errors='ignore').splitlines() if path.exists() else []
+    key = (contains or wanted).lower()
+    active = False
+    out = []
+    for line in lines:
+        if key in line.lower():
+            if not active:
+                out.append(wanted)
+                active = True
+            else:
+                out.append('; HYPER-HOST duplicate disabled: ' + line.lstrip('; ').strip())
+        else:
+            out.append(line)
+    if not active:
+        out.append(wanted)
+    path.write_text('\n'.join(out).rstrip() + '\n', encoding='utf-8')
+
+
+def set_liblist_metamod(cstrike: Path):
+    p = cstrike / 'liblist.gam'
+    text = p.read_text(encoding='utf-8', errors='ignore') if p.exists() else ''
+    line = 'gamedll_linux "addons/metamod/dlls/metamod.so"'
+    rx = re.compile(r'(?im)^\s*gamedll_linux\s+.*$')
+    if rx.search(text):
+        text = rx.sub(line, text, count=1)
+    else:
+        text = text.rstrip() + ('\n' if text.strip() else '') + line + '\n'
+    p.write_text(text, encoding='utf-8')
+
+
+def server_size(path: Path):
+    cp = run(['du', '-sb', path], check=False, timeout=180)
+    try:
+        return int((cp.stdout or '').split()[0])
+    except Exception:
+        return 0
+
+
+def backup_server(sid: int, component: str, pre: dict):
+    c = load_server(sid)
+    root = Path(c['path'])
+    if not root.is_dir():
+        raise RuntimeError(f'Server directory missing: {root}')
+    size = server_size(root)
+    BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+    usage = shutil.disk_usage(BACKUP_ROOT)
+    reserve = 512 * 1024 * 1024
+    if size and usage.free < size + reserve:
+        raise RuntimeError(
+            f'Not enough disk space for full rollback backup: server={size//1048576} MiB, '
+            f'free={usage.free//1048576} MiB'
+        )
+    d = BACKUP_ROOT / str(sid) / (time.strftime('%Y%m%d-%H%M%S') + '-' + re.sub(r'[^a-z0-9_-]+', '-', component.lower()))
+    (d / 'server').mkdir(parents=True, exist_ok=True)
+    run(['rsync', '-aH', '--numeric-ids', str(root) + '/', str(d / 'server') + '/'], timeout=2400)
+    sp = state_path(sid)
+    shutil.copy2(sp, d / 'server-state.json')
+    mp = manifest_path(sid)
+    if mp.is_file():
+        shutil.copy2(mp, d / 'runtime-stack.json')
+    (d / 'meta.json').write_text(
+        json.dumps({'server_id': sid, 'component': component, 'created_at': int(time.time()), 'pre_health': pre}, ensure_ascii=False, indent=2) + '\n',
+        encoding='utf-8'
+    )
+    return d
+
+
+def list_backups(sid: int):
+    root = BACKUP_ROOT / str(sid)
+    if not root.is_dir():
+        return []
+    rows = []
+    for d in sorted((x for x in root.iterdir() if x.is_dir()), key=lambda x: x.name, reverse=True):
+        meta = read_json(d / 'meta.json', {})
+        rows.append({
+            'name': d.name,
+            'path': str(d),
+            'component': str(meta.get('component') or ''),
+            'created_at': int(meta.get('created_at') or 0),
+        })
+    return rows[:12]
+
+
+def prune_backups(sid: int, keep=6):
+    root = BACKUP_ROOT / str(sid)
+    if not root.is_dir():
+        return
+    items = sorted((x for x in root.iterdir() if x.is_dir()), key=lambda x: x.name, reverse=True)
+    for old in items[keep:]:
+        shutil.rmtree(old, ignore_errors=True)
+
+
+def restore_backup(sid: int, backup_name: str, desired_running=True):
+    require_root()
+    if not re.fullmatch(r'[A-Za-z0-9_.-]{3,160}', backup_name):
+        raise RuntimeError('Invalid backup name')
+    c = load_server(sid)
+    root = Path(c['path'])
+    b = (BACKUP_ROOT / str(sid) / backup_name).resolve()
+    allowed = (BACKUP_ROOT / str(sid)).resolve()
+    if b.parent != allowed or not (b / 'server').is_dir():
+        raise RuntimeError('Runtime backup not found')
+    run(['systemctl', 'stop', f'hyper-cs16@{sid}.service'], check=False, timeout=60)
+    root.mkdir(parents=True, exist_ok=True)
+    run(['rsync', '-aH', '--numeric-ids', '--delete', str(b / 'server') + '/', str(root) + '/'], timeout=2400)
+    if (b / 'server-state.json').is_file():
+        SERVER_STATE.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(b / 'server-state.json', SERVER_STATE / f'{sid}.json')
+    if (b / 'runtime-stack.json').is_file():
+        shutil.copy2(b / 'runtime-stack.json', manifest_path(sid))
+    else:
+        try:
+            manifest_path(sid).unlink()
+        except FileNotFoundError:
+            pass
+    run(['systemctl', 'daemon-reload'], check=False, timeout=30)
+    if desired_running:
+        run(['systemctl', 'start', f'hyper-cs16@{sid}.service'], check=False, timeout=60)
+        c2 = load_server(sid)
+        ok, detail = wait_ready(sid, int(c2.get('port') or 0), 75)
+        if not ok:
+            raise RuntimeError('Backup restored, but server did not become ready: ' + detail)
+    else:
+        run(['systemctl', 'stop', f'hyper-cs16@{sid}.service'], check=False, timeout=60)
+    try:
+        core(['fastdl-sync', sid], 1200)
+    except Exception:
+        pass
+    return {'ok': True, 'id': sid, 'rollback': backup_name, 'health': health(sid)}
+
+
+def refresh_official_hlds(root: Path):
+    rt = runtime_cfg()
+    steam = Path(str(rt.get('steamcmd') or '/opt/steamcmd/steamcmd.sh'))
+    if not steam.is_file():
+        raise RuntimeError(f'SteamCMD missing: {steam}')
+    cache = CACHE_ROOT / 'steam-legacy'
+    cache.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.chown(cache, user='cs16', group='cs16')
+    except Exception:
+        pass
+    cmd = [
+        'runuser', '-u', 'cs16', '--', steam,
+        '+force_install_dir', cache,
+        '+login', 'anonymous',
+        '+app_set_config', '90', 'mod', 'cstrike',
+        '+app_update', '90', '-beta', 'steam_legacy', 'validate',
+        '+quit',
+    ]
+    outputs = []
+    required = [cache/'hlds_run', cache/'hlds_linux', cache/'cstrike/dlls/cs.so', cache/'cstrike/maps/de_dust2.bsp']
+    for _ in range(3):
+        cp = run(cmd, check=False, timeout=1800)
+        outputs.append(cp.stdout or '')
+        if all(x.exists() for x in required):
+            break
+        time.sleep(2)
+    if not all(x.exists() for x in required):
+        missing = [str(x.relative_to(cache)) for x in required if not x.exists()]
+        raise RuntimeError('SteamCMD steam_legacy base incomplete: ' + ', '.join(missing) + '\n' + (outputs[-1] if outputs else '')[-4000:])
+    root.mkdir(parents=True, exist_ok=True)
+    # IMPORTANT: do not copy/delete cstrike, valve or czero. This is engine baseline only.
+    run([
+        'rsync', '-a',
+        '--exclude=cstrike/', '--exclude=valve/', '--exclude=czero/',
+        str(cache) + '/', str(root) + '/'
+    ], timeout=1200)
+    for x in (root/'hlds_run', root/'hlds_linux'):
+        if x.exists():
+            os.chmod(x, 0o755)
+    return {'steam_legacy_cache': str(cache)}
+
+
+def download_component(name: str, td: Path):
+    repo, tag, prefer = GITHUB_COMPONENTS[name]
+    arc = td / f'{name}.archive'
+    asset_name = github_release_asset(repo, tag, arc, prefer)
+    ex = td / 'ex'
+    extract_archive(arc, ex)
+    return ex, asset_name
+
+
+def find_file(root: Path, names):
+    wanted = {x.lower() for x in names}
+    for f in root.rglob('*'):
+        if f.is_file() and f.name.lower() in wanted:
+            return f
+    return None
+
+
+def install_rehlds(root: Path):
+    with tempfile.TemporaryDirectory(prefix='hh-runtime-rehlds-') as td0:
+        td = Path(td0)
+        ex, asset = download_component('rehlds', td)
+        copied = []
+        for name in ['engine_i486.so', 'hlds_linux', 'core.so', 'filesystem_stdio.so', 'demoplayer.so']:
+            f = find_file(ex, [name])
+            if f:
+                shutil.copy2(f, root/name)
+                copied.append(name)
+        if not (root/'hlds_linux').is_file() or 'engine_i486.so' not in copied:
+            raise RuntimeError(f'ReHLDS Linux engine payload not found in {asset}')
+        os.chmod(root/'hlds_linux', 0o755)
+        return {'asset': asset, 'copied': copied}
+
+
+def install_regamedll(root: Path):
+    with tempfile.TemporaryDirectory(prefix='hh-runtime-regame-') as td0:
+        td = Path(td0)
+        ex, asset = download_component('regamedll', td)
+        candidates = [x for x in ex.rglob('cs.so') if x.is_file()]
+        if not candidates:
+            raise RuntimeError(f'ReGameDLL cs.so not found in {asset}')
+        candidates.sort(key=lambda x: (0 if 'dlls' in [p.lower() for p in x.parts] else 1, len(x.parts)))
+        dst = root/'cstrike/dlls/cs.so'
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(candidates[0], dst)
+        return {'asset': asset, 'file': str(dst)}
+
+
+def install_metamod(root: Path):
+    with tempfile.TemporaryDirectory(prefix='hh-runtime-metamod-') as td0:
+        td = Path(td0)
+        ex, asset = download_component('metamod', td)
+        f = find_file(ex, ['metamod_i386.so', 'metamod.so'])
+        if not f:
+            raise RuntimeError(f'Metamod-R Linux binary not found in {asset}')
+        dst = root/'cstrike/addons/metamod/dlls/metamod.so'
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, dst)
+        set_liblist_metamod(root/'cstrike')
+        return {'asset': asset, 'file': str(dst)}
+
+
+def install_reapi(root: Path):
+    with tempfile.TemporaryDirectory(prefix='hh-runtime-reapi-') as td0:
+        td = Path(td0)
+        ex, asset = download_component('reapi', td)
+        f = find_file(ex, ['reapi_amxx_i386.so'])
+        if not f:
+            raise RuntimeError(f'ReAPI Linux module not found in {asset}')
+        dst = root/'cstrike/addons/amxmodx/modules/reapi_amxx_i386.so'
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, dst)
+        # Update only official ReAPI includes; custom scripts/configs remain untouched.
+        idst = root/'cstrike/addons/amxmodx/scripting/include'
+        idst.mkdir(parents=True, exist_ok=True)
+        for inc in ex.rglob('*.inc'):
+            if inc.name.lower().startswith('reapi'):
+                shutil.copy2(inc, idst/inc.name)
+        ensure_line(root/'cstrike/addons/amxmodx/configs/modules.ini', 'reapi', 'reapi')
+        return {'asset': asset, 'file': str(dst)}
+
+
+def install_amxx(root: Path, branch: str):
+    if branch not in {'1.9', '1.10'}:
+        raise RuntimeError('Invalid AMXX branch')
+    key = 'amxx19' if branch == '1.9' else 'amxx110'
+    with tempfile.TemporaryDirectory(prefix='hh-runtime-amxx-') as td0:
+        td = Path(td0)
+        stage = td/'stage'
+        stage.mkdir()
+        b = td/'base.tar.gz'
+        c = td/'cs.tar.gz'
+        download(AMXX_URLS[key + '_base'], b)
+        safe_extract_tar(b, stage)
+        download(AMXX_URLS[key + '_cs'], c)
+        safe_extract_tar(c, stage)
+        src = stage/'addons/amxmodx'
+        if not src.is_dir():
+            raise RuntimeError('AMX Mod X archive layout not recognized')
+        dst = root/'cstrike/addons/amxmodx'
+        dst.mkdir(parents=True, exist_ok=True)
+
+        # Runtime refresh only. Do NOT replace plugins/configs/data/lang/custom scripts.
+        for sub in ['dlls', 'modules']:
+            ss = src/sub
+            if ss.is_dir():
+                (dst/sub).mkdir(parents=True, exist_ok=True)
+                run(['rsync', '-a', str(ss)+'/', str(dst/sub)+'/'], timeout=300)
+
+        gd = src/'data/gamedata'
+        if gd.is_dir():
+            (dst/'data/gamedata').mkdir(parents=True, exist_ok=True)
+            run(['rsync', '-a', str(gd)+'/', str(dst/'data/gamedata')+'/'], timeout=300)
+
+        inc = src/'scripting/include'
+        if inc.is_dir():
+            (dst/'scripting/include').mkdir(parents=True, exist_ok=True)
+            run(['rsync', '-a', str(inc)+'/', str(dst/'scripting/include')+'/'], timeout=300)
+
+        ensure_line(
+            root/'cstrike/addons/metamod/plugins.ini',
+            'linux addons/amxmodx/dlls/amxmodx_mm_i386.so',
+            'addons/amxmodx/dlls/amxmodx_mm_i386.so'
+        )
+        if not (dst/'dlls/amxmodx_mm_i386.so').is_file():
+            raise RuntimeError('AMXX loader was not installed')
+        return {'branch': branch, 'target': TARGETS[key]}
+
+
+def install_reunion(root: Path):
+    with tempfile.TemporaryDirectory(prefix='hh-runtime-reunion-') as td0:
+        td = Path(td0)
+        ex, asset = download_component('reunion', td)
+        f = find_file(ex, ['reunion_mm_i386.so'])
+        if not f:
+            raise RuntimeError(f'ReUnion Linux binary not found in {asset}')
+        dst = root/'cstrike/addons/reunion'
+        dst.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, dst/'reunion_mm_i386.so')
+
+        new_cfg = find_file(ex, ['reunion.cfg'])
+        active_cfg = root/'cstrike/reunion.cfg'
+        alt_cfg = dst/'reunion.cfg'
+        existing = active_cfg if active_cfg.is_file() else (alt_cfg if alt_cfg.is_file() else None)
+        if new_cfg:
+            if existing:
+                shutil.copy2(new_cfg, existing.with_name(existing.name + '.v' + TARGETS['reunion'] + '.example'))
+            else:
+                shutil.copy2(new_cfg, active_cfg)
+
+        ensure_line(
+            root/'cstrike/addons/metamod/plugins.ini',
+            'linux addons/reunion/reunion_mm_i386.so',
+            'addons/reunion/reunion_mm_i386.so'
+        )
+        return {'asset': asset, 'file': str(dst/'reunion_mm_i386.so')}
+
+
+def install_yapb(root: Path):
+    live = root/'cstrike/addons/yapb'
+    with tempfile.TemporaryDirectory(prefix='hh-runtime-yapb-') as td0:
+        td = Path(td0)
+        arc = td/'yapb.archive'
+        # Use the same upstream endpoint already used by many CS 1.6 panels.
+        download('https://yapb.jeefo.net/latest', arc)
+        ex = td/'ex'
+        extract_archive(arc, ex)
+        candidates = [x for x in ex.rglob('yapb') if x.is_dir() and x.parent.name == 'addons']
+        if not candidates:
+            # Fallback for archives whose root itself is addons/yapb content.
+            binaries = [x for x in ex.rglob('yapb.so') if x.is_file()]
+            if not binaries:
+                raise RuntimeError('YaPB package does not contain addons/yapb or yapb.so')
+            src = binaries[0].parent.parent if binaries[0].parent.name == 'bin' else binaries[0].parent
+        else:
+            src = candidates[0]
+        live.mkdir(parents=True, exist_ok=True)
+        # Preserve existing behavior/settings.
+        run(['rsync', '-a', '--exclude=conf/', str(src)+'/', str(live)+'/'], timeout=300)
+        if not (live/'conf').exists() and (src/'conf').is_dir():
+            shutil.copytree(src/'conf', live/'conf')
+        ensure_line(
+            root/'cstrike/addons/metamod/plugins.ini',
+            'linux addons/yapb/bin/yapb.so',
+            'addons/yapb/bin/yapb.so'
+        )
+        return {'file': str(live)}
+
+
+def update_profile_rehlds(c: dict):
+    c['profile'] = 'rehlds'
+    save_server(c)
+    rt = runtime_cfg()
+    try:
+        import pymysql
+        con = pymysql.connect(
+            host=str(rt.get('db_host') or '127.0.0.1'),
+            port=int(rt.get('db_port') or 3306),
+            user=str(rt.get('db_user') or ''),
+            password=str(rt.get('db_password') or ''),
+            database=str(rt.get('db_name') or 'hyper_cs16'),
+            charset='utf8mb4',
+            autocommit=True,
+            connect_timeout=5,
+        )
+        with con.cursor() as cur:
+            cur.execute('UPDATE servers SET build_profile=%s WHERE id=%s', ('rehlds', int(c['id'])))
+        con.close()
+    except Exception:
+        pass
+
+
+def mark_manifest(sid: int, **changes):
+    m = load_manifest(sid)
+    m.setdefault('components', {})
+    comps = m['components']
+    for k, v in changes.items():
+        comps[k] = v
+    save_manifest(sid, m)
+
+
+def current_amxx_branch(h: dict, m: dict):
+    text = str(h.get('amxx_version') or '')
+    if '1.10' in text:
+        return '1.10'
+    comp = (m.get('components') or {}).get('amxx', '') if isinstance(m.get('components'), dict) else ''
+    if '1.10' in str(comp):
+        return '1.10'
+    return '1.9'
+
+
+def apply_component(sid: int, component: str, root: Path, pre: dict):
+    actions = []
+    manifest_changes = {}
+
+    if component in {'recommended', 'all'}:
+        actions.append('SteamCMD steam_legacy engine baseline')
+        refresh_official_hlds(root)
+        actions.append('ReHLDS ' + TARGETS['rehlds'])
+        install_rehlds(root)
+        manifest_changes['rehlds'] = TARGETS['rehlds']
+        actions.append('ReGameDLL ' + TARGETS['regamedll'])
+        install_regamedll(root)
+        manifest_changes['regamedll'] = TARGETS['regamedll']
+        actions.append('Metamod-R ' + TARGETS['metamod'])
+        install_metamod(root)
+        manifest_changes['metamod'] = TARGETS['metamod']
+
+        if configured_needs_reapi(root):
+            actions.append('ReAPI ' + TARGETS['reapi'])
+            install_reapi(root)
+            manifest_changes['reapi'] = TARGETS['reapi']
+
+        if not (root/'cstrike/addons/amxmodx/dlls/amxmodx_mm_i386.so').is_file():
+            actions.append('AMX Mod X 1.9 compatibility runtime (missing loader)')
+            install_amxx(root, '1.9')
+            manifest_changes['amxx'] = TARGETS['amxx19']
+
+        if component == 'all':
+            if (root/'cstrike/addons/reunion/reunion_mm_i386.so').is_file():
+                actions.append('ReUnion ' + TARGETS['reunion'] + ' (existing installation)')
+                install_reunion(root)
+                manifest_changes['reunion'] = TARGETS['reunion']
+            if (root/'cstrike/addons/yapb').is_dir():
+                actions.append('YaPB latest; current conf preserved')
+                install_yapb(root)
+                manifest_changes['yapb'] = 'latest'
+            if (root/'cstrike/addons/amxmodx/dlls/amxmodx_mm_i386.so').is_file():
+                branch = current_amxx_branch(pre, load_manifest(sid))
+                actions.append('AMX Mod X ' + branch + ' runtime refresh; configs/plugins preserved')
+                install_amxx(root, branch)
+                manifest_changes['amxx'] = TARGETS['amxx110' if branch == '1.10' else 'amxx19']
+
+        update_profile_rehlds(load_server(sid))
+        return actions, manifest_changes
+
+    if component == 'hlds':
+        actions.append('SteamCMD steam_legacy engine baseline')
+        refresh_official_hlds(root)
+        c = load_server(sid)
+        if str(c.get('profile') or '') == 'rehlds' or (load_manifest(sid).get('components') or {}).get('rehlds'):
+            actions.append('ReHLDS reapplied after Steam baseline')
+            install_rehlds(root)
+            install_regamedll(root)
+            manifest_changes['rehlds'] = TARGETS['rehlds']
+            manifest_changes['regamedll'] = TARGETS['regamedll']
+    elif component == 'rehlds':
+        actions.append('SteamCMD steam_legacy engine baseline')
+        refresh_official_hlds(root)
+        actions.append('ReHLDS ' + TARGETS['rehlds'])
+        install_rehlds(root)
+        actions.append('ReGameDLL ' + TARGETS['regamedll'])
+        install_regamedll(root)
+        manifest_changes['rehlds'] = TARGETS['rehlds']
+        manifest_changes['regamedll'] = TARGETS['regamedll']
+        update_profile_rehlds(load_server(sid))
+    elif component == 'regamedll':
+        actions.append('ReGameDLL ' + TARGETS['regamedll'])
+        install_regamedll(root)
+        manifest_changes['regamedll'] = TARGETS['regamedll']
+    elif component == 'metamod':
+        actions.append('Metamod-R ' + TARGETS['metamod'])
+        install_metamod(root)
+        manifest_changes['metamod'] = TARGETS['metamod']
+    elif component == 'reapi':
+        actions.append('ReAPI ' + TARGETS['reapi'])
+        install_reapi(root)
+        manifest_changes['reapi'] = TARGETS['reapi']
+    elif component == 'amxx19':
+        actions.append('AMX Mod X ' + TARGETS['amxx19'])
+        install_amxx(root, '1.9')
+        manifest_changes['amxx'] = TARGETS['amxx19']
+    elif component == 'amxx110':
+        actions.append('AMX Mod X ' + TARGETS['amxx110'])
+        install_amxx(root, '1.10')
+        manifest_changes['amxx'] = TARGETS['amxx110']
+    elif component == 'reunion':
+        if 'rehlds' not in str(pre.get('version') or '').lower() and not (load_manifest(sid).get('components') or {}).get('rehlds'):
+            actions.append('SteamCMD + ReHLDS prerequisite for ReUnion')
+            refresh_official_hlds(root)
+            install_rehlds(root)
+            install_regamedll(root)
+            install_metamod(root)
+            manifest_changes.update({
+                'rehlds': TARGETS['rehlds'],
+                'regamedll': TARGETS['regamedll'],
+                'metamod': TARGETS['metamod'],
+            })
+            update_profile_rehlds(load_server(sid))
+        actions.append('ReUnion ' + TARGETS['reunion'] + '; active reunion.cfg preserved')
+        install_reunion(root)
+        manifest_changes['reunion'] = TARGETS['reunion']
+    elif component == 'yapb':
+        actions.append('YaPB latest; conf preserved')
+        install_yapb(root)
+        manifest_changes['yapb'] = 'latest'
+    else:
+        raise RuntimeError('Unknown runtime component')
+
+    return actions, manifest_changes
+
+
+def perform_update(sid: int, component: str):
+    require_root()
+    allowed = {'recommended','all','hlds','rehlds','regamedll','metamod','reapi','amxx19','amxx110','reunion','yapb'}
+    if component not in allowed:
+        raise RuntimeError('Unknown component')
+    c = load_server(sid)
+    root = Path(c['path'])
+    if not root.is_dir():
+        raise RuntimeError(f'Server directory missing: {root}')
+
+    pre = health(sid)
+    was_active = bool(pre.get('service_active'))
+    fastdl_timer_active = run(['systemctl','is-active','--quiet','hyper-cs16-fastdl-sync.timer'], check=False, timeout=15).returncode == 0
+    run(['systemctl','stop','hyper-cs16-fastdl-sync.timer'], check=False, timeout=30)
+    run(['systemctl','stop','hyper-cs16-fastdl-sync.service'], check=False, timeout=60)
+    try:
+        backup = backup_server(sid, component, pre)
+    except Exception:
+        if fastdl_timer_active:
+            run(['systemctl','start','hyper-cs16-fastdl-sync.timer'], check=False, timeout=30)
+        raise
+    result = {
+        'ok': False,
+        'id': sid,
+        'component': component,
+        'backup': backup.name,
+        'backup_path': str(backup),
+        'actions': [],
+        'rolled_back': False,
+    }
+
+    try:
+        run(['systemctl', 'stop', f'hyper-cs16@{sid}.service'], check=False, timeout=60)
+        actions, changes = apply_component(sid, component, root, pre)
+        result['actions'] = actions
+
+        for x in [root/'hlds_run', root/'hlds_linux']:
+            if x.is_file():
+                os.chmod(x, 0o755)
+        # Only runtime-owned directories get normalized ownership.
+        for d in [
+            root/'cstrike/addons/metamod',
+            root/'cstrike/addons/amxmodx/dlls',
+            root/'cstrike/addons/amxmodx/modules',
+            root/'cstrike/addons/reunion',
+            root/'cstrike/addons/yapb/bin',
+        ]:
+            if d.exists():
+                run(['chown', '-R', 'cs16:www-data', d], check=False, timeout=120)
+
+        run(['systemctl', 'daemon-reload'], check=False, timeout=30)
+        run(['systemctl', 'start', f'hyper-cs16@{sid}.service'], check=False, timeout=60)
+        c = load_server(sid)
+        ok, detail = wait_ready(sid, int(c.get('port') or 0), 90)
+        if not ok:
+            raise RuntimeError('Server failed health check after update: ' + detail)
+
+        post = health(sid)
+        errs = health_errors(post)
+        if component in {'recommended','all','rehlds','reunion'} and 'rehlds' not in str(post.get('version') or '').lower():
+            errs.append('RCON version does not report ReHLDS after migration')
+        pre_running = int(pre.get('runtime_plugin_running') or 0)
+        post_running = int(post.get('runtime_plugin_running') or 0)
+        if pre_running > 0 and post_running < pre_running:
+            errs.append(f'AMXX running plugins decreased: {pre_running} -> {post_running}')
+        if errs:
+            raise RuntimeError('Runtime validation failed: ' + ' | '.join(errs[:12]))
+
+        if changes:
+            mark_manifest(sid, **changes)
+
+        fd = core(['fastdl-sync', sid], 1200)
+        result.update({
+            'ok': True,
+            'post_health': post,
+            'fastdl': fd,
+            'targets': TARGETS,
+            'manifest': load_manifest(sid),
+        })
+        prune_backups(sid, 6)
+        if not was_active:
+            run(['systemctl', 'stop', f'hyper-cs16@{sid}.service'], check=False, timeout=60)
+        return result
+    except Exception as exc:
+        result['error'] = str(exc)
+        try:
+            restore_backup(sid, backup.name, desired_running=was_active)
+            result['rolled_back'] = True
+            result['rollback_health'] = health(sid)
+        except Exception as rex:
+            result['rollback_error'] = str(rex)
+        return result
+    finally:
+        if fastdl_timer_active:
+            run(['systemctl','start','hyper-cs16-fastdl-sync.timer'], check=False, timeout=30)
+
+
+def status(sid: int):
+    c = load_server(sid)
+    root = Path(c['path'])
+    m = load_manifest(sid)
+    h = health(sid)
+    comps = m.get('components') if isinstance(m.get('components'), dict) else {}
+    version_text = str(h.get('version') or '')
+    legacy_4419 = '4419' in version_text and 'BUILD' in version_text.upper()
+    return {
+        'ok': True,
+        'id': sid,
+        'profile': str(c.get('profile') or 'classic'),
+        'legacy_4419': legacy_4419,
+        'targets': TARGETS,
+        'installed': {
+            'rehlds': str(comps.get('rehlds') or ('detected' if 'rehlds' in version_text.lower() else '')),
+            'regamedll': str(comps.get('regamedll') or ''),
+            'metamod': str(comps.get('metamod') or ''),
+            'reapi': str(comps.get('reapi') or ('detected' if (root/'cstrike/addons/amxmodx/modules/reapi_amxx_i386.so').is_file() else '')),
+            'amxx': str(comps.get('amxx') or ('detected' if (root/'cstrike/addons/amxmodx/dlls/amxmodx_mm_i386.so').is_file() else '')),
+            'reunion': str(comps.get('reunion') or ('detected' if (root/'cstrike/addons/reunion/reunion_mm_i386.so').is_file() else '')),
+            'yapb': str(comps.get('yapb') or ('detected' if (root/'cstrike/addons/yapb').is_dir() else '')),
+        },
+        'needs_reapi': configured_needs_reapi(root),
+        'custom_game_mod_preserved': True,
+        'configured_plugins': len(active_plugin_names(root)),
+        'health': h,
+        'backups': list_backups(sid),
+        'manifest': m,
+    }
+
+
+def main():
+    p = argparse.ArgumentParser(prog='hyper-cs16-runtime-ctl')
+    sp = p.add_subparsers(dest='cmd', required=True)
+    q = sp.add_parser('status'); q.add_argument('id', type=int)
+    q = sp.add_parser('update'); q.add_argument('id', type=int); q.add_argument('component', choices=['recommended','all','hlds','rehlds','regamedll','metamod','reapi','amxx19','amxx110','reunion','yapb'])
+    q = sp.add_parser('rollback'); q.add_argument('id', type=int); q.add_argument('backup')
+    q = sp.add_parser('backups'); q.add_argument('id', type=int)
+    args = p.parse_args()
+    try:
+        if args.cmd == 'status':
+            r = status(args.id)
+        elif args.cmd == 'update':
+            r = perform_update(args.id, args.component)
+        elif args.cmd == 'rollback':
+            # Explicit rollback returns to the backup's recorded running state when known.
+            b = BACKUP_ROOT / str(args.id) / args.backup / 'meta.json'
+            meta = read_json(b, {})
+            pre = meta.get('pre_health') if isinstance(meta.get('pre_health'), dict) else {}
+            desired = bool(pre.get('service_active', True))
+            r = restore_backup(args.id, args.backup, desired_running=desired)
+        elif args.cmd == 'backups':
+            r = {'ok': True, 'id': args.id, 'backups': list_backups(args.id)}
+        else:
+            raise RuntimeError('Unknown command')
+        emit(r, 0 if r.get('ok', True) else 1)
+    except Exception as exc:
+        emit({'ok': False, 'error': str(exc)}, 1)
+
+
+if __name__ == '__main__':
+    main()
