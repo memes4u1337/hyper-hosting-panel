@@ -1,0 +1,16 @@
+# HYPER_FASTDL_V8_OVERRIDE
+def _hh_fastdl_v8_call(action:str,sid:int):
+    helper='/usr/local/libexec/hyper-cs16-fastdl-v8'
+    cp=subprocess.run([helper,action,str(int(sid))],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,check=False,timeout=1800)
+    raw=(cp.stdout or '').strip()
+    try: data=json.loads(raw.splitlines()[-1] if raw else '{}')
+    except Exception: raise RuntimeError('FastDL v8 helper returned invalid output: '+raw[-2500:])
+    if cp.returncode!=0 or not data.get('ok'): raise RuntimeError(str(data.get('error') or raw or 'FastDL v8 helper failed'))
+    return data
+
+def _fastdl_url(c:dict)->str:
+    return f'http://old-zombie.ru/fastdl/{int(c.get("id") or 0)}'
+
+def fastdl_sync(sid:int, configure:bool=True): return _hh_fastdl_v8_call('sync',sid)
+def fastdl_status(sid:int): return _hh_fastdl_v8_call('status',sid)
+def fastdl_rebuild(sid:int): return _hh_fastdl_v8_call('rebuild',sid)
