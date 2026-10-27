@@ -14,7 +14,7 @@ EXE="$ROOT/game/game/bin/win64/cs2.exe"
 [[ -f "$EXE" ]] || { echo "[ERROR] $EXE не найден — setup не завершился или путь Valve изменился"; exit 1; }
 
 RUNLOG="$ROOT/connect-test-$(date +%Y%m%d-%H%M%S).log"
-export WINEPREFIX="$ROOT/wineprefix" DISPLAY=:97
+export WINEPREFIX="$ROOT/wineprefix" DISPLAY=:97 PATH="$ROOT/wine/bin:$PATH"
 
 echo "=== Статус сервера ДО захода (сверь с тем, что будет после) ==="
 echo "Запусти вручную на сервере: hyper-cs2-ctl status <id_сервера>" | tee -a "$RUNLOG"

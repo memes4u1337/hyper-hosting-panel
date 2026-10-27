@@ -21,24 +21,30 @@ echo "=== $(date -Is) setup-headless-client.sh start ==="
 
 log(){ printf '\n[SETUP] %s\n' "$*"; }
 
-log "Ставим Wine (WineHQ stable) + Xvfb + зависимости"
-dpkg --add-architecture i386 2>/dev/null || true
+log "Портативный Wine (без apt-get install winehq-stable — на сервере конфликт"
+log "libgd3:i386 из PPA ondrej/php с версией, нужной winehq-stable; трогать эту"
+log "библиотеку нельзя — на ней держится PHP/GD в твоей панели). Ставим только"
+log "рантайм-зависимости из обычных репозиториев, сам Wine — готовым тарболом."
 apt-get update -qq
-apt-get install -y -qq wget gpg ca-certificates software-properties-common >/dev/null
+apt-get install -y -qq wget ca-certificates xvfb x11-utils mesa-vulkan-drivers mesa-utils libvulkan1 cabextract xz-utils >/dev/null
 
-if ! command -v wine >/dev/null 2>&1; then
-  mkdir -pm755 /etc/apt/keyrings
-  wget -qO- https://dl.winehq.org/wine-builds/winehq.key | gpg --dearmor -o /etc/apt/keyrings/winehq-archive.key
-  CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
-  wget -NP /etc/apt/sources.list.d/ "https://dl.winehq.org/wine-builds/ubuntu/dists/${CODENAME}/winehq-${CODENAME}.sources" \
-    || log "[WARN] не нашёл winehq-репозиторий под кодовое имя ${CODENAME} — поставь Wine вручную и перезапусти скрипт"
-  apt-get update -qq
-  apt-get install -y -qq --install-recommends winehq-stable >/dev/null
+WINE_DIR="$ROOT/wine"
+if [[ ! -x "$WINE_DIR/bin/wine" ]]; then
+  log "Качаем портативную сборку Wine (Kron4ek/Wine-Builds 11.14, чистый amd64 —"
+  log "CS2 сам по себе 64-битный, 32-битный Wine/i386 ему не нужен, без apt)"
+  mkdir -p "$WINE_DIR"
+  WINE_TARBALL_URL="https://github.com/Kron4ek/Wine-Builds/releases/download/11.14/wine-11.14-amd64.tar.xz"
+  WINE_TARBALL_SHA256="0c1082b9c1b2ab0a85645ed3c83191dd60b557b28169733546d81fe599ad88b3"
+  curl -fLSs --retry 4 "$WINE_TARBALL_URL" -o "$ROOT/wine.tar.xz" \
+    || { echo "[ERROR] не скачалось — проверь актуальную ссылку на https://github.com/Kron4ek/Wine-Builds/releases и поправь WINE_TARBALL_URL в этом скрипте"; exit 1; }
+  echo "${WINE_TARBALL_SHA256}  $ROOT/wine.tar.xz" | sha256sum -c - \
+    || { echo "[ERROR] сумма не сошлась — файл скачался битым или URL/хэш устарели, не распаковываю"; exit 1; }
+  tar -xJf "$ROOT/wine.tar.xz" -C "$WINE_DIR" --strip-components=1
+  rm -f "$ROOT/wine.tar.xz"
 fi
-wine --version || { echo "[ERROR] Wine не установился — смотри вывод выше"; exit 1; }
-
-apt-get install -y -qq xvfb x11-utils mesa-vulkan-drivers mesa-utils libvulkan1 winbind cabextract >/dev/null
-log "Xvfb + Mesa (программный Vulkan/OpenGL — без GPU будет МЕДЛЕННО, это ожидаемо для теста)"
+export PATH="$WINE_DIR/bin:$PATH"
+wine --version || { echo "[ERROR] портативный Wine не запустился — скорее всего не хватает системной библиотеки, смотри вывод ошибки выше"; exit 1; }
+log "✓ Wine готов (портативный, apt/системные пакеты не трогали)"
 
 if ! command -v winetricks >/dev/null 2>&1; then
   wget -q https://raw.githubusercontent.com/Winetricks/winetricks/master/src/winetricks -O /usr/local/bin/winetricks
