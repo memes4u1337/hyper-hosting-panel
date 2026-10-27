@@ -53,7 +53,18 @@ fi
 
 log "Готовим изолированный WINEPREFIX с нуля: $WINEPREFIX"
 export WINEPREFIX WINEARCH=win64 DISPLAY=:97
+# Без окна/оконного менеджера popup про отсутствующий Gecko/Mono вешает wineboot
+# навечно — некому его закрыть. Отключаем эти компоненты явно, без них Wine
+# не предлагает ставить (нам для запуска cs2.exe они всё равно не нужны).
+export WINEDLLOVERRIDES="mscoree,mshtml="
+log "Чистим зависшие процессы от предыдущих попыток (если были)"
+wineserver -k 2>/dev/null || true
+sleep 1
+pkill -9 -f "rundll32.exe" 2>/dev/null || true
+pkill -9 -f "wineboot" 2>/dev/null || true
+pkill -9 -f "wineserver" 2>/dev/null || true
 pkill -f "Xvfb :97" 2>/dev/null || true
+sleep 1
 rm -rf "$WINEPREFIX"
 mkdir -p "$WINEPREFIX"
 Xvfb :97 -screen 0 1024x768x24 &
