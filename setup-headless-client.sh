@@ -51,15 +51,20 @@ if ! command -v winetricks >/dev/null 2>&1; then
   chmod +x /usr/local/bin/winetricks
 fi
 
-log "Готовим изолированный WINEPREFIX: $WINEPREFIX"
-mkdir -p "$WINEPREFIX"
+log "Готовим изолированный WINEPREFIX с нуля: $WINEPREFIX"
 export WINEPREFIX WINEARCH=win64 DISPLAY=:97
 pkill -f "Xvfb :97" 2>/dev/null || true
+rm -rf "$WINEPREFIX"
+mkdir -p "$WINEPREFIX"
 Xvfb :97 -screen 0 1024x768x24 &
 XVFB_PID=$!
 sleep 2
 wineboot --init
+wineserver --wait
+log "wineboot реально завершился (wineserver --wait дождался), префикс готов"
 winetricks -q corefonts vcrun2019 || log "[WARN] winetricks частично не отработал — может быть не критично, смотри по логу ниже"
+wineserver --wait
+wineserver -k 2>/dev/null || true
 kill "$XVFB_PID" 2>/dev/null || true
 
 log "Ставим steamcmd (отдельно от твоего dedicated-сервера, НЕ трогаем /opt/hyper-cs2)"
